@@ -1,0 +1,7 @@
+/target
+*.log
+*.dmb
+*.dyn.rsc
+*.rsc
+*.int
+.env
