@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    info!("Starting DreamMaker MCP Server");
+    info!("Starting Meridian-MCP DreamMaker server");
 
     // Run the MCP server
     mcp::run_server().await
