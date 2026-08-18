@@ -12,7 +12,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 - **Go to Definition** - Find where any type, proc, or variable is defined
 
 ### Compilation & Runtime
-- **Compile** - Build projects with the DM compiler, structured diagnostics, defines, working-directory control, and a timeout
+- **Compile** - Build projects with the DM compiler, structured diagnostics, defines, working-directory control, and a timeout. Relative DME paths resolve from the requested working directory, matching `dm_run`; parsed compiler errors fail the tool even when DreamMaker exits with code 0.
 - **Run/Stop** - Control DreamDaemon instances while continuously capturing stdout/stderr and exit codes
 - **Runtime Readiness** - Wait for literal or regular-expression output markers instead of guessing with fixed sleeps
 - **Topic Calls** - Send `Topic()` messages to running servers
@@ -91,11 +91,11 @@ Add to `~/.continue/config.json`:
 | `dm_search_symbols` | Search for types, procs, or vars by pattern |
 | `dm_check_errors` | Run type checker, get diagnostics |
 | `dm_get_definition` | Find source location of any symbol |
-| `dm_compile` | Compile the project with optional compiler path, working directory, defines, timeout, and structured diagnostics |
+| `dm_compile` | Compile the project with optional compiler path, working directory, defines, bounded timeout/watchdog, and structured diagnostics |
 | `dm_render_map` | Render a map to PNG |
 | `dm_map_info` | Get map dimensions and statistics |
 | `dm_find_on_map` | Find instances of a type on a map |
-| `dm_run` | Start DreamDaemon with a `.dmb` file |
+| `dm_run` | Start DreamDaemon with a `.dmb` file, optional working directory, and extra daemon arguments |
 | `dm_wait_for_output` | Wait for a literal or regex marker in DreamDaemon output |
 | `dm_stop` | Stop the running game |
 | `dm_status` | Get game server status |

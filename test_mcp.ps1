@@ -4,6 +4,8 @@ param(
     [string]$Configuration = "release",
     [string]$BinaryPath,
     [string]$DmePath,
+    [string]$CompileDmePath,
+    [switch]$ExpectCompileFailure,
     [string]$TypePath,
     [string]$ProcName,
     [ValidateRange(1, 3600)]
@@ -179,6 +181,22 @@ if ($DmePath) {
     })
 }
 
+if ($CompileDmePath) {
+    if (-not (Test-Path -LiteralPath $CompileDmePath -PathType Leaf)) {
+        throw "Compile DME file not found: $CompileDmePath"
+    }
+
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 8
+        method = "tools/call"
+        params = [ordered]@{
+            name = "dm_compile"
+            arguments = [ordered]@{ dme_path = (Resolve-Path -LiteralPath $CompileDmePath).Path }
+        }
+    })
+}
+
 if ($TypePath) {
     if (-not $DmePath) {
         throw '-TypePath requires -DmePath'
@@ -242,9 +260,16 @@ foreach ($requiredTool in $requiredTools) {
 }
 $compileTool = @($tools | Where-Object { $_.name -eq "dm_compile" })
 $compileProperties = @($compileTool[0].inputSchema.properties.PSObject.Properties.Name)
-foreach ($compileProperty in @("compiler_path", "working_directory", "defines", "timeout_ms")) {
+foreach ($compileProperty in @("compiler_path", "working_directory", "defines", "timeout_ms", "idle_timeout_ms")) {
     if ($compileProperties -notcontains $compileProperty) {
         throw "dm_compile schema is missing implemented property: $compileProperty"
+    }
+}
+$runTool = @($tools | Where-Object { $_.name -eq "dm_run" })
+$runProperties = @($runTool[0].inputSchema.properties.PSObject.Properties.Name)
+foreach ($runProperty in @("working_directory", "daemon_args", "wait_for", "startup_timeout_ms")) {
+    if ($runProperties -notcontains $runProperty) {
+        throw "dm_run schema is missing implemented property: $runProperty"
     }
 }
 
@@ -280,6 +305,25 @@ if ($ProcName) {
     }
 }
 
+if ($CompileDmePath) {
+    $compileResponse = Assert-Response -Responses $session.Responses -Id 8
+    $compileFailed = $compileResponse.result.isError -eq $true
+    if ($ExpectCompileFailure -and -not $compileFailed) {
+        throw "dm_compile accepted a compile that was expected to contain errors"
+    }
+    if ($ExpectCompileFailure) {
+        $compilePayload = $compileResponse.result.content[0].text | ConvertFrom-Json
+        $hasStructuredDiagnostics = @($compilePayload.errors).Count -gt 0
+        $hasBoundedWatchdogFailure = $compilePayload.idle -eq $true -or $compilePayload.timed_out -eq $true
+        if (-not $hasStructuredDiagnostics -and -not $hasBoundedWatchdogFailure) {
+            throw "dm_compile failed without structured diagnostics or a bounded watchdog classification"
+        }
+    }
+    if (-not $ExpectCompileFailure -and $compileFailed) {
+        throw "dm_compile returned an MCP tool error: $($compileResponse.result.content[0].text)"
+    }
+}
+
 Write-Output ("MCP smoke test passed: protocol 2024-11-05, {0} tools, exit code {1}" -f $tools.Count, $sessionExitCode)
 if ($DmePath) {
     Write-Output "DME parse smoke test passed: $DmePath"
@@ -289,4 +333,9 @@ if ($TypePath) {
 }
 if ($ProcName) {
     Write-Output "Proc/source smoke test passed: $TypePath/$ProcName"
+}
+
+if ($CompileDmePath) {
+    $compileResult = if ($ExpectCompileFailure) { "expected compile rejection" } else { "clean" }
+    Write-Output "Compile smoke test passed: $CompileDmePath ($compileResult)"
 }

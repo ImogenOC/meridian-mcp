@@ -20,6 +20,12 @@ build is the binary used by the protocol smoke tests.
 ```powershell
 pwsh -NoProfile -File .\test_mcp.ps1
 pwsh -NoProfile -File .\test_mcp.ps1 -SkipBuild
+
+# Assert that a DME rejected by DreamMaker is not reported as success. The assertion accepts either
+# structured compiler diagnostics or an explicit bounded idle/timeout classification.
+pwsh -NoProfile -File .\test_mcp.ps1 -SkipBuild `
+    -BinaryPath .\target\release\meridian-mcp.exe `
+    -CompileDmePath ..\path\to\project.dme -ExpectCompileFailure -TimeoutSeconds 300
 ```
 
 The PowerShell smoke test starts a fresh stdio session, drains both output streams before sending
@@ -56,21 +62,30 @@ and uses the PowerShell assertions, avoiding a second implementation of the prot
 ## Runtime diagnostics
 
 `dm_run` continuously drains DreamDaemon stdout and stderr into a bounded 500-line ring buffer.
+It accepts optional `working_directory` and `daemon_args` values, so a relative test DMB can be
+run from its game checkout with arguments such as `-close`, `-params`, and `log-directory=ci`.
+The daemon is started from the DMB's parent directory, preventing the MCP installation directory
+from becoming the game's implicit working directory.
+On Windows, the spawn path is converted back from Rust's `\\?\` canonical form before it is passed
+to DreamDaemon; DreamDaemon can remain alive but idle when given the verbatim path directly.
 The drain reads fixed 8 KiB chunks, truncates any retained line beyond 16 KiB with a
 `... [truncated]` suffix, and evicts old lines when retained line bytes exceed 1 MiB. Use `wait_for`
 plus `startup_timeout_ms` when starting a server, or call `dm_wait_for_output` with a literal marker
 or regular expression afterward. Output remains searchable after the process exits, which makes
 post-crash markers and exit codes available through `dm_status` and the wait result.
+If a requested `wait_for` marker is not observed, `dm_run` returns an MCP error and stops the child;
+it does not report a successful start with an unverified readiness result.
 
-## Meridian/Dogmos integration checks
+`dm_compile` treats parsed compiler errors as failure even when DreamMaker exits with code 0. BYOND
+can save a DMB after reporting resource-cache errors, but that artifact is not a valid boot result.
+It also samples DreamMaker CPU time on Windows while draining both output streams. A process that is
+silent but CPU-active is allowed to finish; a process with no output and no CPU progress fails after
+`idle_timeout_ms` (default 45 seconds), with the partial stdout/stderr included in the error result.
+The total `timeout_ms` remains the outer deadline. This prevents a modal or stale DreamMaker launch
+from consuming the full compile timeout while preserving long, legitimately quiet compiles.
 
-The generic MCP does not encode Dogmos policy. From the Meridian checkout, use its own harness:
-
-```powershell
-pwsh -NoProfile -File .\tools\dogmos\test_compile_check.ps1
-pwsh -NoProfile -File .\tools\dogmos\run_tests.ps1 -Focus /datum/unit_test/example
-pwsh -NoProfile -File .\tools\dogmos\run_tests.ps1
-```
-
-The focused run is an iteration aid, not a replacement for the full suite. The compile check is
-also bounded: a hung DreamMaker process fails with a timeout instead of blocking indefinitely.
+When replacing a live release binary on Windows, stop the client-owned MCP process before building
+because the executable is locked. A client that does not automatically reconnect a deliberately
+closed stdio transport must relaunch its configured bridge after the build. Validate the replacement
+with `test_mcp.ps1 -SkipBuild` before using it for a game run; this distinguishes a healthy binary
+from a stale or disconnected client process.

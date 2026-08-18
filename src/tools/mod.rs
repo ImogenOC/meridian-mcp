@@ -189,6 +189,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Compiler timeout in milliseconds (default: 600000, capped at 1800000)"
+                },
+                "idle_timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "description": "Fail if DreamMaker produces no output and consumes no CPU for this long (default: 45000, capped at 900000)"
                 }
             },
             "required": ["dme_path"]
@@ -271,6 +276,15 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "port": {
                     "type": "integer",
                     "description": "Port to run the server on (default: 1337)"
+                },
+                "working_directory": {
+                    "type": "string",
+                    "description": "Optional working directory used to resolve a relative DMB path and run DreamDaemon"
+                },
+                "daemon_args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional additional DreamDaemon arguments, appended after the standard trusted/logging arguments"
                 },
                 "wait_for": {
                     "type": "string",

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,6 +45,39 @@ fn find_dreamdaemon() -> Option<PathBuf> {
     None
 }
 
+fn build_dreamdaemon_args(dmb_path: &Path, port: u16, extra_args: &[String]) -> Vec<String> {
+    let mut arguments = vec![
+        dmb_path.display().to_string(),
+        port.to_string(),
+        "-trusted".to_string(),
+        "-logself".to_string(),
+    ];
+    arguments.extend(extra_args.iter().cloned());
+    arguments
+}
+
+fn normalize_spawn_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path_text = path.to_string_lossy();
+        if let Some(unc_path) = path_text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", unc_path));
+        }
+        if let Some(dos_path) = path_text.strip_prefix(r"\\?\") {
+            return PathBuf::from(dos_path);
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn readiness_succeeded(readiness: &Value) -> bool {
+    readiness
+        .get("matched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Start DreamDaemon with a .dmb file
 pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
     // Check if already running
@@ -61,28 +94,67 @@ pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
 
     let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(1337) as u16;
 
-    let path = PathBuf::from(dmb_path);
+    let requested_path = PathBuf::from(dmb_path);
+    let requested_working_directory = args
+        .get("working_directory")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from);
+    let path = if requested_path.is_absolute() {
+        requested_path
+    } else if let Some(working_directory) = &requested_working_directory {
+        working_directory.join(requested_path)
+    } else {
+        requested_path
+    };
     if !path.exists() {
         return Ok(ToolResult::error(format!(
             "DMB file not found: {}",
             dmb_path
         )));
     }
+    let path = path.canonicalize()?;
+    let spawn_path = normalize_spawn_path(&path);
+    let working_directory = spawn_path.parent().ok_or_else(|| {
+        anyhow!(
+            "DMB file has no working directory: {}",
+            spawn_path.display()
+        )
+    })?;
+
+    let extra_args: Vec<String> = args
+        .get("daemon_args")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow!("daemon_args must contain only strings"))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     let dreamdaemon = find_dreamdaemon()
         .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?;
 
-    info!("Starting DreamDaemon with {} on port {}", dmb_path, port);
+    info!(
+        "Starting DreamDaemon with {} on port {}",
+        path.display(),
+        port
+    );
     state.clear_runtime_diagnostics();
 
-    // Start DreamDaemon
-    // Arguments: dmb_path port -trusted -logself
-    // Note: Removed -invisible so the server auto-starts properly
+    // Start DreamDaemon. The DMB path is canonicalized and the daemon runs from its parent so
+    // relative config, log, and map paths resolve against the game checkout rather than the MCP
+    // server's installation directory.
+    let daemon_args = build_dreamdaemon_args(&spawn_path, port, &extra_args);
     let mut child = Command::new(&dreamdaemon)
-        .arg(&path)
-        .arg(port.to_string())
-        .arg("-trusted")
-        .arg("-logself")
+        .args(&daemon_args)
+        .current_dir(working_directory)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -127,6 +199,7 @@ pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
         "pid": pid,
         "port": port,
         "dmb_path": dmb_path,
+        "working_directory": working_directory.display().to_string(),
         "message": format!("DreamDaemon started on port {}", port)
     });
 
@@ -141,6 +214,11 @@ pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
             .unwrap_or(DEFAULT_OUTPUT_WAIT_TIMEOUT_MS);
         let wait_result = wait_for_output_value(state, pattern, use_regex, timeout_ms).await?;
         result["readiness"] = wait_result;
+        if !readiness_succeeded(&result["readiness"]) {
+            result["success"] = json!(false);
+            result["process_stopped"] = json!(state.stop_game_process().await.is_ok());
+            return Ok(ToolResult::error(result.to_string()));
+        }
     }
 
     Ok(ToolResult::text(result.to_string()))
@@ -287,6 +365,58 @@ mod tests {
     use super::*;
     use crate::mcp::ToolContent;
     use crate::state::push_output_line;
+
+    #[cfg(windows)]
+    #[test]
+    fn dreamdaemon_spawn_paths_drop_windows_verbatim_prefix() {
+        let verbatim = Path::new(r"\\?\C:\workspace\tgstation.dmb");
+        assert_eq!(
+            normalize_spawn_path(verbatim),
+            PathBuf::from(r"C:\workspace\tgstation.dmb")
+        );
+
+        let ordinary = Path::new(r"C:\workspace\tgstation.dmb");
+        assert_eq!(normalize_spawn_path(ordinary), ordinary);
+
+        let unc_verbatim = Path::new(r"\\?\UNC\server\share\tgstation.dmb");
+        assert_eq!(
+            normalize_spawn_path(unc_verbatim),
+            PathBuf::from(r"\\server\share\tgstation.dmb")
+        );
+    }
+
+    #[test]
+    fn readiness_requires_a_matching_marker() {
+        assert!(readiness_succeeded(&json!({"matched": true})));
+        assert!(!readiness_succeeded(&json!({"matched": false})));
+        assert!(!readiness_succeeded(&json!({"timed_out": true})));
+    }
+
+    #[test]
+    fn daemon_arguments_preserve_extra_runtime_arguments() {
+        let arguments = build_dreamdaemon_args(
+            PathBuf::from("tgstation.test.dmb").as_path(),
+            1337,
+            &[
+                "-close".to_string(),
+                "-params".to_string(),
+                "log-directory=ci".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            arguments,
+            vec![
+                "tgstation.test.dmb",
+                "1337",
+                "-trusted",
+                "-logself",
+                "-close",
+                "-params",
+                "log-directory=ci",
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn wait_for_output_can_match_retained_output_after_exit() {
