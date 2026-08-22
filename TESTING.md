@@ -12,8 +12,9 @@ cargo build --release
 ```
 
 `cargo test` covers the bounded DreamDaemon output log, literal and regular-expression matching,
-source excerpt boundaries, source excerpt limits, and compiler diagnostic parsing. The release
-build is the binary used by the protocol smoke tests.
+source excerpt boundaries and limits, parser-backed symbol metadata, BM25 relevance and exact-symbol
+boosts, search filters and deterministic ordering, MCP search schema/lifecycle behavior, and compiler
+diagnostic parsing. The release build is the binary used by the protocol smoke tests.
 
 ## MCP protocol smoke test
 
@@ -30,8 +31,9 @@ pwsh -NoProfile -File .\test_mcp.ps1 -SkipBuild `
 
 The PowerShell smoke test starts a fresh stdio session, drains both output streams before sending
 requests, validates JSON-RPC response IDs and exit status, discovers the tool list dynamically,
-checks required tools, asserts `serverInfo.name == "meridian-mcp"`, verifies that the advertised
-`dm_compile` options match its implementation, and keeps the `dm_*` tool names as an intentional
+checks required tools, asserts `serverInfo.name == "meridian-mcp"`, checks the advertised client
+workflow instructions, verifies that the `dm_compile` and `dm_search_context` schemas match their
+implementations, and keeps the `dm_*` tool names as an intentional
 compatibility contract. `-BinaryPath` can point to a separately built binary, and
 `-TimeoutSeconds` controls the whole session.
 
@@ -45,8 +47,13 @@ readable source excerpts.
 pwsh -NoProfile -File .\test_parse.ps1 `
     -DmePath ..\path\to\project.dme `
     -TypePath /turf/open `
-    -ProcName AfterChange
+    -ProcName AfterChange `
+    -SearchQuery "turf air temperature reset"
 ```
+
+`-SearchQuery` requires `-DmePath`. It checks that parsing produced a non-empty index, ranked search
+returns at least one result, and the top result contains score, symbol kind, canonical symbol, file,
+and line metadata. `-TypePath` and `-ProcName` remain optional exact-navigation checks.
 
 The shell wrapper provides the same protocol check on Unix-like systems and delegates to the
 PowerShell implementation on Windows:

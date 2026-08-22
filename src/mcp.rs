@@ -52,6 +52,7 @@ struct InitializeResult {
     capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     server_info: ServerInfo,
+    instructions: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,6 +210,7 @@ fn handle_initialize(_params: &Value) -> Result<Value> {
             name: "meridian-mcp".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        instructions: "Call dm_parse_environment before DreamMaker analysis. Use dm_search_context for behavioral or repository-scale discovery, then verify exact symbols with dm_get_type, dm_get_proc, dm_get_var, or dm_get_definition. Reparse after source changes. Parser/search results do not replace repository build and runtime verification.".to_string(),
     })?)
 }
 
@@ -222,6 +224,19 @@ mod tests {
         let response = handle_initialize(&json!({})).expect("initialize should serialize");
 
         assert_eq!(response["serverInfo"]["name"], "meridian-mcp");
+    }
+
+    #[test]
+    fn initialize_explains_the_parse_search_and_verify_workflow() {
+        let response = handle_initialize(&json!({})).expect("initialize should serialize");
+        let instructions = response["instructions"]
+            .as_str()
+            .expect("initialize should include client instructions");
+
+        assert!(instructions.contains("dm_parse_environment"));
+        assert!(instructions.contains("dm_search_context"));
+        assert!(instructions.contains("dm_get_proc"));
+        assert!(instructions.len() <= 512);
     }
 }
 

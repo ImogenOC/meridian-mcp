@@ -1,5 +1,7 @@
 mod client;
 mod mcp;
+mod search;
+mod source;
 mod state;
 mod tools;
 

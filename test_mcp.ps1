@@ -8,6 +8,7 @@ param(
     [switch]$ExpectCompileFailure,
     [string]$TypePath,
     [string]$ProcName,
+    [string]$SearchQuery,
     [ValidateRange(1, 3600)]
     [int]$TimeoutSeconds = 30,
     [switch]$SkipBuild
@@ -223,6 +224,26 @@ if ($TypePath) {
     }
 }
 
+if ($SearchQuery) {
+    if (-not $DmePath) {
+        throw '-SearchQuery requires -DmePath'
+    }
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 9
+        method = "tools/call"
+        params = [ordered]@{
+            name = "dm_search_context"
+            arguments = [ordered]@{
+                query = $SearchQuery
+                limit = 5
+                include_source = $true
+                max_source_lines = 20
+            }
+        }
+    })
+}
+
 $session = Invoke-McpSession -Requests $requests -TimeoutMilliseconds ($TimeoutSeconds * 1000)
 $sessionExitCode = $session.ExitCode
 if ($sessionExitCode -ne 0) {
@@ -239,6 +260,9 @@ if ($initializeResponse.result.protocolVersion -ne "2024-11-05") {
 if ($initializeResponse.result.serverInfo.name -ne "meridian-mcp") {
     throw "Unexpected MCP server name: $($initializeResponse.result.serverInfo.name)"
 }
+if (-not $initializeResponse.result.instructions.Contains("dm_search_context")) {
+    throw "MCP initialization instructions do not describe context search"
+}
 
 $tools = @($toolsResponse.result.tools)
 if ($tools.Count -eq 0) {
@@ -252,7 +276,7 @@ if ($waitResponse.result.isError -ne $true) {
 }
 
 $toolNames = @($tools | ForEach-Object { $_.name })
-$requiredTools = @("dm_parse_environment", "dm_compile", "dm_run", "dm_wait_for_output")
+$requiredTools = @("dm_parse_environment", "dm_search_context", "dm_compile", "dm_run", "dm_wait_for_output")
 foreach ($requiredTool in $requiredTools) {
     if ($toolNames -notcontains $requiredTool) {
         throw "tools/list is missing required tool: $requiredTool"
@@ -271,6 +295,16 @@ foreach ($runProperty in @("working_directory", "daemon_args", "wait_for", "star
     if ($runProperties -notcontains $runProperty) {
         throw "dm_run schema is missing implemented property: $runProperty"
     }
+}
+$searchTool = @($tools | Where-Object { $_.name -eq "dm_search_context" })
+$searchProperties = @($searchTool[0].inputSchema.properties.PSObject.Properties.Name)
+foreach ($searchProperty in @("query", "kind", "type_prefix", "file_filter", "limit", "include_source", "max_source_lines")) {
+    if ($searchProperties -notcontains $searchProperty) {
+        throw "dm_search_context schema is missing implemented property: $searchProperty"
+    }
+}
+if (@($searchTool[0].inputSchema.required) -notcontains "query") {
+    throw "dm_search_context schema does not require query"
 }
 
 if ($DmePath) {
@@ -305,6 +339,26 @@ if ($ProcName) {
     }
 }
 
+if ($SearchQuery) {
+    $searchResponse = Assert-Response -Responses $session.Responses -Id 9
+    if ($searchResponse.result.isError -eq $true) {
+        throw "dm_search_context returned an MCP tool error: $($searchResponse.result.content[0].text)"
+    }
+    $searchPayload = $searchResponse.result.content[0].text | ConvertFrom-Json
+    if ($searchPayload.indexed_documents -le 0) {
+        throw "dm_search_context reported an empty index"
+    }
+    if ($searchPayload.count -le 0 -or @($searchPayload.results).Count -le 0) {
+        throw "dm_search_context returned no results for: $SearchQuery"
+    }
+    $firstSearchResult = @($searchPayload.results)[0]
+    foreach ($requiredResultProperty in @("score", "kind", "symbol", "file", "line")) {
+        if ($firstSearchResult.PSObject.Properties.Name -notcontains $requiredResultProperty) {
+            throw "dm_search_context result is missing property: $requiredResultProperty"
+        }
+    }
+}
+
 if ($CompileDmePath) {
     $compileResponse = Assert-Response -Responses $session.Responses -Id 8
     $compileFailed = $compileResponse.result.isError -eq $true
@@ -333,6 +387,9 @@ if ($TypePath) {
 }
 if ($ProcName) {
     Write-Output "Proc/source smoke test passed: $TypePath/$ProcName"
+}
+if ($SearchQuery) {
+    Write-Output "Ranked context search smoke test passed: $SearchQuery"
 }
 
 if ($CompileDmePath) {

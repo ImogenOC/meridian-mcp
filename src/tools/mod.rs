@@ -3,6 +3,7 @@ mod compile;
 mod map;
 mod parse;
 mod runtime;
+mod search;
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -120,6 +121,50 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of results (default: 50)"
+                }
+            },
+            "required": ["query"]
+        }),
+    });
+
+    tools.push(ToolDefinition {
+        name: "dm_search_context".to_string(),
+        description: "Search parsed DreamMaker types, procs, variables, documentation, and source using deterministic ranked retrieval. Call dm_parse_environment first, then verify results with the exact inspection tools.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language behavior, exact symbol, or identifier terms to find"
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["all", "type", "proc", "var"],
+                    "description": "Optional symbol kind filter (default: all)"
+                },
+                "type_prefix": {
+                    "type": "string",
+                    "description": "Optional canonical type-path prefix, such as /turf/open"
+                },
+                "file_filter": {
+                    "type": "string",
+                    "description": "Optional case-insensitive source-path substring"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum ranked results (default: 10)"
+                },
+                "include_source": {
+                    "type": "boolean",
+                    "description": "Include bounded source excerpts (default: true)"
+                },
+                "max_source_lines": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Maximum source lines per result (default: 40)"
                 }
             },
             "required": ["query"]
@@ -394,6 +439,7 @@ pub async fn call_tool(state: &mut ServerState, name: &str, args: Value) -> Resu
         "dm_get_var" => parse::get_var(state, args).await,
         "dm_list_types" => parse::list_types(state, args).await,
         "dm_search_symbols" => parse::search_symbols(state, args).await,
+        "dm_search_context" => search::search_context(state, args).await,
 
         // Analysis tools
         "dm_check_errors" => analysis::check_errors(state, args).await,
@@ -429,5 +475,28 @@ mod tests {
 
         assert!(!definitions.is_empty());
         assert!(definitions.iter().all(|tool| tool.name.starts_with("dm_")));
+    }
+
+    #[test]
+    fn context_search_schema_requires_a_query_and_exposes_filters() {
+        let definitions = get_tool_definitions();
+        let search = definitions
+            .iter()
+            .find(|tool| tool.name == "dm_search_context")
+            .expect("context search tool should be registered");
+
+        assert_eq!(
+            search.input_schema["required"],
+            serde_json::json!(["query"])
+        );
+        assert_eq!(
+            search.input_schema["properties"]["kind"]["enum"],
+            serde_json::json!(["all", "type", "proc", "var"])
+        );
+        assert_eq!(search.input_schema["properties"]["limit"]["maximum"], 50);
+        assert_eq!(
+            search.input_schema["properties"]["max_source_lines"]["maximum"],
+            200
+        );
     }
 }

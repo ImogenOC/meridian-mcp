@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::process::Child;
 
+use crate::search::SearchIndex;
+
 pub(crate) const OUTPUT_LOG_CAPACITY: usize = 500;
 pub(crate) const OUTPUT_LINE_MAX_BYTES: usize = 16 * 1024;
 pub(crate) const OUTPUT_LOG_MAX_BYTES: usize = 1024 * 1024;
@@ -54,6 +56,8 @@ pub struct ServerState {
     pub objtree: Option<Arc<ObjectTree>>,
     /// Parsing context
     pub context: Option<Context>,
+    /// Ranked symbol index derived from the parsed object tree
+    pub search_index: Option<Arc<SearchIndex>>,
     /// Running DreamDaemon process
     pub game_process: Option<Child>,
     /// Port the game is running on
@@ -70,6 +74,7 @@ impl ServerState {
             environment_path: None,
             objtree: None,
             context: None,
+            search_index: None,
             game_process: None,
             game_port: None,
             output_log: Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_LOG_CAPACITY))),
@@ -81,6 +86,7 @@ impl ServerState {
     pub fn clear_cache(&mut self) {
         self.objtree = None;
         self.context = None;
+        self.search_index = None;
     }
 
     /// Check if we have a valid parsed environment
@@ -251,5 +257,15 @@ mod tests {
             .unwrap());
         assert!(!state.matches_output("not present", false).unwrap());
         assert!(state.matches_output("[invalid", true).is_err());
+    }
+
+    #[test]
+    fn clear_cache_removes_the_search_index_with_parser_state() {
+        let mut state = ServerState::new();
+        state.search_index = Some(Arc::new(crate::search::SearchIndex::new(Vec::new())));
+
+        state.clear_cache();
+
+        assert!(state.search_index.is_none());
     }
 }

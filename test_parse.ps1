@@ -7,6 +7,7 @@ param(
     [string]$BinaryPath,
     [string]$TypePath,
     [string]$ProcName,
+    [string]$SearchQuery,
     [ValidateRange(1, 3600)]
     [int]$TimeoutSeconds = 120,
     [switch]$SkipBuild
@@ -26,6 +27,9 @@ if ($TypePath) {
 }
 if ($ProcName) {
     $scriptArguments.ProcName = $ProcName
+}
+if ($SearchQuery) {
+    $scriptArguments.SearchQuery = $SearchQuery
 }
 
 & (Join-Path $PSScriptRoot "test_mcp.ps1") @scriptArguments

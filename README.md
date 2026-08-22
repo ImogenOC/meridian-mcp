@@ -8,6 +8,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 
 ### Code Intelligence
 - **Parse & Navigate** - Load `.dme` projects, explore type hierarchies, search symbols
+- **Ranked Context Search** - Find relevant types, procs, variables, documentation, and source from behavioral queries without an external model or database
 - **Type Checking** - Real-time diagnostics via SpacemanDMM's dreamchecker
 - **Go to Definition** - Find where any type, proc, or variable is defined
 
@@ -89,6 +90,7 @@ Add to `~/.continue/config.json`:
 | `dm_get_var` | Get variable info (type, initial value) |
 | `dm_list_types` | List types with optional path prefix filter |
 | `dm_search_symbols` | Search for types, procs, or vars by pattern |
+| `dm_search_context` | Rank parsed symbols, documentation, and source for a natural-language or exact-symbol query |
 | `dm_check_errors` | Run type checker, get diagnostics |
 | `dm_get_definition` | Find source location of any symbol |
 | `dm_compile` | Compile the project with optional compiler path, working directory, defines, bounded timeout/watchdog, and structured diagnostics |
@@ -112,11 +114,25 @@ Once configured, you can ask your AI assistant things like:
 
 > "Check for type errors in the codebase"
 
+> "Parse the project, search for where turf air temperature is reset, then inspect the highest-ranked proc"
+
 > "Compile the project and run it on port 1337"
 
 ## How It Works
 
 meridian-mcp uses [SpacemanDMM](https://github.com/SpaceManiac/SpacemanDMM) for parsing and type checking. This is the same tooling used by the SS13 community for linting and IDE support.
+
+`dm_parse_environment` also builds a local in-memory BM25 index over non-builtin types, declared
+variables, and every proc implementation. Names and canonical paths receive the highest weight,
+followed by documentation, parameters, source, and file paths. Results retain exact source locations,
+owning and parent types, parameters, and proc override position/count. The index is deterministic,
+requires no embedding credentials or vector database, and is replaced whenever the environment is
+parsed again.
+
+Use `dm_search_context` for discovery, then use `dm_get_type`, `dm_get_proc`, `dm_get_var`, or
+`dm_get_definition` to verify an exact symbol. Available filters are `kind`, `type_prefix`, and
+`file_filter`; source excerpts and their maximum line count are configurable per call. Parser and
+search results do not replace the repository's compiler, test, or runtime checks.
 
 The server communicates over stdio using JSON-RPC, following the MCP specification.
 
@@ -167,8 +183,10 @@ cargo test
 # Verify JSON-RPC, dynamic tool schemas, and required tools (Windows PowerShell)
 pwsh -File .\test_mcp.ps1
 
-# Parse a real project and exercise source-backed symbol queries
-pwsh -File .\test_parse.ps1 -DmePath C:\path\to\project.dme -TypePath /turf/open -ProcName AfterChange
+# Parse a real project and exercise source-backed exact and ranked queries
+pwsh -File .\test_parse.ps1 -DmePath C:\path\to\project.dme `
+    -TypePath /turf/open -ProcName AfterChange `
+    -SearchQuery "turf air temperature reset"
 
 # The shell wrapper delegates to PowerShell on Windows and uses jq/timeout on Linux
 ./test-mcp.sh --skip-build

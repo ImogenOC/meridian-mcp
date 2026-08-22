@@ -1,0 +1,618 @@
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use dreammaker::objtree::ObjectTree;
+use dreammaker::Context;
+
+use crate::source::extract_source_from_text;
+
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+const EXACT_SYMBOL_BOOST: f64 = 12.0;
+const EXACT_NAME_BOOST: f64 = 6.0;
+const PHRASE_BOOST: f64 = 2.0;
+const INDEX_SOURCE_LINES: usize = 80;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SymbolKind {
+    Type,
+    Proc,
+    Var,
+}
+
+impl SymbolKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Type => "type",
+            Self::Proc => "proc",
+            Self::Var => "var",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SearchDocument {
+    pub(crate) kind: SymbolKind,
+    pub(crate) symbol: String,
+    pub(crate) name: String,
+    pub(crate) type_path: String,
+    pub(crate) parent: Option<String>,
+    pub(crate) file: String,
+    pub(crate) line: u32,
+    pub(crate) column: u32,
+    pub(crate) docs: String,
+    pub(crate) source: Option<String>,
+    pub(crate) parameters: Vec<String>,
+    pub(crate) override_index: Option<usize>,
+    pub(crate) override_count: Option<usize>,
+}
+
+pub(crate) struct SearchRequest<'a> {
+    pub(crate) query: &'a str,
+    pub(crate) kind: Option<SymbolKind>,
+    pub(crate) type_prefix: Option<&'a str>,
+    pub(crate) file_filter: Option<&'a str>,
+    pub(crate) limit: usize,
+}
+
+pub(crate) struct SearchHit<'a> {
+    pub(crate) score: f64,
+    pub(crate) document: &'a SearchDocument,
+}
+
+#[derive(Clone, Debug)]
+struct Posting {
+    document_id: usize,
+    term_frequency: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SearchIndex {
+    documents: Vec<SearchDocument>,
+    postings: HashMap<String, Vec<Posting>>,
+    document_lengths: Vec<f64>,
+    average_document_length: f64,
+}
+
+impl SearchIndex {
+    pub(crate) fn new(documents: Vec<SearchDocument>) -> Self {
+        let mut postings: HashMap<String, Vec<Posting>> = HashMap::new();
+        let mut document_lengths = Vec::with_capacity(documents.len());
+
+        for (document_id, document) in documents.iter().enumerate() {
+            let terms = weighted_terms(document);
+            let length = terms.values().map(|frequency| *frequency as f64).sum();
+            document_lengths.push(length);
+
+            for (term, frequency) in terms {
+                postings.entry(term).or_default().push(Posting {
+                    document_id,
+                    term_frequency: frequency as f64,
+                });
+            }
+        }
+
+        let average_document_length = if document_lengths.is_empty() {
+            0.0
+        } else {
+            document_lengths.iter().sum::<f64>() / document_lengths.len() as f64
+        };
+
+        Self {
+            documents,
+            postings,
+            document_lengths,
+            average_document_length,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.documents.len()
+    }
+
+    pub(crate) fn from_object_tree(
+        objtree: &ObjectTree,
+        context: &Context,
+        environment_path: &Path,
+    ) -> Self {
+        let root = environment_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut source_cache = SourceCache::new();
+        let mut documents = Vec::new();
+
+        for ty in objtree.iter_types() {
+            let type_path = ty.path.to_string();
+            let parent = ty.parent_type().map(|parent| parent.path.to_string());
+
+            if !ty.is_root() && !ty.location.is_builtins() {
+                let file = resolve_context_file(context, root, ty.location.file);
+                let source = source_cache.source_line(&file, ty.location.line);
+                documents.push(SearchDocument {
+                    kind: SymbolKind::Type,
+                    symbol: type_path.clone(),
+                    name: ty.name().to_string(),
+                    type_path: type_path.clone(),
+                    parent: parent.clone(),
+                    file: file.display().to_string(),
+                    line: ty.location.line,
+                    column: u32::from(ty.location.column),
+                    docs: ty.docs.text().trim().to_string(),
+                    source,
+                    parameters: Vec::new(),
+                    override_index: None,
+                    override_count: None,
+                });
+            }
+
+            for (name, var) in &ty.vars {
+                let location = var.value.location;
+                if location.is_builtins() {
+                    continue;
+                }
+
+                let file = resolve_context_file(context, root, location.file);
+                documents.push(SearchDocument {
+                    kind: SymbolKind::Var,
+                    symbol: member_symbol(&type_path, "var", name),
+                    name: name.to_string(),
+                    type_path: type_path.clone(),
+                    parent: parent.clone(),
+                    file: file.display().to_string(),
+                    line: location.line,
+                    column: u32::from(location.column),
+                    docs: var.value.docs.text().trim().to_string(),
+                    source: source_cache.source_line(&file, location.line),
+                    parameters: Vec::new(),
+                    override_index: None,
+                    override_count: None,
+                });
+            }
+
+            for (name, proc) in &ty.procs {
+                let override_count = proc
+                    .value
+                    .iter()
+                    .filter(|value| !value.location.is_builtins())
+                    .count();
+                let mut override_index = 0;
+                for value in &proc.value {
+                    let location = value.location;
+                    if location.is_builtins() {
+                        continue;
+                    }
+                    override_index += 1;
+
+                    let file = resolve_context_file(context, root, location.file);
+                    documents.push(SearchDocument {
+                        kind: SymbolKind::Proc,
+                        symbol: member_symbol(&type_path, "proc", name),
+                        name: name.to_string(),
+                        type_path: type_path.clone(),
+                        parent: parent.clone(),
+                        file: file.display().to_string(),
+                        line: location.line,
+                        column: u32::from(location.column),
+                        docs: value.docs.text().trim().to_string(),
+                        source: source_cache.source_declaration(
+                            &file,
+                            location.line,
+                            INDEX_SOURCE_LINES,
+                        ),
+                        parameters: value
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.name.to_string())
+                            .collect(),
+                        override_index: Some(override_index),
+                        override_count: Some(override_count),
+                    });
+                }
+            }
+        }
+
+        Self::new(documents)
+    }
+
+    pub(crate) fn query_terms(query: &str) -> Vec<String> {
+        tokenize(query)
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn search(&self, request: &SearchRequest<'_>) -> Vec<SearchHit<'_>> {
+        let query_terms = Self::query_terms(request.query);
+        if query_terms.is_empty() || request.limit == 0 {
+            return Vec::new();
+        }
+
+        let mut scores = vec![0.0; self.documents.len()];
+        for term in query_terms {
+            let Some(postings) = self.postings.get(&term) else {
+                continue;
+            };
+
+            let document_frequency = postings.len() as f64;
+            let document_count = self.documents.len() as f64;
+            let inverse_document_frequency = (1.0
+                + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
+                .ln();
+
+            for posting in postings {
+                let document_length = self.document_lengths[posting.document_id];
+                let length_normalization = if self.average_document_length == 0.0 {
+                    1.0
+                } else {
+                    1.0 - BM25_B + BM25_B * document_length / self.average_document_length
+                };
+                let numerator = posting.term_frequency * (BM25_K1 + 1.0);
+                let denominator = posting.term_frequency + BM25_K1 * length_normalization;
+                scores[posting.document_id] += inverse_document_frequency * numerator / denominator;
+            }
+        }
+
+        let normalized_query = request.query.trim().to_lowercase();
+        let type_prefix = request.type_prefix.map(str::to_lowercase);
+        let file_filter = request.file_filter.map(str::to_lowercase);
+        let mut hits: Vec<SearchHit<'_>> = self
+            .documents
+            .iter()
+            .enumerate()
+            .filter(|(_, document)| request.kind.is_none_or(|kind| document.kind == kind))
+            .filter(|(_, document)| {
+                type_prefix
+                    .as_ref()
+                    .is_none_or(|prefix| document.type_path.to_lowercase().starts_with(prefix))
+            })
+            .filter(|(_, document)| {
+                file_filter
+                    .as_ref()
+                    .is_none_or(|filter| document.file.to_lowercase().contains(filter))
+            })
+            .filter_map(|(document_id, document)| {
+                let mut score = scores[document_id];
+                let normalized_symbol = document.symbol.to_lowercase();
+                let normalized_name = document.name.to_lowercase();
+                if normalized_symbol == normalized_query {
+                    score += EXACT_SYMBOL_BOOST;
+                } else if normalized_name == normalized_query {
+                    score += EXACT_NAME_BOOST;
+                } else if normalized_symbol.contains(&normalized_query) {
+                    score += PHRASE_BOOST;
+                }
+
+                (score > 0.0).then_some(SearchHit { score, document })
+            })
+            .collect();
+
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.document.symbol.cmp(&right.document.symbol))
+                .then_with(|| left.document.file.cmp(&right.document.file))
+                .then_with(|| left.document.line.cmp(&right.document.line))
+        });
+        hits.truncate(request.limit);
+        hits
+    }
+}
+
+fn weighted_terms(document: &SearchDocument) -> HashMap<String, u32> {
+    let mut terms = HashMap::new();
+    add_weighted_terms(&mut terms, &document.name, 10);
+    add_weighted_terms(&mut terms, &document.symbol, 8);
+    add_weighted_terms(&mut terms, &document.type_path, 5);
+    add_weighted_terms(&mut terms, &document.docs, 4);
+    add_weighted_terms(&mut terms, &document.parameters.join(" "), 4);
+    add_weighted_terms(
+        &mut terms,
+        document.parent.as_deref().unwrap_or_default(),
+        2,
+    );
+    add_weighted_terms(&mut terms, &document.file, 2);
+    add_weighted_terms(
+        &mut terms,
+        document.source.as_deref().unwrap_or_default(),
+        1,
+    );
+    terms
+}
+
+fn add_weighted_terms(terms: &mut HashMap<String, u32>, text: &str, weight: u32) {
+    for term in tokenize(text) {
+        *terms.entry(term).or_default() += weight;
+    }
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn member_symbol(type_path: &str, kind: &str, name: &str) -> String {
+    if type_path.is_empty() {
+        format!("/{kind}/{name}")
+    } else {
+        format!("{type_path}/{kind}/{name}")
+    }
+}
+
+fn resolve_context_file(
+    context: &Context,
+    environment_root: &Path,
+    file_id: dreammaker::FileId,
+) -> PathBuf {
+    let path_ref = context.file_path(file_id);
+    let context_path = path_ref.to_path_buf();
+    if context_path.is_absolute() {
+        context_path
+    } else {
+        environment_root.join(context_path)
+    }
+}
+
+struct SourceCache {
+    files: HashMap<PathBuf, Option<String>>,
+}
+
+impl SourceCache {
+    fn new() -> Self {
+        Self {
+            files: HashMap::new(),
+        }
+    }
+
+    fn source_text(&mut self, file: &Path) -> Option<&str> {
+        if !self.files.contains_key(file) {
+            self.files
+                .insert(file.to_path_buf(), std::fs::read_to_string(file).ok());
+        }
+        self.files.get(file).and_then(Option::as_deref)
+    }
+
+    fn source_line(&mut self, file: &Path, line: u32) -> Option<String> {
+        let line_index = line.checked_sub(1)? as usize;
+        self.source_text(file)?
+            .lines()
+            .nth(line_index)
+            .map(str::to_string)
+    }
+
+    fn source_declaration(&mut self, file: &Path, line: u32, max_lines: usize) -> Option<String> {
+        extract_source_from_text(self.source_text(file)?, line, max_lines)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dreammaker::Context;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ENVIRONMENT_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn document(
+        kind: SymbolKind,
+        symbol: &str,
+        name: &str,
+        type_path: &str,
+        file: &str,
+        docs: &str,
+        source: &str,
+    ) -> SearchDocument {
+        SearchDocument {
+            kind,
+            symbol: symbol.to_string(),
+            name: name.to_string(),
+            type_path: type_path.to_string(),
+            parent: None,
+            file: file.to_string(),
+            line: 1,
+            column: 1,
+            docs: docs.to_string(),
+            source: Some(source.to_string()),
+            parameters: Vec::new(),
+            override_index: None,
+            override_count: None,
+        }
+    }
+
+    fn request(query: &str) -> SearchRequest<'_> {
+        SearchRequest {
+            query,
+            kind: None,
+            type_prefix: None,
+            file_filter: None,
+            limit: 10,
+        }
+    }
+
+    fn write_environment_fixture() -> (std::path::PathBuf, std::path::PathBuf) {
+        let unique_suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            ENVIRONMENT_FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let directory =
+            std::env::temp_dir().join(format!("meridian_mcp_environment_{unique_suffix}"));
+        std::fs::create_dir_all(&directory).expect("fixture directory should be writable");
+        let source_path = directory.join("fixture.dm");
+        std::fs::write(
+            &source_path,
+            "/datum/example\n\tvar/temperature = 300\n\n/// Reset the gas mixture temperature after an air update.\n/datum/example/proc/reset_temperature(target_temperature)\n\ttemperature = target_temperature\n\treturn temperature\n",
+        )
+        .expect("source fixture should be writable");
+        let environment_path = directory.join("fixture.dme");
+        std::fs::write(&environment_path, "#include \"fixture.dm\"\n")
+            .expect("environment fixture should be writable");
+        (directory, environment_path)
+    }
+
+    #[test]
+    fn behavioral_terms_rank_relevant_document_above_noise() {
+        let index = SearchIndex::new(vec![
+            document(
+                SymbolKind::Proc,
+                "/datum/controller/subsystem/air/proc/reset_temperature",
+                "reset_temperature",
+                "/datum/controller/subsystem/air",
+                "code/air.dm",
+                "Reset turf temperature after an air change.",
+                "turf.air.temperature = initial_temperature",
+            ),
+            document(
+                SymbolKind::Proc,
+                "/datum/controller/subsystem/chat/proc/send_message",
+                "send_message",
+                "/datum/controller/subsystem/chat",
+                "code/chat.dm",
+                "Send a message to a client.",
+                "client << message",
+            ),
+        ]);
+
+        let hits = index.search(&request("turf air temperature reset"));
+
+        assert_eq!(hits[0].document.name, "reset_temperature");
+        assert!(hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn exact_symbol_match_receives_a_boost() {
+        let index = SearchIndex::new(vec![
+            document(
+                SymbolKind::Proc,
+                "/datum/example/proc/update_state",
+                "update_state",
+                "/datum/example",
+                "code/first.dm",
+                "Update state.",
+                "return state",
+            ),
+            document(
+                SymbolKind::Proc,
+                "/datum/other/proc/update_state",
+                "update_state",
+                "/datum/other",
+                "code/second.dm",
+                "Update state.",
+                "return state",
+            ),
+        ]);
+
+        let hits = index.search(&request("/datum/other/proc/update_state"));
+
+        assert_eq!(hits[0].document.symbol, "/datum/other/proc/update_state");
+    }
+
+    #[test]
+    fn filters_and_limit_are_applied_before_ranking() {
+        let index = SearchIndex::new(vec![
+            document(
+                SymbolKind::Proc,
+                "/turf/open/proc/update_air",
+                "update_air",
+                "/turf/open",
+                "modular_aphelion/air.dm",
+                "Update air.",
+                "return",
+            ),
+            document(
+                SymbolKind::Var,
+                "/turf/open/var/air",
+                "air",
+                "/turf/open",
+                "modular_aphelion/air.dm",
+                "Air mixture.",
+                "var/datum/gas_mixture/air",
+            ),
+            document(
+                SymbolKind::Proc,
+                "/obj/item/proc/update_air",
+                "update_air",
+                "/obj/item",
+                "code/items.dm",
+                "Update air.",
+                "return",
+            ),
+        ]);
+        let filtered = SearchRequest {
+            query: "air update",
+            kind: Some(SymbolKind::Proc),
+            type_prefix: Some("/turf"),
+            file_filter: Some("modular_aphelion"),
+            limit: 1,
+        };
+
+        let hits = index.search(&filtered);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document.symbol, "/turf/open/proc/update_air");
+    }
+
+    #[test]
+    fn equal_scores_use_stable_symbol_file_and_line_order() {
+        let mut second = document(
+            SymbolKind::Proc,
+            "/datum/example/proc/beta",
+            "shared",
+            "/datum/example",
+            "code/z.dm",
+            "Shared behavior.",
+            "return shared",
+        );
+        second.line = 20;
+        let index = SearchIndex::new(vec![
+            second,
+            document(
+                SymbolKind::Proc,
+                "/datum/example/proc/alpha",
+                "shared",
+                "/datum/example",
+                "code/a.dm",
+                "Shared behavior.",
+                "return shared",
+            ),
+        ]);
+
+        let hits = index.search(&request("shared"));
+
+        assert_eq!(hits[0].document.symbol, "/datum/example/proc/alpha");
+        assert_eq!(hits[1].document.symbol, "/datum/example/proc/beta");
+    }
+
+    #[test]
+    fn object_tree_index_preserves_proc_source_docs_and_relationships() {
+        let (directory, environment_path) = write_environment_fixture();
+        let context = Context::default();
+        let objtree = context
+            .parse_environment(&environment_path)
+            .expect("fixture environment should parse");
+        let index = SearchIndex::from_object_tree(&objtree, &context, &environment_path);
+
+        let hits = index.search(&request("gas mixture temperature air reset"));
+        let proc_hit = hits
+            .iter()
+            .find(|hit| hit.document.kind == SymbolKind::Proc)
+            .expect("documented proc should be indexed");
+
+        assert_eq!(proc_hit.document.name, "reset_temperature");
+        assert_eq!(proc_hit.document.type_path, "/datum/example");
+        assert_eq!(proc_hit.document.parent.as_deref(), Some("/datum"));
+        assert!(proc_hit.document.file.ends_with("fixture.dm"));
+        assert!(proc_hit.document.docs.contains("gas mixture temperature"));
+        assert!(proc_hit
+            .document
+            .source
+            .as_deref()
+            .is_some_and(|source| source.contains("target_temperature")));
+        assert_eq!(proc_hit.document.parameters, ["target_temperature"]);
+        assert_eq!(proc_hit.document.override_index, Some(1));
+        assert_eq!(proc_hit.document.override_count, Some(1));
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
