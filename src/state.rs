@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::process::Child;
+use tokio::task::JoinHandle;
 
 use crate::search::SearchIndex;
 
@@ -64,6 +65,8 @@ pub struct ServerState {
     pub game_port: Option<u16>,
     /// Recent DreamDaemon stdout and stderr lines
     pub output_log: OutputLog,
+    /// Background readers collecting DreamDaemon output
+    pub runtime_output_tasks: Vec<JoinHandle<()>>,
     /// Exit code of the most recently exited DreamDaemon process
     pub last_exit_code: Option<i32>,
 }
@@ -78,6 +81,7 @@ impl ServerState {
             game_process: None,
             game_port: None,
             output_log: Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_LOG_CAPACITY))),
+            runtime_output_tasks: Vec::new(),
             last_exit_code: None,
         }
     }
@@ -103,12 +107,24 @@ impl ServerState {
 
     /// Clear diagnostics from a previous DreamDaemon process before starting a new one.
     pub fn clear_runtime_diagnostics(&mut self) {
+        self.abort_runtime_output_tasks();
         let mut lines = self
             .output_log
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         lines.clear();
         self.last_exit_code = None;
+    }
+
+    /// Track a background DreamDaemon output reader for lifecycle cleanup.
+    pub fn add_runtime_output_task(&mut self, task: JoinHandle<()>) {
+        self.runtime_output_tasks.push(task);
+    }
+
+    fn abort_runtime_output_tasks(&mut self) {
+        for task in self.runtime_output_tasks.drain(..) {
+            task.abort();
+        }
     }
 
     /// Return up to `limit` of the most recent process output lines.
@@ -170,6 +186,8 @@ impl ServerState {
             let status = process.wait().await?;
             self.last_exit_code = status.code();
         }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.abort_runtime_output_tasks();
         self.game_port = None;
         Ok(())
     }

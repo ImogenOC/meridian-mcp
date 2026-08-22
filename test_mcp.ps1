@@ -9,6 +9,16 @@ param(
     [string]$TypePath,
     [string]$ProcName,
     [string]$SearchQuery,
+    [string]$RuntimeDmbPath,
+    [string]$RuntimeReadyMarker,
+    [string]$RuntimeTopic,
+    [string]$ExpectedTopicResponse,
+    [string]$MapDmmPath,
+    [string]$MapTypePath,
+    [string]$MapRenderOutputPath,
+    [switch]$RequireVisibleMapPixels,
+    [ValidateRange(1, 65535)]
+    [int]$RuntimePort = 14567,
     [ValidateRange(1, 3600)]
     [int]$TimeoutSeconds = 30,
     [switch]$SkipBuild
@@ -244,6 +254,115 @@ if ($SearchQuery) {
     })
 }
 
+if ($RuntimeDmbPath) {
+    if (-not (Test-Path -LiteralPath $RuntimeDmbPath -PathType Leaf)) {
+        throw "Runtime DMB file not found: $RuntimeDmbPath"
+    }
+    if (-not $RuntimeReadyMarker) {
+        throw '-RuntimeDmbPath requires -RuntimeReadyMarker'
+    }
+
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 10
+        method = "tools/call"
+        params = [ordered]@{
+            name = "dm_run"
+            arguments = [ordered]@{
+                dmb_path = (Resolve-Path -LiteralPath $RuntimeDmbPath).Path
+                port = $RuntimePort
+                wait_for = $RuntimeReadyMarker
+                startup_timeout_ms = 15000
+            }
+        }
+    })
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 11
+        method = "tools/call"
+        params = [ordered]@{ name = "dm_status"; arguments = [ordered]@{} }
+    })
+    if ($RuntimeTopic) {
+        $requests += ConvertTo-JsonRpcLine ([ordered]@{
+            jsonrpc = "2.0"
+            id = 12
+            method = "tools/call"
+            params = [ordered]@{
+                name = "dm_topic"
+                arguments = [ordered]@{ topic = $RuntimeTopic; timeout_ms = 5000 }
+            }
+        })
+    }
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 13
+        method = "tools/call"
+        params = [ordered]@{
+            name = "dm_connect_test"
+            arguments = [ordered]@{ timeout_secs = 1 }
+        }
+    })
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 14
+        method = "tools/call"
+        params = [ordered]@{ name = "dm_stop"; arguments = [ordered]@{} }
+    })
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 15
+        method = "tools/call"
+        params = [ordered]@{ name = "dm_status"; arguments = [ordered]@{} }
+    })
+}
+
+if ($MapDmmPath) {
+    if (-not (Test-Path -LiteralPath $MapDmmPath -PathType Leaf)) {
+        throw "Map DMM file not found: $MapDmmPath"
+    }
+    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 16
+        method = "tools/call"
+        params = [ordered]@{
+            name = "dm_map_info"
+            arguments = [ordered]@{ dmm_path = (Resolve-Path -LiteralPath $MapDmmPath).Path }
+        }
+    })
+    if ($MapTypePath) {
+        $requests += ConvertTo-JsonRpcLine ([ordered]@{
+            jsonrpc = "2.0"
+            id = 17
+            method = "tools/call"
+            params = [ordered]@{
+                name = "dm_find_on_map"
+                arguments = [ordered]@{
+                    dmm_path = (Resolve-Path -LiteralPath $MapDmmPath).Path
+                    type_path = $MapTypePath
+                }
+            }
+        })
+    }
+    if ($MapRenderOutputPath) {
+        if (-not $DmePath) {
+            throw '-MapRenderOutputPath requires -DmePath for icon and type metadata'
+        }
+        $requests += ConvertTo-JsonRpcLine ([ordered]@{
+            jsonrpc = "2.0"
+            id = 18
+            method = "tools/call"
+            params = [ordered]@{
+                name = "dm_render_map"
+                arguments = [ordered]@{
+                    dmm_path = (Resolve-Path -LiteralPath $MapDmmPath).Path
+                    output_path = $MapRenderOutputPath
+                    z_level = 1
+                }
+            }
+        })
+    }
+}
+
 $session = Invoke-McpSession -Requests $requests -TimeoutMilliseconds ($TimeoutSeconds * 1000)
 $sessionExitCode = $session.ExitCode
 if ($sessionExitCode -ne 0) {
@@ -359,6 +478,97 @@ if ($SearchQuery) {
     }
 }
 
+if ($RuntimeDmbPath) {
+    $runResponse = Assert-Response -Responses $session.Responses -Id 10
+    if ($runResponse.result.isError) {
+        throw "dm_run returned an MCP tool error: $($runResponse.result.content[0].text)"
+    }
+    $runPayload = $runResponse.result.content[0].text | ConvertFrom-Json
+    if (-not $runPayload.success -or -not $runPayload.readiness.matched) {
+        throw "dm_run did not verify readiness: $($runResponse.result.content[0].text)"
+    }
+
+    $runningResponse = Assert-Response -Responses $session.Responses -Id 11
+    $runningPayload = $runningResponse.result.content[0].text | ConvertFrom-Json
+    if (-not $runningPayload.running) {
+        throw "dm_status did not report the fixture as running"
+    }
+
+    if ($RuntimeTopic) {
+        $topicResponse = Assert-Response -Responses $session.Responses -Id 12
+        if ($topicResponse.result.isError) {
+            throw "dm_topic returned an MCP tool error: $($topicResponse.result.content[0].text)"
+        }
+        $topicPayload = $topicResponse.result.content[0].text | ConvertFrom-Json
+        if ($PSBoundParameters.ContainsKey('ExpectedTopicResponse') -and
+            $topicPayload.response -ne $ExpectedTopicResponse) {
+            throw "dm_topic returned '$($topicPayload.response)', expected '$ExpectedTopicResponse'"
+        }
+    }
+
+    $connectResponse = Assert-Response -Responses $session.Responses -Id 13
+    if ($connectResponse.result.isError) {
+        $connectPayload = $connectResponse.result.content[0].text | ConvertFrom-Json
+        if (-not $connectPayload.experimental) {
+            throw "dm_connect_test failure was not classified as experimental"
+        }
+    }
+
+    $stopResponse = Assert-Response -Responses $session.Responses -Id 14
+    if ($stopResponse.result.isError) {
+        throw "dm_stop returned an MCP tool error: $($stopResponse.result.content[0].text)"
+    }
+    $stoppedResponse = Assert-Response -Responses $session.Responses -Id 15
+    $stoppedPayload = $stoppedResponse.result.content[0].text | ConvertFrom-Json
+    if ($stoppedPayload.running) {
+        throw "dm_status still reported the fixture as running after dm_stop"
+    }
+}
+
+if ($MapDmmPath) {
+    $mapInfoResponse = Assert-Response -Responses $session.Responses -Id 16
+    if ($mapInfoResponse.result.isError) {
+        throw "dm_map_info returned an MCP tool error: $($mapInfoResponse.result.content[0].text)"
+    }
+    $mapInfoPayload = $mapInfoResponse.result.content[0].text | ConvertFrom-Json
+    if ($mapInfoPayload.dimensions.x -le 0 -or $mapInfoPayload.dimensions.y -le 0 -or
+        $mapInfoPayload.dimensions.z -le 0) {
+        throw "dm_map_info returned invalid dimensions"
+    }
+
+    if ($MapTypePath) {
+        $findResponse = Assert-Response -Responses $session.Responses -Id 17
+        if ($findResponse.result.isError) {
+            throw "dm_find_on_map returned an MCP tool error: $($findResponse.result.content[0].text)"
+        }
+        $findPayload = $findResponse.result.content[0].text | ConvertFrom-Json
+        if ($findPayload.PSObject.Properties.Name -notcontains 'coordinates') {
+            throw "dm_find_on_map did not return exact coordinates"
+        }
+    }
+
+    if ($MapRenderOutputPath) {
+        $renderResponse = Assert-Response -Responses $session.Responses -Id 18
+        if ($renderResponse.result.isError) {
+            throw "dm_render_map returned an MCP tool error: $($renderResponse.result.content[0].text)"
+        }
+        $renderPayload = $renderResponse.result.content[0].text | ConvertFrom-Json
+        if (-not $renderPayload.success -or -not (Test-Path -LiteralPath $MapRenderOutputPath -PathType Leaf)) {
+            throw "dm_render_map did not create its PNG output"
+        }
+        if ($renderPayload.PSObject.Properties.Name -notcontains 'non_transparent_pixels') {
+            throw "dm_render_map did not report whether the PNG contains visible pixels"
+        }
+        if ($RequireVisibleMapPixels -and $renderPayload.non_transparent_pixels -le 0) {
+            throw "dm_render_map produced a fully transparent PNG when visible pixels were required"
+        }
+        [byte[]]$signature = Get-Content -LiteralPath $MapRenderOutputPath -AsByteStream -TotalCount 8
+        if (($signature | ForEach-Object { $_.ToString('X2') }) -join '' -ne '89504E470D0A1A0A') {
+            throw "dm_render_map output is not a PNG"
+        }
+    }
+}
+
 if ($CompileDmePath) {
     $compileResponse = Assert-Response -Responses $session.Responses -Id 8
     $compileFailed = $compileResponse.result.isError -eq $true
@@ -390,6 +600,15 @@ if ($ProcName) {
 }
 if ($SearchQuery) {
     Write-Output "Ranked context search smoke test passed: $SearchQuery"
+}
+if ($RuntimeDmbPath) {
+    Write-Output "DreamDaemon runtime smoke test passed: readiness, Topic, handshake classification, and stop"
+}
+if ($MapDmmPath) {
+    Write-Output "Map inspection smoke test passed: $MapDmmPath"
+}
+if ($MapRenderOutputPath) {
+    Write-Output "Map render smoke test passed: $MapRenderOutputPath ($($renderPayload.non_transparent_pixels) visible pixels)"
 }
 
 if ($CompileDmePath) {

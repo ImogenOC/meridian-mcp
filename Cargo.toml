@@ -9,7 +9,7 @@ license = "MIT"
 # SpacemanDMM crates from GitHub
 dreammaker = { git = "https://github.com/SpaceManiac/SpacemanDMM", branch = "master" }
 dreamchecker = { git = "https://github.com/SpaceManiac/SpacemanDMM", branch = "master" }
-dmm-tools = { git = "https://github.com/SpaceManiac/SpacemanDMM", branch = "master" }
+dmm-tools = { git = "https://github.com/SpaceManiac/SpacemanDMM", branch = "master", features = ["png"] }
 
 # MCP/JSON-RPC handling
 serde = { version = "1.0", features = ["derive"] }

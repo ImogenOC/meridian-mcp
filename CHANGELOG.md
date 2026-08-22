@@ -5,6 +5,17 @@ All notable changes to meridian-mcp will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Read DreamDaemon `-logself` files so readiness markers and runtime output are available on Windows.
+- Correct BYOND Topic request framing and response decoding for string and float responses.
+- Parse DMM/TGM maps with SpacemanDMM for exact dimensions, instance counts, and coordinates.
+- Render actual map PNGs through the SpacemanDMM minimap pipeline.
+- Return type children and documentation, proc documentation and accurate body metadata, and variable documentation and declared types.
+- Return experimental full-client handshake failures as structured tool errors instead of JSON-RPC internal errors.
+
 ## [0.1.0] - 2026-01-28
 
 ### Added

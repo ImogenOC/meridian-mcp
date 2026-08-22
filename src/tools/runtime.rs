@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::process::Command;
 use tracing::info;
 
@@ -14,6 +15,7 @@ const DEFAULT_OUTPUT_WAIT_TIMEOUT_MS: u64 = 30_000;
 const MAX_OUTPUT_WAIT_TIMEOUT_MS: u64 = 300_000;
 const OUTPUT_WAIT_POLL_INTERVAL_MS: u64 = 100;
 const OUTPUT_READ_CHUNK_BYTES: usize = 8 * 1024;
+const LOG_FILE_POLL_INTERVAL_MS: u64 = 50;
 
 use crate::client::BYONDClient;
 use crate::mcp::ToolResult;
@@ -152,6 +154,10 @@ pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
     // relative config, log, and map paths resolve against the game checkout rather than the MCP
     // server's installation directory.
     let daemon_args = build_dreamdaemon_args(&spawn_path, port, &extra_args);
+    let log_path = spawn_path.with_extension("log");
+    let log_start_offset = std::fs::metadata(&log_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     let mut child = Command::new(&dreamdaemon)
         .args(&daemon_args)
         .current_dir(working_directory)
@@ -167,17 +173,27 @@ pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
 
     if let Some(stdout) = stdout {
         let output_log = Arc::clone(&state.output_log);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             capture_output_stream(stdout, output_log).await;
         });
+        state.add_runtime_output_task(task);
     }
 
     if let Some(stderr) = stderr {
         let output_log = Arc::clone(&state.output_log);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             capture_output_stream(stderr, output_log).await;
         });
+        state.add_runtime_output_task(task);
     }
+
+    let output_log = Arc::clone(&state.output_log);
+    let task = tokio::spawn(capture_output_file(
+        log_path.clone(),
+        log_start_offset,
+        output_log,
+    ));
+    state.add_runtime_output_task(task);
 
     // Give the child process a short window to fail before returning control to the caller.
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -257,6 +273,60 @@ where
 
     if !line_buffer.is_empty() || line_truncated {
         push_captured_output_line(&output_log, &mut line_buffer, line_truncated);
+    }
+}
+
+async fn capture_output_file(path: PathBuf, start_offset: u64, output_log: OutputLog) {
+    let mut file = loop {
+        match OpenOptions::new().read(true).open(&path).await {
+            Ok(file) => break file,
+            Err(_) => tokio::time::sleep(Duration::from_millis(LOG_FILE_POLL_INTERVAL_MS)).await,
+        }
+    };
+
+    let mut offset = start_offset;
+    if file.seek(SeekFrom::Start(offset)).await.is_err() {
+        return;
+    }
+
+    let mut read_buffer = [0_u8; OUTPUT_READ_CHUNK_BYTES];
+    let mut line_buffer = Vec::with_capacity(OUTPUT_READ_CHUNK_BYTES);
+    let mut line_truncated = false;
+    let line_content_limit = OUTPUT_LINE_MAX_BYTES.saturating_sub(OUTPUT_TRUNCATED_SUFFIX.len());
+
+    loop {
+        match file.read(&mut read_buffer).await {
+            Ok(0) => {
+                if let Ok(metadata) = file.metadata().await {
+                    if metadata.len() < offset {
+                        offset = 0;
+                        line_buffer.clear();
+                        line_truncated = false;
+                        if file.seek(SeekFrom::Start(0)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(LOG_FILE_POLL_INTERVAL_MS)).await;
+            }
+            Ok(bytes_read) => {
+                offset += bytes_read as u64;
+                for byte in &read_buffer[..bytes_read] {
+                    if *byte == b'\n' {
+                        push_captured_output_line(&output_log, &mut line_buffer, line_truncated);
+                        line_truncated = false;
+                        continue;
+                    }
+
+                    if line_buffer.len() < line_content_limit {
+                        line_buffer.push(*byte);
+                    } else {
+                        line_truncated = true;
+                    }
+                }
+            }
+            Err(_) => return,
+        }
     }
 }
 
@@ -365,6 +435,8 @@ mod tests {
     use super::*;
     use crate::mcp::ToolContent;
     use crate::state::push_output_line;
+    use std::fs::OpenOptions;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(windows)]
     #[test]
@@ -468,6 +540,75 @@ mod tests {
         assert!(lines[0].len() <= 16_384);
         assert!(lines[0].ends_with("... [truncated]"));
     }
+
+    #[test]
+    fn topic_packet_matches_the_byond_export_wire_format() {
+        assert_eq!(
+            build_topic_packet("ping").expect("topic packet should build"),
+            vec![
+                0x00, 0x83, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, b'p', b'i', b'n', b'g', 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn topic_response_decodes_strings_and_floats() {
+        assert_eq!(
+            decode_topic_response(&[0x06, b'p', b'o', b'n', b'g', 0x00])
+                .expect("string response should decode"),
+            "pong"
+        );
+        assert_eq!(
+            decode_topic_response(&[0x2a, 0x00, 0x00, 0x20, 0x40])
+                .expect("float response should decode"),
+            "2.5"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_capture_starts_at_the_recorded_offset_and_follows_appends() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "meridian-mcp-runtime-log-{}-{unique}.log",
+            std::process::id()
+        ));
+        std::fs::write(&path, "old run\n").unwrap();
+        let start_offset = std::fs::metadata(&path).unwrap().len();
+        let log = crate::state::OutputLog::default();
+        let task = tokio::spawn(capture_output_file(
+            path.clone(),
+            start_offset,
+            Arc::clone(&log),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "new run ready").unwrap();
+        file.flush().unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|line| line == "new run ready")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("appended log output should be captured");
+
+        task.abort();
+        assert!(!log.lock().unwrap().iter().any(|line| line == "old run"));
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 /// Stop the running DreamDaemon instance
@@ -551,41 +692,12 @@ pub async fn topic(state: &mut ServerState, args: Value) -> Result<ToolResult> {
 
 /// Send a BYOND Topic packet and get response
 async fn send_topic(address: &str, topic: &str, timeout_ms: u64) -> Result<String> {
-    // BYOND Topic packet format:
-    // Bytes 0-1: 0x00 0x83 (magic header)
-    // Bytes 2-3: Length of data (big-endian u16)
-    // Bytes 4+: The topic string as null-terminated ASCII
-
-    // Strip leading "?" if present - it's a URL delimiter, not part of the topic
     let topic_clean = topic.strip_prefix('?').unwrap_or(topic);
-    let topic_bytes = topic_clean.as_bytes();
-
     info!(
         "Sending topic packet for: {} (cleaned: {})",
         topic, topic_clean
     );
-    let packet_len = topic_bytes.len() + 6; // +1 for null terminator, +5 for header overhead
-
-    let mut packet = Vec::with_capacity(packet_len);
-    packet.push(0x00); // Magic byte 1
-    packet.push(0x83); // Magic byte 2
-
-    // Length (big-endian u16) - includes 5 padding bytes + 1 type byte + string + null terminator
-    let data_len = (topic_bytes.len() + 7) as u16;
-    packet.push((data_len >> 8) as u8);
-    packet.push((data_len & 0xFF) as u8);
-
-    // Type: 0x06 for string topic
-    packet.push(0x00);
-    packet.push(0x00);
-    packet.push(0x00);
-    packet.push(0x00);
-    packet.push(0x00);
-    packet.push(0x06); // String type
-
-    // The topic string
-    packet.extend_from_slice(topic_bytes);
-    packet.push(0x00); // Null terminator
+    let packet = build_topic_packet(topic_clean)?;
 
     // Clone address for the blocking task
     let address_owned = address.to_string();
@@ -622,49 +734,51 @@ async fn send_topic(address: &str, topic: &str, timeout_ms: u64) -> Result<Strin
     let mut response_data = vec![0u8; response_len as usize];
     std::io::Read::read_exact(&mut stream, &mut response_data)?;
 
-    // Response format depends on type byte
-    if response_data.is_empty() {
-        return Ok(String::new());
+    decode_topic_response(&response_data)
+}
+
+fn build_topic_packet(topic: &str) -> Result<Vec<u8>> {
+    let topic_bytes = topic.as_bytes();
+    let data_len = topic_bytes.len() + 6;
+    if data_len > u16::MAX as usize {
+        return Err(anyhow!("Topic is too long"));
     }
 
-    // Skip type indicator and parse as string
-    let response_str = if response_data.len() > 1 {
-        // Check response type
-        match response_data[0] {
-            0x06 => {
-                // ASCII string - skip type byte, read until null
-                let string_data = &response_data[1..];
-                let null_pos = string_data
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(string_data.len());
-                String::from_utf8_lossy(&string_data[..null_pos]).to_string()
-            }
-            0x2a => {
-                // Float response
-                if response_data.len() >= 5 {
-                    let float_bytes: [u8; 4] = [
-                        response_data[1],
-                        response_data[2],
-                        response_data[3],
-                        response_data[4],
-                    ];
-                    let value = f32::from_le_bytes(float_bytes);
-                    value.to_string()
-                } else {
-                    String::new()
-                }
-            }
-            _ => {
-                // Unknown type, return hex representation
-                format!("raw:{:02x?}", response_data)
-            }
-        }
-    } else {
-        String::new()
+    let mut packet = Vec::with_capacity(4 + data_len);
+    packet.extend_from_slice(&[0x00, 0x83, (data_len >> 8) as u8, (data_len & 0xff) as u8]);
+    packet.extend_from_slice(&[0x00; 5]);
+    packet.extend_from_slice(topic_bytes);
+    packet.push(0x00);
+    Ok(packet)
+}
+
+fn decode_topic_response(response_data: &[u8]) -> Result<String> {
+    let Some(response_type) = response_data.first() else {
+        return Err(anyhow!("BYOND returned an empty Topic response"));
     };
 
-    Ok(response_str)
+    match response_type {
+        0x00 if response_data.len() == 1 => Ok(String::new()),
+        0x06 => {
+            let string_data = &response_data[1..];
+            let null_pos = string_data
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(string_data.len());
+            Ok(String::from_utf8_lossy(&string_data[..null_pos]).to_string())
+        }
+        0x2a if response_data.len() >= 5 => {
+            let float_bytes = response_data[1..5]
+                .try_into()
+                .expect("length was checked before conversion");
+            Ok(f32::from_le_bytes(float_bytes).to_string())
+        }
+        0x2a => Err(anyhow!("BYOND returned a truncated float Topic response")),
+        _ => Err(anyhow!(
+            "BYOND returned an unknown Topic response type: 0x{:02x}",
+            response_type
+        )),
+    }
 }
 
 /// Test connecting to the BYOND server as a client and log received packets
@@ -715,7 +829,27 @@ pub async fn connect_test(state: &mut ServerState, args: Value) -> Result<ToolRe
             "packets": packet_summary
         }))
     })
-    .await??;
+    .await;
 
-    Ok(ToolResult::text(result.to_string()))
+    match result {
+        Ok(Ok(payload)) => Ok(ToolResult::text(payload.to_string())),
+        Ok(Err(error)) => Ok(ToolResult::error(
+            json!({
+                "success": false,
+                "experimental": true,
+                "message": error.to_string(),
+                "port": port
+            })
+            .to_string(),
+        )),
+        Err(error) => Ok(ToolResult::error(
+            json!({
+                "success": false,
+                "experimental": true,
+                "message": format!("BYOND client diagnostic task failed: {error}"),
+                "port": port
+            })
+            .to_string(),
+        )),
+    }
 }

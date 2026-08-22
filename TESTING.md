@@ -11,7 +11,8 @@ cargo test
 cargo build --release
 ```
 
-`cargo test` covers the bounded DreamDaemon output log, literal and regular-expression matching,
+`cargo test` covers the bounded DreamDaemon output log and log-file follower, BYOND Topic framing,
+literal and regular-expression matching, exact map parsing/search and PNG output, inspection metadata,
 source excerpt boundaries and limits, parser-backed symbol metadata, BM25 relevance and exact-symbol
 boosts, search filters and deterministic ordering, MCP search schema/lifecycle behavior, and compiler
 diagnostic parsing. The release build is the binary used by the protocol smoke tests.
@@ -21,6 +22,20 @@ diagnostic parsing. The release build is the binary used by the protocol smoke t
 ```powershell
 pwsh -NoProfile -File .\test_mcp.ps1
 pwsh -NoProfile -File .\test_mcp.ps1 -SkipBuild
+
+# Exercise DreamDaemon readiness, Topic framing, the experimental handshake diagnostic, and stop.
+pwsh -NoProfile -File .\test_mcp.ps1 -SkipBuild `
+    -RuntimeDmbPath ..\path\to\fixture.dmb `
+    -RuntimeReadyMarker "FIXTURE_READY" `
+    -RuntimeTopic ping -ExpectedTopicResponse pong
+
+# Exercise parser-backed map statistics, coordinates, and PNG rendering.
+pwsh -NoProfile -File .\test_mcp.ps1 -SkipBuild `
+    -DmePath ..\path\to\project.dme `
+    -MapDmmPath ..\path\to\map.dmm `
+    -MapTypePath /obj/machinery/door `
+    -MapRenderOutputPath .\map-smoke.png `
+    -RequireVisibleMapPixels
 
 # Assert that a DME rejected by DreamMaker is not reported as success. The assertion accepts either
 # structured compiler diagnostics or an explicit bounded idle/timeout classification.
@@ -68,7 +83,9 @@ and uses the PowerShell assertions, avoiding a second implementation of the prot
 
 ## Runtime diagnostics
 
-`dm_run` continuously drains DreamDaemon stdout and stderr into a bounded 500-line ring buffer.
+`dm_run` continuously drains DreamDaemon stdout and stderr and follows newly appended content in the
+DMB-adjacent `-logself` file into a bounded 500-line ring buffer. The file follower starts at the
+pre-launch file length, so output retained from earlier runs is not reported as current readiness.
 It accepts optional `working_directory` and `daemon_args` values, so a relative test DMB can be
 run from its game checkout with arguments such as `-close`, `-params`, and `log-directory=ci`.
 The daemon is started from the DMB's parent directory, preventing the MCP installation directory

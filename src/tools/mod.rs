@@ -414,7 +414,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     // Client connection test tool
     tools.push(ToolDefinition {
         name: "dm_connect_test".to_string(),
-        description: "Test connecting to the running game as a BYOND client and log received packets. Used for protocol debugging.".to_string(),
+        description: "Experimental protocol diagnostic: attempt a full BYOND client handshake and summarize initial packets. Failures are returned as structured tool errors; use dm_topic for supported server communication.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {

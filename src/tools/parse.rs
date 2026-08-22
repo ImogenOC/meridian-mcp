@@ -118,12 +118,15 @@ pub async fn get_type(state: &mut ServerState, args: Value) -> Result<ToolResult
 
             // Get parent
             let parent = ty.parent_type().map(|p| p.path.to_string());
+            let children: Vec<_> = ty.children().map(|child| child.path.to_string()).collect();
 
             let file_path = get_file_path(context, ty.location.file);
 
             let result = json!({
                 "path": ty.path,
                 "parent": parent,
+                "children": children,
+                "documentation": ty.docs.text(),
                 "vars": vars,
                 "procs": procs,
                 "location": format!("{}:{}:{}",
@@ -179,15 +182,16 @@ pub async fn get_proc(state: &mut ServerState, args: Value) -> Result<ToolResult
 
                             json!({
                                 "parameters": params,
+                                "documentation": v.docs.text(),
                                 "location": format!("{}:{}:{}",
                                     file_path,
                                     v.location.line,
                                     v.location.column
                                 ),
-                                "has_body": v.code.is_some(),
+                                "has_body": v.code.is_some() || v.body_range.is_some(),
                                 "source": extract_source(
                                     resolve_source_path(state, &file_path).to_string_lossy().as_ref(),
-                                    v.location.line as u32,
+                                    v.location.line,
                                 )
                             })
                         })
@@ -242,6 +246,8 @@ pub async fn get_var(state: &mut ServerState, args: Value) -> Result<ToolResult>
                     "name": var_name,
                     "type_path": type_path,
                     "declared": var.declaration.is_some(),
+                    "declared_type": var.declaration.as_ref().map(|declaration| declaration.var_type.to_string()),
+                    "documentation": var.value.docs.text(),
                     "constant": var.value.constant.as_ref().map(|c| format!("{:?}", c)),
                     "has_expression": var.value.expression.is_some(),
                     "location": format!("{}:{}:{}",
@@ -395,4 +401,127 @@ pub async fn search_symbols(state: &mut ServerState, args: Value) -> Result<Tool
     });
 
     Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{ToolContent, ToolResult};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn result_json(result: &ToolResult) -> Value {
+        let ToolContent::Text { text } = &result.content[0] else {
+            panic!("expected text tool result");
+        };
+        serde_json::from_str(text).expect("tool result should be JSON")
+    }
+
+    fn write_environment_fixture() -> (PathBuf, PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "meridian-mcp-inspection-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let dme_path = directory.join("fixture.dme");
+        std::fs::write(&dme_path, "#include \"fixture.dm\"\n").unwrap();
+        std::fs::write(
+            directory.join("fixture.dm"),
+            r#"/** Fixture parent documentation. */
+/datum/meridian_fixture
+	/// Stored fixture values.
+	var/list/items = list()
+
+/** Return the supplied value.
+ * Arguments:
+ * * value - value to return
+ */
+/datum/meridian_fixture/proc/do_work(value)
+	return value
+
+/datum/meridian_fixture/child
+"#,
+        )
+        .unwrap();
+        (directory, dme_path)
+    }
+
+    async fn parsed_fixture() -> (PathBuf, ServerState) {
+        let (directory, dme_path) = write_environment_fixture();
+        let mut state = ServerState::new();
+        let result = parse_environment(&mut state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, None);
+        (directory, state)
+    }
+
+    #[tokio::test]
+    async fn type_inspection_returns_docs_and_direct_children() {
+        let (directory, mut state) = parsed_fixture().await;
+        let result = get_type(&mut state, json!({"type_path": "/datum/meridian_fixture"}))
+            .await
+            .unwrap();
+        let payload = result_json(&result);
+
+        assert!(payload["documentation"]
+            .as_str()
+            .unwrap()
+            .contains("Fixture parent documentation"));
+        assert_eq!(
+            payload["children"],
+            json!(["/datum/meridian_fixture/child"])
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn proc_inspection_reports_docs_and_a_parsed_body() {
+        let (directory, mut state) = parsed_fixture().await;
+        let result = get_proc(
+            &mut state,
+            json!({
+                "type_path": "/datum/meridian_fixture",
+                "proc_name": "do_work"
+            }),
+        )
+        .await
+        .unwrap();
+        let payload = result_json(&result);
+
+        assert_eq!(payload["overrides"][0]["has_body"], true);
+        assert!(payload["overrides"][0]["documentation"]
+            .as_str()
+            .unwrap()
+            .contains("Return the supplied value"));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn variable_inspection_returns_declared_type_and_docs() {
+        let (directory, mut state) = parsed_fixture().await;
+        let result = get_var(
+            &mut state,
+            json!({
+                "type_path": "/datum/meridian_fixture",
+                "var_name": "items"
+            }),
+        )
+        .await
+        .unwrap();
+        let payload = result_json(&result);
+
+        assert!(payload["declared_type"].as_str().unwrap().contains("list"));
+        assert!(payload["documentation"]
+            .as_str()
+            .unwrap()
+            .contains("Stored fixture values"));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
