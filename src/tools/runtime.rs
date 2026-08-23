@@ -62,7 +62,7 @@ fn normalize_spawn_path(path: &Path) -> PathBuf {
     {
         let path_text = path.to_string_lossy();
         if let Some(unc_path) = path_text.strip_prefix(r"\\?\UNC\") {
-            return PathBuf::from(format!(r"\\{}", unc_path));
+            return PathBuf::from(format!(r"\\{unc_path}"));
         }
         if let Some(dos_path) = path_text.strip_prefix(r"\\?\") {
             return PathBuf::from(dos_path);
@@ -108,10 +108,7 @@ pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
         requested_path
     };
     if !path.exists() {
-        return Ok(ToolResult::error(format!(
-            "DMB file not found: {}",
-            dmb_path
-        )));
+        return Ok(ToolResult::error(format!("DMB file not found: {dmb_path}")));
     }
     let path = path.canonicalize()?;
     let spawn_path = normalize_spawn_path(&path);
@@ -358,7 +355,7 @@ async fn wait_for_output_value(
     loop {
         let matched = state
             .matches_output(pattern, use_regex)
-            .map_err(|error| anyhow!("Invalid output regex: {}", error))?;
+            .map_err(|error| anyhow!("Invalid output regex: {error}"))?;
         if matched {
             return Ok(json!({
                 "matched": true,
@@ -624,8 +621,7 @@ pub async fn stop(state: &mut ServerState, _args: Value) -> Result<ToolResult> {
             .to_string(),
         )),
         Err(e) => Ok(ToolResult::error(format!(
-            "Failed to stop DreamDaemon: {}",
-            e
+            "Failed to stop DreamDaemon: {e}"
         ))),
     }
 }
@@ -676,7 +672,7 @@ pub async fn topic(state: &mut ServerState, args: Value) -> Result<ToolResult> {
 
     info!("Sending Topic to port {}: {}", port, topic_string);
 
-    match send_topic(&format!("127.0.0.1:{}", port), topic_string, timeout_ms).await {
+    match send_topic(&format!("127.0.0.1:{port}"), topic_string, timeout_ms).await {
         Ok(response) => Ok(ToolResult::text(
             json!({
                 "success": true,
@@ -684,7 +680,7 @@ pub async fn topic(state: &mut ServerState, args: Value) -> Result<ToolResult> {
             })
             .to_string(),
         )),
-        Err(e) => Ok(ToolResult::error(format!("Topic call failed: {}", e))),
+        Err(e) => Ok(ToolResult::error(format!("Topic call failed: {e}"))),
     }
 }
 
@@ -773,8 +769,7 @@ fn decode_topic_response(response_data: &[u8]) -> Result<String> {
         }
         0x2a => Err(anyhow!("BYOND returned a truncated float Topic response")),
         _ => Err(anyhow!(
-            "BYOND returned an unknown Topic response type: 0x{:02x}",
-            response_type
+            "BYOND returned an unknown Topic response type: 0x{response_type:02x}"
         )),
     }
 }

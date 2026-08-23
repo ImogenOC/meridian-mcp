@@ -499,7 +499,7 @@ pub async fn call_tool(
         "dm_stop" => runtime::stop(state, args).await,
         "dm_status" => runtime::status(state, args).await,
         "dm_topic" => runtime::topic(state, args).await,
-        _ => Err(anyhow!("Unknown tool: {}", name)),
+        _ => Err(anyhow!("Unknown tool: {name}")),
     }
 }
 

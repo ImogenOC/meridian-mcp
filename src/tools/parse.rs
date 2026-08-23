@@ -20,7 +20,7 @@ pub async fn parse_environment(state: &mut ServerState, args: Value) -> Result<T
 
     let path = PathBuf::from(dme_path);
     if !path.exists() {
-        return Ok(ToolResult::error(format!("File not found: {}", dme_path)));
+        return Ok(ToolResult::error(format!("File not found: {dme_path}")));
     }
 
     info!("Parsing environment: {}", dme_path);
@@ -103,7 +103,7 @@ pub async fn get_type(state: &mut ServerState, args: Value) -> Result<ToolResult
                     json!({
                         "name": name.to_string(),
                         "has_value": var.value.expression.is_some(),
-                        "constant": var.value.constant.as_ref().map(|c| format!("{:?}", c)),
+                        "constant": var.value.constant.as_ref().map(|c| format!("{c:?}")),
                         "declared_here": var.declaration.is_some()
                     })
                 })
@@ -146,7 +146,7 @@ pub async fn get_type(state: &mut ServerState, args: Value) -> Result<ToolResult
 
             Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
         }
-        None => Ok(ToolResult::error(format!("Type not found: {}", type_path))),
+        None => Ok(ToolResult::error(format!("Type not found: {type_path}"))),
     }
 }
 
@@ -215,12 +215,11 @@ pub async fn get_proc(state: &mut ServerState, args: Value) -> Result<ToolResult
                     Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
                 }
                 None => Ok(ToolResult::error(format!(
-                    "Proc not found: {}/{}",
-                    type_path, proc_name
+                    "Proc not found: {type_path}/{proc_name}"
                 ))),
             }
         }
-        None => Ok(ToolResult::error(format!("Type not found: {}", type_path))),
+        None => Ok(ToolResult::error(format!("Type not found: {type_path}"))),
     }
 }
 
@@ -256,7 +255,7 @@ pub async fn get_var(state: &mut ServerState, args: Value) -> Result<ToolResult>
                     "declared": var.declaration.is_some(),
                     "declared_type": var.declaration.as_ref().map(|declaration| declaration.var_type.to_string()),
                     "documentation": var.value.docs.text(),
-                    "constant": var.value.constant.as_ref().map(|c| format!("{:?}", c)),
+                    "constant": var.value.constant.as_ref().map(|c| format!("{c:?}")),
                     "has_expression": var.value.expression.is_some(),
                     "location": format!("{}:{}:{}",
                         file_path,
@@ -268,11 +267,10 @@ pub async fn get_var(state: &mut ServerState, args: Value) -> Result<ToolResult>
                 Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
             }
             None => Ok(ToolResult::error(format!(
-                "Variable not found: {}/{}",
-                type_path, var_name
+                "Variable not found: {type_path}/{var_name}"
             ))),
         },
-        None => Ok(ToolResult::error(format!("Type not found: {}", type_path))),
+        None => Ok(ToolResult::error(format!("Type not found: {type_path}"))),
     }
 }
 

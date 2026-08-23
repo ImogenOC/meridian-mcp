@@ -128,7 +128,7 @@ fn normalize_spawn_path(path: &Path) -> PathBuf {
     {
         let path_text = path.to_string_lossy();
         if let Some(unc_path) = path_text.strip_prefix(r"\\?\UNC\") {
-            return PathBuf::from(format!(r"\\{}", unc_path));
+            return PathBuf::from(format!(r"\\{unc_path}"));
         }
         if let Some(dos_path) = path_text.strip_prefix(r"\\?\") {
             return PathBuf::from(dos_path);
@@ -422,7 +422,7 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
         .map(PathBuf::from);
     let path = resolve_requested_path(&requested_path, requested_working_directory.as_deref());
     if !path.exists() {
-        return Ok(ToolResult::error(format!("File not found: {}", dme_path)));
+        return Ok(ToolResult::error(format!("File not found: {dme_path}")));
     }
     let path = path.canonicalize()?;
 
@@ -461,7 +461,7 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
                     if define.starts_with("-D") {
                         define.to_string()
                     } else {
-                        format!("-D{}", define)
+                        format!("-D{define}")
                     }
                 })
                 .collect()

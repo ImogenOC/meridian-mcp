@@ -157,8 +157,7 @@ pub async fn get_definition(state: &mut ServerState, args: Value) -> Result<Tool
                 }
 
                 Ok(ToolResult::error(format!(
-                    "Member not found: {}/{}",
-                    type_path, member
+                    "Member not found: {type_path}/{member}"
                 )))
             } else {
                 // Just get the type definition
@@ -173,6 +172,6 @@ pub async fn get_definition(state: &mut ServerState, args: Value) -> Result<Tool
                 Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
             }
         }
-        None => Ok(ToolResult::error(format!("Type not found: {}", type_path))),
+        None => Ok(ToolResult::error(format!("Type not found: {type_path}"))),
     }
 }
