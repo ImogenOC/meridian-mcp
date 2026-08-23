@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::info;
 
 use dreammaker::Context;
@@ -10,6 +9,7 @@ use crate::mcp::ToolResult;
 use crate::search::SearchIndex;
 use crate::source::extract_source;
 use crate::state::ServerState;
+use crate::{PathPolicy, ProjectProfile};
 
 /// Parse a DreamMaker environment
 pub async fn parse_environment(state: &mut ServerState, args: Value) -> Result<ToolResult> {
@@ -32,20 +32,28 @@ pub async fn parse_environment(state: &mut ServerState, args: Value) -> Result<T
             let search_index = SearchIndex::from_object_tree(&objtree, &context, &path);
             let indexed_document_count = search_index.len();
 
-            state.environment_path = Some(path);
-            state.objtree = Some(Arc::new(objtree));
-            state.context = Some(context);
-            state.search_index = Some(Arc::new(search_index));
+            let profile = path.parent().and_then(|root| {
+                PathPolicy::new(vec![root.to_owned()], Vec::new())
+                    .ok()
+                    .and_then(|policy| ProjectProfile::discover(&policy, &path).ok())
+            });
+            state.replace_environment(path, context, objtree, search_index, profile);
 
-            Ok(ToolResult::text(format!(
-                "Successfully parsed environment: {}\nTotal types: {}\nIndexed symbols: {}",
-                dme_path, type_count, indexed_document_count
-            )))
+            Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
+                "success": true,
+                "environment": dme_path,
+                "total_types": type_count,
+                "indexed_symbols": indexed_document_count,
+                "state_generation": state.state_generation()
+            }))?))
         }
-        Err(e) => Ok(ToolResult::error(format!(
-            "Failed to parse environment: {}",
-            e
-        ))),
+        Err(error) => Ok(ToolResult::error(serde_json::to_string_pretty(&json!({
+            "success": false,
+            "error": error.to_string(),
+            "state_preserved": true,
+            "active_environment": state.environment_path.as_ref().map(|path| path.display().to_string()),
+            "state_generation": state.state_generation()
+        }))?)),
     }
 }
 
@@ -407,12 +415,13 @@ pub async fn search_symbols(state: &mut ServerState, args: Value) -> Result<Tool
 mod tests {
     use super::*;
     use crate::mcp::{ToolContent, ToolResult};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn result_json(result: &ToolResult) -> Value {
-        let ToolContent::Text { text } = &result.content[0] else {
-            panic!("expected text tool result");
-        };
+        let ToolContent::Text { text } = &result.content[0];
         serde_json::from_str(text).expect("tool result should be JSON")
     }
 
@@ -421,8 +430,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
-            "meridian-mcp-inspection-{}-{unique}",
+            "meridian-mcp-inspection-{}-{unique}-{sequence}",
             std::process::id()
         ));
         std::fs::create_dir_all(&directory).unwrap();
@@ -455,7 +465,7 @@ mod tests {
         let result = parse_environment(&mut state, json!({"dme_path": dme_path}))
             .await
             .unwrap();
-        assert_eq!(result.is_error, None);
+        assert_eq!(result.is_error, None, "parse result: {result:?}");
         (directory, state)
     }
 

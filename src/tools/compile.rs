@@ -255,7 +255,7 @@ async fn run_compiler(
         }
 
         if let Some(cpu_time) = process_cpu_time_100ns(process_id) {
-            if previous_cpu_time.map_or(true, |previous| cpu_time > previous) {
+            if previous_cpu_time.is_none_or(|previous| cpu_time > previous) {
                 last_progress = tokio::time::Instant::now();
             }
             previous_cpu_time = Some(cpu_time);
@@ -287,6 +287,7 @@ async fn run_compiler(
     })
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,11 +1,5 @@
-mod client;
-mod mcp;
-mod search;
-mod source;
-mod state;
-mod tools;
-
 use anyhow::Result;
+use meridian_mcp::ServerConfig;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -15,16 +9,14 @@ fn default_rust_log_filter() -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging to stderr (stdout is for MCP protocol)
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(default_rust_log_filter()))
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    info!("Starting Meridian-MCP DreamMaker server");
-
-    // Run the MCP server
-    mcp::run_server().await
+    let config = ServerConfig::from_env()?;
+    info!(mode = ?config.mode(), root_count = config.workspace_roots().len(), "starting Meridian-MCP");
+    meridian_mcp::run(config).await
 }
 
 #[cfg(test)]
@@ -33,10 +25,7 @@ mod tests {
 
     #[test]
     fn default_rust_log_filter_uses_meridian_target() {
-        unsafe {
-            std::env::remove_var("RUST_LOG");
-        }
-
+        unsafe { std::env::remove_var("RUST_LOG") };
         assert_eq!(default_rust_log_filter(), "meridian_mcp=info");
     }
 }

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added deterministic `dm_search_context` ranking over parsed DreamMaker symbols, documentation, source excerpts, and file paths.
+- Added provenance, source-authority, compatibility, dependency, and security records.
+
+### Changed
+
+- Defined analysis and development capability modes and evidence-based support labels.
+- Clarified that `dm_compile` is a direct DreamMaker gate rather than a repository full build.
+
+### Removed
+
+- Removed the unsupported inherited BYOND client-login protocol and `dm_connect_test` from the target supported product; `world.Topic()` remains separate.
+
 ### Fixed
 
 - Read DreamDaemon `-logself` files so readiness markers and runtime output are available on Windows.

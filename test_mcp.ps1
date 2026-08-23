@@ -2,7 +2,10 @@
 param(
     [ValidateSet("debug", "release")]
     [string]$Configuration = "release",
+    [Alias("ServerPath")]
     [string]$BinaryPath,
+    [ValidateSet("analysis", "development")]
+    [string]$Mode = "development",
     [string]$DmePath,
     [string]$CompileDmePath,
     [switch]$ExpectCompileFailure,
@@ -71,6 +74,16 @@ function Invoke-McpSession {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $workspaceRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    [void]$workspaceRoots.Add((Resolve-Path -LiteralPath $repoRoot).Path)
+    foreach ($candidate in @($DmePath, $CompileDmePath, $RuntimeDmbPath, $MapDmmPath, $MapRenderOutputPath)) {
+        if (-not $candidate) { continue }
+        $candidatePath = if (Test-Path -LiteralPath $candidate) { (Resolve-Path -LiteralPath $candidate).Path } else { [System.IO.Path]::GetFullPath($candidate) }
+        $rootCandidate = if ([System.IO.Directory]::Exists($candidatePath)) { $candidatePath } else { [System.IO.Path]::GetDirectoryName($candidatePath) }
+        if ($rootCandidate) { [void]$workspaceRoots.Add($rootCandidate) }
+    }
+    $startInfo.Environment["MERIDIAN_MCP_MODE"] = $Mode
+    $startInfo.Environment["MERIDIAN_MCP_ROOTS"] = [string]::Join([System.IO.Path]::PathSeparator, $workspaceRoots)
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
@@ -79,12 +92,32 @@ function Invoke-McpSession {
     }
 
     try {
-        # Start both readers before sending requests so a noisy server cannot fill either OS pipe
-        # while this harness is still writing stdin.
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        # Read each response before sending the next request. MCP permits concurrent request
+        # execution, so dependent parse/search calls must be sequenced by the client.
         $stderrTask = $process.StandardError.ReadToEndAsync()
+        $responses = @()
+        $stdoutLines = @()
         foreach ($request in $Requests) {
             $process.StandardInput.WriteLine($request)
+            $process.StandardInput.Flush()
+            $requestObject = $request | ConvertFrom-Json
+            if ($null -eq $requestObject.id) {
+                continue
+            }
+            $lineTask = $process.StandardOutput.ReadLineAsync()
+            if (-not $lineTask.Wait($TimeoutMilliseconds)) {
+                throw "meridian-mcp did not respond to request $($requestObject.id) within $TimeoutMilliseconds ms"
+            }
+            $line = $lineTask.GetAwaiter().GetResult()
+            if ($null -eq $line) {
+                throw "meridian-mcp closed stdout before responding to request $($requestObject.id)"
+            }
+            $stdoutLines += $line
+            try {
+                $responses += $line | ConvertFrom-Json
+            } catch {
+                throw "meridian-mcp emitted invalid JSON-RPC output: $line"
+            }
         }
         $process.StandardInput.Close()
 
@@ -96,16 +129,8 @@ function Invoke-McpSession {
             throw "meridian-mcp did not exit within $TimeoutMilliseconds ms"
         }
 
-        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stdout = [string]::Join([Environment]::NewLine, $stdoutLines)
         $stderr = $stderrTask.GetAwaiter().GetResult()
-        $responses = @()
-        foreach ($line in ($stdout -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })) {
-            try {
-                $responses += $line | ConvertFrom-Json
-            } catch {
-                throw "meridian-mcp emitted invalid JSON-RPC output: $line`n(stderr: $stderr)"
-            }
-        }
 
         [pscustomobject]@{
             Responses = $responses
@@ -156,6 +181,11 @@ $list = ConvertTo-JsonRpcLine ([ordered]@{
     method = "tools/list"
     params = [ordered]@{}
 })
+$initialized = ConvertTo-JsonRpcLine ([ordered]@{
+    jsonrpc = "2.0"
+    method = "notifications/initialized"
+    params = [ordered]@{}
+})
 $status = ConvertTo-JsonRpcLine ([ordered]@{
     jsonrpc = "2.0"
     id = 6
@@ -175,7 +205,13 @@ $waitWithoutProcess = ConvertTo-JsonRpcLine ([ordered]@{
     }
 })
 
-$requests = @($initialize, $list, $status, $waitWithoutProcess)
+$requests = @($initialize, $initialized, $list)
+if ($Mode -eq "development") {
+    $requests += @($status, $waitWithoutProcess)
+}
+if ($Mode -eq "analysis" -and ($CompileDmePath -or $RuntimeDmbPath -or $MapRenderOutputPath)) {
+    throw "Compilation, runtime, and map rendering require -Mode development"
+}
 if ($DmePath) {
     if (-not (Test-Path -LiteralPath $DmePath -PathType Leaf)) {
         throw "DME file not found: $DmePath"
@@ -295,15 +331,6 @@ if ($RuntimeDmbPath) {
     }
     $requests += ConvertTo-JsonRpcLine ([ordered]@{
         jsonrpc = "2.0"
-        id = 13
-        method = "tools/call"
-        params = [ordered]@{
-            name = "dm_connect_test"
-            arguments = [ordered]@{ timeout_secs = 1 }
-        }
-    })
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
-        jsonrpc = "2.0"
         id = 14
         method = "tools/call"
         params = [ordered]@{ name = "dm_stop"; arguments = [ordered]@{} }
@@ -357,6 +384,7 @@ if ($MapDmmPath) {
                     dmm_path = (Resolve-Path -LiteralPath $MapDmmPath).Path
                     output_path = $MapRenderOutputPath
                     z_level = 1
+                    overwrite = $true
                 }
             }
         })
@@ -370,11 +398,9 @@ if ($sessionExitCode -ne 0) {
 }
 $initializeResponse = Assert-Response -Responses $session.Responses -Id 1
 $toolsResponse = Assert-Response -Responses $session.Responses -Id 2
-$statusResponse = Assert-Response -Responses $session.Responses -Id 6
-$waitResponse = Assert-Response -Responses $session.Responses -Id 7
 
-if ($initializeResponse.result.protocolVersion -ne "2024-11-05") {
-    throw "Unexpected MCP protocol version: $($initializeResponse.result.protocolVersion)"
+if (-not $initializeResponse.result.protocolVersion) {
+    throw "MCP initialize response did not negotiate a protocol version"
 }
 if ($initializeResponse.result.serverInfo.name -ne "meridian-mcp") {
     throw "Unexpected MCP server name: $($initializeResponse.result.serverInfo.name)"
@@ -387,32 +413,42 @@ $tools = @($toolsResponse.result.tools)
 if ($tools.Count -eq 0) {
     throw "tools/list returned no tools"
 }
-if ($statusResponse.result.isError -eq $true) {
-    throw "dm_status returned an MCP tool error in a fresh session: $($statusResponse.result.content[0].text)"
-}
-if ($waitResponse.result.isError -ne $true) {
-    throw "dm_wait_for_output did not report the expected no-process tool error"
+if ($Mode -eq "development") {
+    $statusResponse = Assert-Response -Responses $session.Responses -Id 6
+    $waitResponse = Assert-Response -Responses $session.Responses -Id 7
+    if ($statusResponse.result.isError -eq $true) {
+        throw "dm_status returned an MCP tool error in a fresh session: $($statusResponse.result.content[0].text)"
+    }
+    if ($waitResponse.result.isError -ne $true) {
+        throw "dm_wait_for_output did not report the expected no-process tool error"
+    }
 }
 
 $toolNames = @($tools | ForEach-Object { $_.name })
-$requiredTools = @("dm_parse_environment", "dm_search_context", "dm_compile", "dm_run", "dm_wait_for_output")
+$requiredTools = if ($Mode -eq "development") {
+    @("dm_parse_environment", "dm_search_context", "dm_compile", "dm_run", "dm_wait_for_output")
+} else {
+    @("dm_parse_environment", "dm_search_context", "dm_map_info")
+}
 foreach ($requiredTool in $requiredTools) {
     if ($toolNames -notcontains $requiredTool) {
         throw "tools/list is missing required tool: $requiredTool"
     }
 }
-$compileTool = @($tools | Where-Object { $_.name -eq "dm_compile" })
-$compileProperties = @($compileTool[0].inputSchema.properties.PSObject.Properties.Name)
-foreach ($compileProperty in @("compiler_path", "working_directory", "defines", "timeout_ms", "idle_timeout_ms")) {
-    if ($compileProperties -notcontains $compileProperty) {
-        throw "dm_compile schema is missing implemented property: $compileProperty"
+if ($Mode -eq "development") {
+    $compileTool = @($tools | Where-Object { $_.name -eq "dm_compile" })
+    $compileProperties = @($compileTool[0].inputSchema.properties.PSObject.Properties.Name)
+    foreach ($compileProperty in @("compiler_path", "working_directory", "defines", "timeout_ms", "idle_timeout_ms")) {
+        if ($compileProperties -notcontains $compileProperty) {
+            throw "dm_compile schema is missing implemented property: $compileProperty"
+        }
     }
-}
-$runTool = @($tools | Where-Object { $_.name -eq "dm_run" })
-$runProperties = @($runTool[0].inputSchema.properties.PSObject.Properties.Name)
-foreach ($runProperty in @("working_directory", "daemon_args", "wait_for", "startup_timeout_ms")) {
-    if ($runProperties -notcontains $runProperty) {
-        throw "dm_run schema is missing implemented property: $runProperty"
+    $runTool = @($tools | Where-Object { $_.name -eq "dm_run" })
+    $runProperties = @($runTool[0].inputSchema.properties.PSObject.Properties.Name)
+    foreach ($runProperty in @("working_directory", "daemon_args", "wait_for", "startup_timeout_ms")) {
+        if ($runProperties -notcontains $runProperty) {
+            throw "dm_run schema is missing implemented property: $runProperty"
+        }
     }
 }
 $searchTool = @($tools | Where-Object { $_.name -eq "dm_search_context" })
@@ -503,14 +539,6 @@ if ($RuntimeDmbPath) {
         if ($PSBoundParameters.ContainsKey('ExpectedTopicResponse') -and
             $topicPayload.response -ne $ExpectedTopicResponse) {
             throw "dm_topic returned '$($topicPayload.response)', expected '$ExpectedTopicResponse'"
-        }
-    }
-
-    $connectResponse = Assert-Response -Responses $session.Responses -Id 13
-    if ($connectResponse.result.isError) {
-        $connectPayload = $connectResponse.result.content[0].text | ConvertFrom-Json
-        if (-not $connectPayload.experimental) {
-            throw "dm_connect_test failure was not classified as experimental"
         }
     }
 

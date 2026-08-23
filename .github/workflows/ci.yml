@@ -1,0 +1,22 @@
+name: Rust and MCP checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+      - run: cargo build --release
+      - shell: powershell
+        run: .\test_mcp.ps1 -SkipBuild -BinaryPath .\target\release\meridian-mcp.exe
+      - uses: EmbarkStudios/cargo-deny-action@v2

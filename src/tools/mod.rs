@@ -10,6 +10,23 @@ use serde_json::{json, Value};
 
 use crate::mcp::{ToolDefinition, ToolResult};
 use crate::state::ServerState;
+use crate::{contracts_for, CapabilityMode, PathPolicy};
+
+#[derive(Clone)]
+pub struct ToolExecutionContext {
+    mode: CapabilityMode,
+    policy: PathPolicy,
+}
+
+impl ToolExecutionContext {
+    pub fn new(mode: CapabilityMode, policy: PathPolicy) -> Self {
+        Self { mode, policy }
+    }
+
+    pub fn mode(&self) -> CapabilityMode {
+        self.mode
+    }
+}
 
 /// Get all available tool definitions
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
@@ -264,6 +281,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "type": "string",
                     "description": "Path to save the PNG (default: same as dmm with .png extension)"
                 }
+                ,
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "Replace an existing output only when explicitly true (default: false)"
+                }
             },
             "required": ["dmm_path"]
         }),
@@ -411,26 +433,44 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         }),
     });
 
-    // Client connection test tool
-    tools.push(ToolDefinition {
-        name: "dm_connect_test".to_string(),
-        description: "Experimental protocol diagnostic: attempt a full BYOND client handshake and summarize initial packets. Failures are returned as structured tool errors; use dm_topic for supported server communication.".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "timeout_secs": {
-                    "type": "integer",
-                    "description": "How long to wait for packets (default: 5 seconds)"
-                }
-            }
-        }),
-    });
-
     tools
 }
 
+pub fn get_tool_definitions_for(mode: CapabilityMode) -> Vec<ToolDefinition> {
+    let active: std::collections::HashSet<_> = contracts_for(mode)
+        .into_iter()
+        .map(|contract| contract.name)
+        .collect();
+    get_tool_definitions()
+        .into_iter()
+        .filter(|definition| active.contains(definition.name.as_str()))
+        .collect()
+}
+
 /// Call a tool by name with the given arguments
-pub async fn call_tool(state: &mut ServerState, name: &str, args: Value) -> Result<ToolResult> {
+pub async fn call_tool(
+    context: &ToolExecutionContext,
+    state: &mut ServerState,
+    name: &str,
+    mut args: Value,
+) -> Result<ToolResult> {
+    if !contracts_for(context.mode)
+        .iter()
+        .any(|contract| contract.name == name)
+    {
+        return Ok(policy_error(
+            "tool_not_available",
+            format!("{name} is not available in {:?} mode", context.mode),
+            None,
+        ));
+    }
+    if let Err(error) = contain_arguments(&context.policy, name, &mut args) {
+        return Ok(policy_error(
+            error.code(),
+            error.to_string(),
+            Some(error.path()),
+        ));
+    }
     match name {
         // Parsing tools
         "dm_parse_environment" => parse::parse_environment(state, args).await,
@@ -459,10 +499,87 @@ pub async fn call_tool(state: &mut ServerState, name: &str, args: Value) -> Resu
         "dm_stop" => runtime::stop(state, args).await,
         "dm_status" => runtime::status(state, args).await,
         "dm_topic" => runtime::topic(state, args).await,
-        "dm_connect_test" => runtime::connect_test(state, args).await,
-
         _ => Err(anyhow!("Unknown tool: {}", name)),
     }
+}
+
+fn contain_arguments(
+    policy: &PathPolicy,
+    name: &str,
+    args: &mut Value,
+) -> std::result::Result<(), crate::PolicyError> {
+    match name {
+        "dm_parse_environment" | "dm_compile" => {
+            canonical_argument(policy, args, "dme_path", false)?
+        }
+        "dm_render_map" | "dm_map_info" | "dm_find_on_map" => {
+            canonical_argument(policy, args, "dmm_path", false)?
+        }
+        "dm_run" => canonical_argument(policy, args, "dmb_path", true)?,
+        _ => {}
+    }
+    if name == "dm_compile" {
+        canonical_optional_argument(policy, args, "working_directory")?;
+        if let Some(path) = args.get("compiler_path").and_then(Value::as_str) {
+            let path = policy.executable(path)?;
+            args["compiler_path"] = Value::String(path.display().to_string());
+        }
+    }
+    if name == "dm_run" {
+        canonical_optional_argument(policy, args, "working_directory")?;
+    }
+    if name == "dm_render_map" {
+        let output = args
+            .get("output_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(args["dmm_path"].as_str().unwrap()).with_extension("png")
+            });
+        let overwrite = args
+            .get("overwrite")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let output = policy.output_path(output, overwrite)?;
+        args["output_path"] = Value::String(output.display().to_string());
+    }
+    Ok(())
+}
+
+fn canonical_argument(
+    policy: &PathPolicy,
+    args: &mut Value,
+    key: &str,
+    runtime: bool,
+) -> std::result::Result<(), crate::PolicyError> {
+    if let Some(path) = args.get(key).and_then(Value::as_str) {
+        let path = if runtime {
+            policy.runtime_dmb(path)?
+        } else {
+            policy.read_path(path)?
+        };
+        args[key] = Value::String(path.display().to_string());
+    }
+    Ok(())
+}
+
+fn canonical_optional_argument(
+    policy: &PathPolicy,
+    args: &mut Value,
+    key: &str,
+) -> std::result::Result<(), crate::PolicyError> {
+    canonical_argument(policy, args, key, false)
+}
+
+fn policy_error(code: &str, message: String, path: Option<&std::path::Path>) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "code": code,
+            "message": message,
+            "path": path.map(|path| path.display().to_string())
+        })
+        .to_string(),
+    )
 }
 
 #[cfg(test)]

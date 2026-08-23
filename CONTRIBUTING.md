@@ -1,49 +1,20 @@
-# Contributing to meridian-mcp
+# Contributing to Meridian-MCP
 
-Thanks for your interest in contributing! This project aims to bring modern AI tooling to the BYOND/DreamMaker ecosystem.
+Read [source authority](docs/source-authority.md), [provenance](docs/provenance.md), [compatibility](docs/compatibility.md), and [dependency policy](docs/dependency-policy.md) first.
 
-## Development Setup
+## Workflow
 
-1. Install Rust 1.70+ via [rustup](https://rustup.rs/)
-2. Open a local checkout of this repository
-3. Build: `cargo build`
-4. Run tests: `cargo test`
+1. Research the existing adapter and relevant SpacemanDMM or BYOND interface.
+2. Add a failing behavioral test using a purpose-written fixture. Do not copy tgstation code into unit fixtures.
+3. Make the smallest implementation change that passes the focused test.
+4. Run `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-features`.
+5. Run installed-binary and BYOND gates when touching transport, compilation, maps, runtime, or `Topic()`.
+6. Report focused checks as iteration evidence. Claim completion only after the full applicable matrix passes.
 
-## Areas for Contribution
+Tests should assert behavior, contracts, schemas, containment, and link integrity. Do not test exact human prose.
 
-- **New MCP tools** - Ideas for useful DM development tools
-- **Platform support** - macOS testing, better Linux paths
-- **Documentation** - Usage examples, integration guides
-- **Bug fixes** - Issues with parsing, compilation, etc.
+DreamMaker is the language acceptance authority. SpacemanDMM diagnostics must be identified as analysis results. Repository-specific build tooling remains authoritative for full-project validation.
 
-## Code Style
+Pin git dependencies by exact revision. SpacemanDMM updates must follow [dependency policy](docs/dependency-policy.md).
 
-- Run `cargo fmt` before committing
-- Run `cargo clippy` and address warnings
-- Add tests for new functionality
-
-## Pull Requests
-
-1. Fork the repo
-2. Create a feature branch
-3. Make your changes
-4. Run tests and linting
-5. Submit a PR with a clear description
-
-## Issues
-
-Bug reports and feature requests welcome! Please include:
-- Your OS and BYOND version
-- Steps to reproduce (for bugs)
-- Expected vs actual behavior
-
-## Community
-
-Join the discussion on:
-- GitHub Issues
-- SS13 Discord servers
-- BYOND forums
-
----
-
-*All contributions are licensed under MIT*
+Bug reports should include operating system, Rust and BYOND versions, server mode, client/version, a minimal reproduction, expected and actual behavior, and sanitized stderr. Never attach credentials or private packet captures.

@@ -1,208 +1,83 @@
-# meridian-mcp
+# Meridian-MCP
 
-**MCP Server for DreamMaker/BYOND Development**
+Meridian-MCP is a DreamMaker analysis and controlled-development server for Model Context Protocol clients. It uses SpacemanDMM for parsing, indexing, DreamChecker diagnostics, and DMM inspection; DreamMaker remains authoritative for compilation and BYOND remains authoritative for runtime behavior.
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that provides AI coding assistants with full access to DreamMaker language tooling. Works with Claude, Cursor, Windsurf, Continue, and any MCP-compatible client.
+The default capability mode is read-only analysis. Development mode must be enabled when the server launches and adds bounded compiler, map-output, DreamDaemon, and loopback `Topic()` operations. Neither mode replaces a target repository's build or test entry point.
 
-## Features
+## Trust documents
 
-### Code Intelligence
-- **Parse & Navigate** - Load `.dme` projects, explore type hierarchies, search symbols
-- **Ranked Context Search** - Find relevant types, procs, variables, documentation, and source from behavioral queries without an external model or database
-- **Type Checking** - Real-time diagnostics via SpacemanDMM's dreamchecker
-- **Go to Definition** - Find where any type, proc, or variable is defined
+- [Provenance and inherited code](docs/provenance.md)
+- [Source authority](docs/source-authority.md)
+- [Compatibility and evidence](docs/compatibility.md)
+- [Dependency policy](docs/dependency-policy.md)
+- [Security policy](SECURITY.md)
+- [Architecture](docs/architecture.md)
+- [Tool contracts](docs/tool-contracts.md)
 
-### Compilation & Runtime
-- **Compile** - Build projects with the DM compiler, structured diagnostics, defines, working-directory control, and a timeout. Relative DME paths resolve from the requested working directory, matching `dm_run`; parsed compiler errors fail the tool even when DreamMaker exits with code 0.
-- **Run/Stop** - Control DreamDaemon instances while continuously capturing stdout/stderr and exit codes
-- **Runtime Readiness** - Wait for literal or regular-expression output markers instead of guessing with fixed sleeps
-- **Topic Calls** - Send `Topic()` messages to running servers
+## Capability status
 
-### Map Tools
-- **Map Info** - Get dimensions, z-levels, area statistics
-- **Find on Map** - Search for object instances across maps
-- **Render Maps** - Generate PNG previews of `.dmm` files
+| Area | Status | Notes |
+| --- | --- | --- |
+| Parse, lookup, definitions, and search | Provisional | Unit-tested with purpose-written fixtures; full-corpus evidence is recorded separately. |
+| DreamChecker diagnostics | Provisional | SpacemanDMM analysis, not DreamMaker acceptance. |
+| DMM/TGM information and search | Provisional | Parser-backed dimensions, counts, and coordinates. |
+| DreamMaker compilation | Provisional | A direct compiler gate only; not `BUILD.cmd` or a tgstation full build. |
+| PNG rendering, DreamDaemon, and `Topic()` | Provisional | Development mode with containment, loopback, and process-ownership controls. |
+| Inherited BYOND client login protocol | Unsupported | Removed because provenance and compatibility evidence were insufficient. |
 
-### Protocol Support
-- Full BYOND client protocol implementation (for testing)
-- RUNSUB encryption for secure packet handling
+Support labels are defined in [compatibility](docs/compatibility.md). A passing SpacemanDMM check is useful evidence, not proof that DreamMaker or a repository's full validation suite passes.
 
-## Installation
+## Build
 
-### Prerequisites
-- [Rust](https://rustup.rs/) 1.70+
-- [BYOND](http://www.byond.com/download/) (for compilation and runtime features)
+Prerequisites are Rust 1.88 or newer and, for BYOND integration gates, the project-pinned BYOND version.
 
-### Build from Source
-
-```bash
-# From a local checkout of this repository:
-cd meridian-mcp
+```powershell
 cargo build --release
+cargo test
 ```
 
-The release binary will be at `target/release/meridian-mcp` on Unix-like systems and
-`target/release/meridian-mcp.exe` on Windows.
+The Windows release binary is `target\release\meridian-mcp.exe`.
 
-### Configure Your MCP Client
+## Configuration
 
-#### Claude Code / Cursor / Windsurf
+The server reads immutable startup configuration:
 
-Add to your MCP settings (usually `~/.config/claude/mcp.json` or IDE settings):
+- `MERIDIAN_MCP_MODE`: `analysis` (default) or `development`.
+- `MERIDIAN_MCP_ROOTS`: semicolon-separated workspace roots on Windows; platform path-list syntax elsewhere.
+- `MERIDIAN_MCP_COMPILERS`: allowlisted DreamMaker executables.
+
+Every configured root must already exist. Client tool calls cannot change the mode, roots, or executable allowlist.
 
 ```json
 {
   "mcpServers": {
     "meridian-mcp": {
-      "command": "/path/to/meridian-mcp"
+      "command": "C:\\path\\to\\meridian-mcp.exe",
+      "env": {
+        "MERIDIAN_MCP_MODE": "analysis",
+        "MERIDIAN_MCP_ROOTS": "C:\\path\\to\\workspace"
+      }
     }
   }
 }
 ```
 
-#### Continue
+## Workflow
 
-Add to `~/.continue/config.json`:
+Call `dm_parse_environment` before source analysis. Use `dm_search_context` for repository-scale discovery, then verify candidates with `dm_get_type`, `dm_get_proc`, `dm_get_var`, or `dm_get_definition`. Reparse after source changes.
 
-```json
-{
-  "experimental": {
-    "modelContextProtocolServers": [
-      {
-        "name": "meridian-mcp",
-        "transport": {
-          "type": "stdio",
-          "command": "/path/to/meridian-mcp"
-        }
-      }
-    ]
-  }
-}
-```
+Active operations are available only in development mode. `dm_compile` invokes DreamMaker directly; for Meridian-Rift, run the repository's PowerShell/`BUILD.cmd` verification separately before claiming completion.
 
-## Available Tools
+## Platform support
 
-| Tool | Description |
-|------|-------------|
-| `dm_parse_environment` | Parse a `.dme` file and cache the object tree |
-| `dm_get_type` | Get type info (vars, procs, parent, children) |
-| `dm_get_proc` | Get proc details (params, location, docs) |
-| `dm_get_var` | Get variable info (type, initial value) |
-| `dm_list_types` | List types with optional path prefix filter |
-| `dm_search_symbols` | Search for types, procs, or vars by pattern |
-| `dm_search_context` | Rank parsed symbols, documentation, and source for a natural-language or exact-symbol query |
-| `dm_check_errors` | Run type checker, get diagnostics |
-| `dm_get_definition` | Find source location of any symbol |
-| `dm_compile` | Compile the project with optional compiler path, working directory, defines, bounded timeout/watchdog, and structured diagnostics |
-| `dm_render_map` | Render a map to PNG |
-| `dm_map_info` | Get map dimensions and statistics |
-| `dm_find_on_map` | Find instances of a type on a map |
-| `dm_run` | Start DreamDaemon with a `.dmb` file, optional working directory, and extra daemon arguments |
-| `dm_wait_for_output` | Wait for a literal or regex marker in DreamDaemon output |
-| `dm_stop` | Stop the running game |
-| `dm_status` | Get game server status |
-| `dm_topic` | Send a Topic() call to the server |
-| `dm_connect_test` | Test BYOND client protocol |
+| Platform | Status |
+| --- | --- |
+| Windows | Verified only for evidence listed in [compatibility](docs/compatibility.md) |
+| Linux | Best effort; Rust-only CI evidence when available |
+| macOS | Unsupported and untested |
 
-## Example Usage
-
-Once configured, you can ask your AI assistant things like:
-
-> "Parse /code/myss13/myss13.dme and show me the type hierarchy for /mob/living"
-
-> "Find all instances of /obj/machinery/door on the station map"
-
-> "Check for type errors in the codebase"
-
-> "Parse the project, search for where turf air temperature is reset, then inspect the highest-ranked proc"
-
-> "Compile the project and run it on port 1337"
-
-## How It Works
-
-meridian-mcp uses [SpacemanDMM](https://github.com/SpaceManiac/SpacemanDMM) for parsing and type checking. This is the same tooling used by the SS13 community for linting and IDE support.
-
-`dm_parse_environment` also builds a local in-memory BM25 index over non-builtin types, declared
-variables, and every proc implementation. Names and canonical paths receive the highest weight,
-followed by documentation, parameters, source, and file paths. Results retain exact source locations,
-owning and parent types, parameters, and proc override position/count. The index is deterministic,
-requires no embedding credentials or vector database, and is replaced whenever the environment is
-parsed again.
-
-Use `dm_search_context` for discovery, then use `dm_get_type`, `dm_get_proc`, `dm_get_var`, or
-`dm_get_definition` to verify an exact symbol. Available filters are `kind`, `type_prefix`, and
-`file_filter`; source excerpts and their maximum line count are configurable per call. Parser and
-search results do not replace the repository's compiler, test, or runtime checks.
-
-The server communicates over stdio using JSON-RPC, following the MCP specification.
-
-Runtime output is drained from stdout and stderr in fixed 8 KiB chunks so an unterminated line cannot
-grow without limit. Retained diagnostics use a 500-line ring buffer, truncate any single line beyond
-16 KiB with a `... [truncated]` suffix, and cap total retained line bytes at 1 MiB. `dm_status`,
-immediate-start failures, and `dm_wait_for_output` expose the captured tail and the last exit code to
-make crashes diagnosable.
-
-`dm_get_proc` includes a bounded source excerpt for each override when its source file is available.
-Relative source paths are resolved from the loaded `.dme` directory, which is important for projects
-whose parser context reports paths such as `code/game/turfs/change_turf.dm`.
-
-Tool names intentionally remain on the `dm_*` prefix for compatibility with existing MCP clients and
-workflows.
-
-## Platform Support
-
-- **Windows** - Full support (BYOND native)
-- **Linux** - Full support (requires BYOND Linux build)
-- **macOS** - Untested but should work with BYOND Wine wrapper
-
-## BYOND Paths
-
-The server looks for BYOND in these locations:
-
-**Windows:**
-- `C:\Program Files (x86)\BYOND\bin\`
-- `C:\Program Files\BYOND\bin\`
-
-**Linux:**
-- `/usr/local/byond/bin/`
-- `/opt/byond/bin/`
-- System PATH (`dm`, `DreamMaker`, `dreamdaemon`, `DreamDaemon`)
-
-## Development
-
-```bash
-# Run with debug logging
-RUST_LOG=meridian_mcp=debug cargo run
-
-# Run tests
-cargo test
-
-# Read the complete testing and integration workflow
-# See TESTING.md
-
-# Verify JSON-RPC, dynamic tool schemas, and required tools (Windows PowerShell)
-pwsh -File .\test_mcp.ps1
-
-# Parse a real project and exercise source-backed exact and ranked queries
-pwsh -File .\test_parse.ps1 -DmePath C:\path\to\project.dme `
-    -TypePath /turf/open -ProcName AfterChange `
-    -SearchQuery "turf air temperature reset"
-
-# The shell wrapper delegates to PowerShell on Windows and uses jq/timeout on Linux
-./test-mcp.sh --skip-build
-
-# Build release
-cargo build --release
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) and `TESTING.md` for development and verification guidance.
 
 ## License
 
-MIT
-
-## Contributing
-
-Issues and PRs welcome! This project aims to bring modern AI tooling to the BYOND/DreamMaker ecosystem.
-
----
-
-*Built with ❤️ for the SS13 community*
+Meridian-MCP is distributed under MIT. Dependencies retain their own licenses; see [dependency policy](docs/dependency-policy.md).

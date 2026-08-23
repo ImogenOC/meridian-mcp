@@ -8,6 +8,7 @@ use tokio::process::Child;
 use tokio::task::JoinHandle;
 
 use crate::search::SearchIndex;
+use crate::ProjectProfile;
 
 pub(crate) const OUTPUT_LOG_CAPACITY: usize = 500;
 pub(crate) const OUTPUT_LINE_MAX_BYTES: usize = 16 * 1024;
@@ -52,13 +53,17 @@ fn output_log_byte_len(lines: &VecDeque<String>) -> usize {
 /// Server state that persists across tool calls
 pub struct ServerState {
     /// Currently parsed environment path
-    pub environment_path: Option<PathBuf>,
+    pub(crate) environment_path: Option<PathBuf>,
     /// Parsed object tree (cached)
-    pub objtree: Option<Arc<ObjectTree>>,
+    pub(crate) objtree: Option<Arc<ObjectTree>>,
     /// Parsing context
-    pub context: Option<Context>,
+    pub(crate) context: Option<Context>,
     /// Ranked symbol index derived from the parsed object tree
-    pub search_index: Option<Arc<SearchIndex>>,
+    pub(crate) search_index: Option<Arc<SearchIndex>>,
+    /// Discovered target-project metadata.
+    pub(crate) project_profile: Option<ProjectProfile>,
+    /// Monotonic generation of the active parsed environment.
+    state_generation: u64,
     /// Running DreamDaemon process
     pub game_process: Option<Child>,
     /// Port the game is running on
@@ -78,6 +83,8 @@ impl ServerState {
             objtree: None,
             context: None,
             search_index: None,
+            project_profile: None,
+            state_generation: 0,
             game_process: None,
             game_port: None,
             output_log: Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_LOG_CAPACITY))),
@@ -96,6 +103,26 @@ impl ServerState {
     /// Check if we have a valid parsed environment
     pub fn has_environment(&self) -> bool {
         self.objtree.is_some()
+    }
+
+    pub fn state_generation(&self) -> u64 {
+        self.state_generation
+    }
+
+    pub(crate) fn replace_environment(
+        &mut self,
+        path: PathBuf,
+        context: Context,
+        objtree: ObjectTree,
+        search_index: SearchIndex,
+        project_profile: Option<ProjectProfile>,
+    ) {
+        self.environment_path = Some(path);
+        self.context = Some(context);
+        self.objtree = Some(Arc::new(objtree));
+        self.search_index = Some(Arc::new(search_index));
+        self.project_profile = project_profile;
+        self.state_generation = self.state_generation.saturating_add(1);
     }
 
     /// Set the running game process
@@ -190,6 +217,12 @@ impl ServerState {
         self.abort_runtime_output_tasks();
         self.game_port = None;
         Ok(())
+    }
+}
+
+impl Default for ServerState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

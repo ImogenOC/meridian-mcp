@@ -1,0 +1,57 @@
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "Unmaintained proc-macro-error is transitive through pinned SpacemanDMM get-size-derive; no safe upgrade is available. Review by 2026-11-23 or with the next SpacemanDMM update." },
+    { id = "RUSTSEC-2024-0388", reason = "Unmaintained derivative is transitive through pinned SpacemanDMM dreammaker; no safe upgrade is available. Review by 2026-11-23 or with the next SpacemanDMM update." },
+    { id = "RUSTSEC-2024-0425", reason = "Unmaintained get-size is transitive through pinned SpacemanDMM dreammaker; no safe upgrade is available. Review by 2026-11-23 or with the next SpacemanDMM update." },
+    { id = "RUSTSEC-2024-0427", reason = "Unmaintained get-size-derive is transitive through pinned SpacemanDMM dreammaker; no safe upgrade is available. Review by 2026-11-23 or with the next SpacemanDMM update." },
+    { id = "RUSTSEC-2024-0436", reason = "Unmaintained paste is transitive through image, exr, and pulp; no safe compatible removal is available. Review by 2026-11-23 or with the next image update." },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "GPL-3.0-or-later",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[[licenses.clarify]]
+crate = "builtins-proc-macro@0.0.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
+
+[[licenses.clarify]]
+crate = "dmm-tools@0.1.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
+
+[[licenses.clarify]]
+crate = "dreamchecker@1.11.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
+
+[[licenses.clarify]]
+crate = "dreammaker@0.1.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
+
+[[licenses.clarify]]
+crate = "interval-tree@0.8.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/SpaceManiac/SpacemanDMM"]

@@ -1,0 +1,12 @@
+//MAP CONVERTED BY dmm2tgm.py
+"aa" = (/obj/item/meridian_fixture,/turf,/area)
+"ab" = (/turf,/area)
+
+(1,1,1) = {"
+aa
+ab
+"}
+(2,1,1) = {"
+ab
+aa
+"}

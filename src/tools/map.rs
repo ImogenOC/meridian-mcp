@@ -214,23 +214,27 @@ mod tests {
     use super::*;
     use crate::mcp::ToolContent;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn fixture_directory() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("meridian-mcp-map-{}-{unique}", std::process::id()));
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "meridian-mcp-map-{}-{unique}-{sequence}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&directory).unwrap();
         directory
     }
 
     fn result_json(result: &ToolResult) -> Value {
-        let ToolContent::Text { text } = &result.content[0] else {
-            panic!("expected text tool result");
-        };
+        let ToolContent::Text { text } = &result.content[0];
         serde_json::from_str(text).expect("tool result should be JSON")
     }
 
@@ -321,7 +325,7 @@ a
             crate::tools::parse::parse_environment(&mut state, json!({"dme_path": dme_path}))
                 .await
                 .unwrap();
-        assert_eq!(parsed.is_error, None);
+        assert_eq!(parsed.is_error, None, "parse result: {parsed:?}");
 
         let result = render_map(
             &mut state,
@@ -333,7 +337,7 @@ a
         )
         .await
         .unwrap();
-        assert_eq!(result.is_error, None);
+        assert_eq!(result.is_error, None, "render result: {result:?}");
         let payload = result_json(&result);
         assert_eq!(payload["non_transparent_pixels"], 0);
         assert!(payload["warning"]

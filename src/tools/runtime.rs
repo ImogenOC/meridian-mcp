@@ -17,7 +17,6 @@ const OUTPUT_WAIT_POLL_INTERVAL_MS: u64 = 100;
 const OUTPUT_READ_CHUNK_BYTES: usize = 8 * 1024;
 const LOG_FILE_POLL_INTERVAL_MS: u64 = 50;
 
-use crate::client::BYONDClient;
 use crate::mcp::ToolResult;
 use crate::state::{OutputLog, ServerState, OUTPUT_LINE_MAX_BYTES, OUTPUT_TRUNCATED_SUFFIX};
 
@@ -430,6 +429,7 @@ pub async fn wait_for_output(state: &mut ServerState, args: Value) -> Result<Too
     Ok(ToolResult::text(result.to_string()))
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,9 +507,7 @@ mod tests {
         .expect("waiting for retained output should succeed");
 
         assert_eq!(result.is_error, None);
-        let ToolContent::Text { text } = &result.content[0] else {
-            panic!("expected a text tool result");
-        };
+        let ToolContent::Text { text } = &result.content[0];
         let payload: Value = serde_json::from_str(text).expect("wait result should be JSON");
         assert_eq!(payload["matched"], true);
     }
@@ -777,79 +775,6 @@ fn decode_topic_response(response_data: &[u8]) -> Result<String> {
         _ => Err(anyhow!(
             "BYOND returned an unknown Topic response type: 0x{:02x}",
             response_type
-        )),
-    }
-}
-
-/// Test connecting to the BYOND server as a client and log received packets
-pub async fn connect_test(state: &mut ServerState, args: Value) -> Result<ToolResult> {
-    if !state.is_game_running() {
-        return Ok(ToolResult::error("No game instance is currently running."));
-    }
-
-    let port = state.game_port.unwrap_or(1337);
-    let timeout_secs = args
-        .get("timeout_secs")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(5);
-
-    info!("Testing BYOND client connection to port {}", port);
-
-    // Run the connection in a blocking task since it uses sync I/O
-    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
-        // Connect to the server
-        let mut client = BYONDClient::connect("127.0.0.1", port)?;
-
-        // Receive initial packets
-        let packets = client.receive_initial_packets(timeout_secs)?;
-
-        // Build summary of received packets
-        let packet_summary: Vec<serde_json::Value> = packets
-            .iter()
-            .map(|p| {
-                json!({
-                    "type": format!("0x{:04X}", u16::from(p.packet_type)),
-                    "type_name": format!("{:?}", p.packet_type),
-                    "seq": p.seq,
-                    "data_len": p.data.len(),
-                    "data_preview": if p.data.len() <= 64 {
-                        format!("{:02X?}", p.data)
-                    } else {
-                        format!("{:02X?}... ({} more bytes)", &p.data[..64], p.data.len() - 64)
-                    }
-                })
-            })
-            .collect();
-
-        client.disconnect()?;
-
-        Ok(json!({
-            "success": true,
-            "packets_received": packets.len(),
-            "packets": packet_summary
-        }))
-    })
-    .await;
-
-    match result {
-        Ok(Ok(payload)) => Ok(ToolResult::text(payload.to_string())),
-        Ok(Err(error)) => Ok(ToolResult::error(
-            json!({
-                "success": false,
-                "experimental": true,
-                "message": error.to_string(),
-                "port": port
-            })
-            .to_string(),
-        )),
-        Err(error) => Ok(ToolResult::error(
-            json!({
-                "success": false,
-                "experimental": true,
-                "message": format!("BYOND client diagnostic task failed: {error}"),
-                "port": port
-            })
-            .to_string(),
         )),
     }
 }

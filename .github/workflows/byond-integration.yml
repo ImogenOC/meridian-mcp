@@ -1,0 +1,20 @@
+name: BYOND integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+jobs:
+  fixtures:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install BYOND 516.1685
+        shell: powershell
+        run: |
+          Invoke-WebRequest https://www.byond.com/download/build/516/516.1685_byond.zip -OutFile $env:RUNNER_TEMP\byond.zip
+          Expand-Archive $env:RUNNER_TEMP\byond.zip -DestinationPath $env:RUNNER_TEMP\byond
+      - name: Compile owned runtime fixture
+        shell: powershell
+        run: .\scripts\run-byond-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe"

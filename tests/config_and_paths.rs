@@ -1,0 +1,60 @@
+use meridian_mcp::{CapabilityMode, PathPolicy, ServerConfig};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn fixture() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "meridian-mcp-policy-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+#[test]
+fn analysis_is_the_default_and_development_is_explicit() {
+    let root = fixture();
+    let analysis = ServerConfig::from_values(None, vec![root.clone()], Vec::new()).unwrap();
+    assert_eq!(analysis.mode(), CapabilityMode::Analysis);
+    let development =
+        ServerConfig::from_values(Some("development"), vec![root.clone()], Vec::new()).unwrap();
+    assert_eq!(development.mode(), CapabilityMode::Development);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn traversal_and_unlisted_executables_are_rejected() {
+    let root = fixture();
+    let outside = root.parent().unwrap().join("outside.dm");
+    std::fs::write(&outside, "outside").unwrap();
+    let policy = PathPolicy::new(vec![root.clone()], Vec::new()).unwrap();
+    assert_eq!(
+        policy.read_path(&outside).unwrap_err().code(),
+        "path_outside_workspace"
+    );
+    assert_eq!(
+        policy.executable(&outside).unwrap_err().code(),
+        "executable_not_allowed"
+    );
+    std::fs::remove_file(outside).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn outputs_require_containment_and_explicit_overwrite() {
+    let root = fixture();
+    let output = root.join("map.png");
+    std::fs::write(&output, "existing").unwrap();
+    let policy = PathPolicy::new(vec![root.clone()], Vec::new()).unwrap();
+    assert_eq!(
+        policy.output_path(&output, false).unwrap_err().code(),
+        "output_exists"
+    );
+    assert_eq!(
+        policy.output_path(&output, true).unwrap(),
+        output.canonicalize().unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
