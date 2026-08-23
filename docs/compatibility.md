@@ -8,7 +8,7 @@
 | Component | Target | Status | Evidence |
 | --- | --- | --- | --- |
 | Windows | Current host, 2026-08-23 | Verified | All-feature Rust suite, installed stdio smoke, and full Meridian-Rift parse/search passed. |
-| Linux | Current CI runner | Best effort | Rust-only checks when CI runs; no BYOND claim. |
+| Linux | Ubuntu 24.04 GitHub-hosted runner | Provisional | Per-change all-feature Rust checks, release build, installed stdio protocol/tool smoke, and owned-fixture parse/search are configured. Promote after the first green Ubuntu run; no BYOND claim. |
 | macOS | Any | Unsupported | No test evidence. |
 | Rust | 1.88 minimum | Verified | Declared in Cargo and configured in CI. |
 | BYOND | 516.1685 Meridian-Rift pin | Provisional | Full-project source parsing/search passed; native fixture compile/runtime remains blocked by the restricted host process context. |

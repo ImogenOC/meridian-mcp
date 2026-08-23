@@ -68,7 +68,7 @@ cargo build --release
 cargo test
 ```
 
-The Windows release binary is `target\release\meridian-mcp.exe`.
+The release binary is `target\release\meridian-mcp.exe` on Windows and `target/release/meridian-mcp` on Linux.
 
 ## Configuration
 
@@ -105,7 +105,7 @@ Active operations are available only in development mode. `dm_compile` invokes D
 | Platform | Status |
 | --- | --- |
 | Windows | Verified only for evidence listed in [compatibility](docs/compatibility.md) |
-| Linux | Best effort; Rust-only CI evidence when available |
+| Linux | Provisional Ubuntu 24.04 CI gate for Rust, the release binary, stdio MCP, and owned-fixture parse/search; no BYOND claim |
 | macOS | Unsupported and untested |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and `TESTING.md` for development and verification guidance.

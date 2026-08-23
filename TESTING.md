@@ -1,6 +1,6 @@
 # Testing Meridian-MCP
 
-Run checks from the repository root with PowerShell on Windows.
+Run checks from the repository root with PowerShell 7 on Windows or Linux.
 
 ## Rust and contract gates
 
@@ -9,7 +9,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo build --release
-cargo deny check
+cargo deny --all-features check
 ```
 
 The suite covers owned DreamMaker and DMM fixtures, parse generations, exact lookup and source excerpts, ranked search, map coordinates and PNG output, path containment, executable allowlisting, overwrite policy, mode inventories, runtime buffering, readiness, `Topic()` framing, generated contract drift, and documentation links.
@@ -17,13 +17,15 @@ The suite covers owned DreamMaker and DMM fixtures, parse generations, exact loo
 ## Installed stdio gate
 
 ```powershell
-.\test_mcp.ps1 -SkipBuild -ServerPath .\target\release\meridian-mcp.exe -Mode development
-.\test_mcp.ps1 -SkipBuild -ServerPath .\target\release\meridian-mcp.exe -Mode analysis `
-    -DmePath .\tests\fixtures\language\fixture.dme `
+$binaryPath = if ($IsWindows) { ".\target\release\meridian-mcp.exe" } else { "./target/release/meridian-mcp" }
+
+./test_mcp.ps1 -SkipBuild -ServerPath $binaryPath -Mode development
+./test_mcp.ps1 -SkipBuild -ServerPath $binaryPath -Mode analysis `
+    -DmePath ./tests/fixtures/language/fixture.dme `
     -SearchQuery "return supplied value"
 ```
 
-The harness sets immutable roots for every supplied fixture, negotiates through the official SDK, validates JSON-only stdout, checks the exact mode inventory and schemas, and exercises caller-visible error paths. `-ServerPath` and `-BinaryPath` are aliases.
+These two installed-binary checks run on Windows and Ubuntu 24.04 in per-change CI. The harness sets immutable roots for every supplied fixture, negotiates through the official SDK, validates JSON-only stdout, checks the exact mode inventory and schemas, exercises caller-visible error paths, and parses and searches an owned DreamMaker fixture. `-ServerPath` and `-BinaryPath` are aliases.
 
 ## BYOND fixture gate
 

@@ -6,7 +6,18 @@ on:
 
 jobs:
   rust:
-    runs-on: windows-latest
+    name: Rust and MCP (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            binary: .\target\release\meridian-mcp.exe
+          - name: Ubuntu 24.04
+            os: ubuntu-24.04
+            binary: ./target/release/meridian-mcp
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
@@ -17,6 +28,18 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
       - run: cargo build --release
-      - shell: powershell
-        run: .\test_mcp.ps1 -SkipBuild -BinaryPath .\target\release\meridian-mcp.exe
+      - name: Installed stdio MCP protocol smoke
+        shell: pwsh
+        run: ./test_mcp.ps1 -SkipBuild -BinaryPath '${{ matrix.binary }}' -Mode development
+      - name: Installed stdio MCP fixture smoke
+        shell: pwsh
+        run: |
+          ./test_mcp.ps1 -SkipBuild -BinaryPath '${{ matrix.binary }}' -Mode analysis `
+            -DmePath ./tests/fixtures/language/fixture.dme `
+            -SearchQuery 'return supplied value'
+
+  dependency-policy:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
