@@ -38,14 +38,17 @@ $evidence = [ordered]@{
 $temporaryFiles = [System.Collections.Generic.List[string]]::new()
 
 function Limit-CapturedText {
-	param([AllowNull()][string]$Text)
+	param(
+		[AllowNull()][string]$Text,
+		[int]$MaximumCharacters = $maximumCapturedCharacters
+	)
 	if ($null -eq $Text) {
 		return ''
 	}
-	if ($Text.Length -le $maximumCapturedCharacters) {
+	if ($Text.Length -le $MaximumCharacters) {
 		return $Text
 	}
-	return $Text.Substring($Text.Length - $maximumCapturedCharacters)
+	return $Text.Substring($Text.Length - $MaximumCharacters)
 }
 
 function Get-RepositorySha {
@@ -84,7 +87,10 @@ function Remove-CompilerArtifacts {
 }
 
 function Invoke-HumanBuild {
-	param([Parameter(Mandatory)][string]$Root)
+	param(
+		[Parameter(Mandatory)][string]$Root,
+		[Parameter(Mandatory)][string]$DreamMakerPath
+	)
 	$buildPath = Resolve-ContainedFile -Root $Root -RelativePath 'BUILD.cmd'
 	if (-not (Test-Path -LiteralPath $buildPath -PathType Leaf)) {
 		throw "Human build entry point is missing: $buildPath"
@@ -99,6 +105,7 @@ function Invoke-HumanBuild {
 	$startInfo.CreateNoWindow = $true
 	$startInfo.RedirectStandardOutput = $true
 	$startInfo.RedirectStandardError = $true
+	$startInfo.Environment['DM_EXE'] = $DreamMakerPath
 	$process = [Diagnostics.Process]::new()
 	$process.StartInfo = $startInfo
 	$startedAt = [DateTime]::UtcNow
@@ -363,9 +370,17 @@ try {
 			$lastAnalysisId { Remove-CompilerArtifacts -Root $MeridianRiftRoot }
 			1000 { Remove-CompilerArtifacts -Root $MeridianRiftRoot }
 			1001 {
-				$callbackState.human_build = Invoke-HumanBuild -Root $MeridianRiftRoot
+				$callbackState.human_build = Invoke-HumanBuild -Root $MeridianRiftRoot -DreamMakerPath $DreamMakerPath
+				$evidence.builds['human_warm'] = $callbackState.human_build
 				if (-not $callbackState.human_build.success) {
-					throw 'The warm human BUILD.cmd gate failed.'
+					$stdout = Limit-CapturedText -Text $callbackState.human_build.stdout -MaximumCharacters 32768
+					$stderr = Limit-CapturedText -Text $callbackState.human_build.stderr -MaximumCharacters 32768
+					Write-Host "Warm BUILD.cmd stdout:`n$stdout"
+					Write-Host "Warm BUILD.cmd stderr:`n$stderr"
+					if ($callbackState.human_build.timed_out) {
+						throw 'The warm human BUILD.cmd gate timed out.'
+					}
+					throw "The warm human BUILD.cmd gate failed with exit code $($callbackState.human_build.exit_code)."
 				}
 				Remove-CompilerArtifacts -Root $MeridianRiftRoot
 			}

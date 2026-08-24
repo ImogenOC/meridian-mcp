@@ -28,6 +28,19 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
     let integration_script = fs::read_to_string("scripts/run-byond-integration.ps1")
         .expect("BYOND integration script should be readable");
     assert!(integration_script.contains("run-meridian-compatibility.ps1"));
+    let compatibility_script = fs::read_to_string("scripts/run-meridian-compatibility.ps1")
+        .expect("Meridian compatibility harness should be readable");
+    for required in [
+        "$startInfo.Environment['DM_EXE'] = $DreamMakerPath",
+        "Invoke-HumanBuild -Root $MeridianRiftRoot -DreamMakerPath $DreamMakerPath",
+        "Warm BUILD.cmd stdout",
+        "$evidence.builds['human_warm']",
+    ] {
+        assert!(
+            compatibility_script.contains(required),
+            "compatibility harness is missing {required}"
+        );
+    }
 
     let installer = fs::read_to_string("scripts/install-byond.ps1")
         .expect("BYOND installer should be readable");
