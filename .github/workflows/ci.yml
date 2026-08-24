@@ -37,6 +37,12 @@ jobs:
           ./test_mcp.ps1 -SkipBuild -BinaryPath '${{ matrix.binary }}' -Mode analysis `
             -DmePath ./tests/fixtures/language/fixture.dme `
             -SearchQuery 'return supplied value'
+      - name: Non-Windows rift_compile boundary
+        if: runner.os == 'Linux'
+        shell: pwsh
+        env:
+          MERIDIAN_MCP_RIFT_BUILD: network
+        run: ./scripts/test_unsupported_rift_compile.ps1 -BinaryPath '${{ matrix.binary }}'
 
   dependency-policy:
     runs-on: ubuntu-22.04

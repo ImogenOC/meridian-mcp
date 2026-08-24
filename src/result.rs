@@ -30,6 +30,21 @@ impl DomainToolResult {
             is_error: Some(true),
         }
     }
+
+    pub fn structured_error(
+        code: &str,
+        message: impl Into<String>,
+        recovery: impl Into<String>,
+    ) -> Self {
+        Self::error(
+            serde_json::json!({
+                "code": code,
+                "message": message.into(),
+                "recovery": recovery.into(),
+            })
+            .to_string(),
+        )
+    }
 }
 
 pub type ToolResult = DomainToolResult;

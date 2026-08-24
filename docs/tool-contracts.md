@@ -22,3 +22,4 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | `dm_stop` | Development | Provisional | memory | - | 262144 | Stop the server-owned DreamDaemon process. |
 | `dm_topic` | Development | Provisional | loopback | 60000 | 262144 | Call world.Topic on the loopback game server. |
 | `dm_wait_for_output` | Development | Provisional | memory | 300000 | 1048576 | Wait for bounded server-owned DreamDaemon output. |
+| `rift_compile` | Development | Provisional | read, write, process, network | 1800000 | 1048576 | Run Meridian-Rift's contained RIFT_BUILD.cmd full-build gate. |

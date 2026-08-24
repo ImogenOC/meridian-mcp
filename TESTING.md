@@ -14,6 +14,8 @@ cargo deny --all-features check
 
 The suite covers owned DreamMaker and DMM fixtures, parse generations, exact lookup and source excerpts, ranked search, map coordinates and PNG output, path containment, executable allowlisting, overwrite policy, mode inventories, runtime buffering, readiness, `Topic()` framing, generated contract drift, and documentation links.
 
+Run installed sessions with analysis/disabled, development/disabled, development/offline, and development/network startup configurations when changing contract visibility or build policy. The startup ceiling is immutable; `network_mode=allow` must fail under an offline ceiling.
+
 ## Installed stdio gate
 
 ```powershell
@@ -54,3 +56,17 @@ This compiles the purpose-written runtime fixture with DreamMaker. To exercise t
 ```
 
 Parsing/search is MCP evidence. Run Meridian-Rift's own PowerShell and `BUILD.cmd` gates before claiming game-code completion. A focused fixture or query is iteration evidence, not the full acceptance matrix.
+
+The named Windows integration uses:
+
+```powershell
+.\scripts\run-meridian-compatibility.ps1 `
+    -BinaryPath .\target\release\meridian-mcp.exe `
+    -MeridianRiftRoot C:\path\to\Meridian-Rift `
+    -DreamMakerPath 'C:\Program Files (x86)\BYOND\bin\dm.exe' `
+    -EvidencePath .\integration\evidence\meridian-compatibility.json
+```
+
+This destructive integration gate is intended for a disposable checkout: it removes only root `tgstation.dmb` and `tgstation.rsc` between gates. It runs the manifest, direct `dm_compile`, forced network `rift_compile`, warm human `BUILD.cmd`, forced offline `rift_compile`, and negative policy/state sessions. Evidence is written even on failure. Offline controls are cooperative preflight, not a firewall, and network samples are always incomplete.
+
+Ubuntu CI runs `scripts/test_unsupported_rift_compile.ps1` against the release binary. It validates portable stale-schema behavior only and must not install BYOND or attempt the Windows wrapper.

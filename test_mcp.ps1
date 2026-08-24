@@ -29,6 +29,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Import-Module (Join-Path $repoRoot 'scripts\MeridianMcpSession.psm1') -Force
 
 if (-not $BinaryPath) {
     $binaryName = if ($IsWindows -or $env:OS -eq "Windows_NT") { "meridian-mcp.exe" } else { "meridian-mcp" }
@@ -52,120 +53,7 @@ if (-not (Test-Path -LiteralPath $BinaryPath)) {
     throw "meridian-mcp binary not found: $BinaryPath"
 }
 
-function ConvertTo-JsonRpcLine {
-    param([hashtable]$Request)
-
-    return ($Request | ConvertTo-Json -Compress -Depth 20)
-}
-
-function Invoke-McpSession {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string[]]$Requests,
-        [Parameter(Mandatory = $true)]
-        [int]$TimeoutMilliseconds
-    )
-
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = (Resolve-Path -LiteralPath $BinaryPath).Path
-    $startInfo.WorkingDirectory = $repoRoot
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $workspaceRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    [void]$workspaceRoots.Add((Resolve-Path -LiteralPath $repoRoot).Path)
-    foreach ($candidate in @($DmePath, $CompileDmePath, $RuntimeDmbPath, $MapDmmPath, $MapRenderOutputPath)) {
-        if (-not $candidate) { continue }
-        $candidatePath = if (Test-Path -LiteralPath $candidate) { (Resolve-Path -LiteralPath $candidate).Path } else { [System.IO.Path]::GetFullPath($candidate) }
-        $rootCandidate = if ([System.IO.Directory]::Exists($candidatePath)) { $candidatePath } else { [System.IO.Path]::GetDirectoryName($candidatePath) }
-        if ($rootCandidate) { [void]$workspaceRoots.Add($rootCandidate) }
-    }
-    $startInfo.Environment["MERIDIAN_MCP_MODE"] = $Mode
-    $startInfo.Environment["MERIDIAN_MCP_ROOTS"] = [string]::Join([System.IO.Path]::PathSeparator, $workspaceRoots)
-
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) {
-        throw "Failed to start meridian-mcp: $BinaryPath"
-    }
-
-    try {
-        # Read each response before sending the next request. MCP permits concurrent request
-        # execution, so dependent parse/search calls must be sequenced by the client.
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        $responses = @()
-        $stdoutLines = @()
-        foreach ($request in $Requests) {
-            $process.StandardInput.WriteLine($request)
-            $process.StandardInput.Flush()
-            $requestObject = $request | ConvertFrom-Json
-            if ($null -eq $requestObject.id) {
-                continue
-            }
-            $lineTask = $process.StandardOutput.ReadLineAsync()
-            if (-not $lineTask.Wait($TimeoutMilliseconds)) {
-                throw "meridian-mcp did not respond to request $($requestObject.id) within $TimeoutMilliseconds ms"
-            }
-            $line = $lineTask.GetAwaiter().GetResult()
-            if ($null -eq $line) {
-                throw "meridian-mcp closed stdout before responding to request $($requestObject.id)"
-            }
-            $stdoutLines += $line
-            try {
-                $responses += $line | ConvertFrom-Json
-            } catch {
-                throw "meridian-mcp emitted invalid JSON-RPC output: $line"
-            }
-        }
-        $process.StandardInput.Close()
-
-        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-            if (-not $process.HasExited) {
-                $process.Kill()
-            }
-            $process.WaitForExit()
-            throw "meridian-mcp did not exit within $TimeoutMilliseconds ms"
-        }
-
-        $stdout = [string]::Join([Environment]::NewLine, $stdoutLines)
-        $stderr = $stderrTask.GetAwaiter().GetResult()
-
-        [pscustomobject]@{
-            Responses = $responses
-            Stdout = $stdout
-            Stderr = $stderr
-            ExitCode = $process.ExitCode
-        }
-    } finally {
-        if (-not $process.HasExited) {
-            $process.Kill()
-            $process.WaitForExit()
-        }
-        $process.Dispose()
-    }
-}
-
-function Assert-Response {
-    param(
-        [Parameter(Mandatory = $true)]
-        [object[]]$Responses,
-        [Parameter(Mandatory = $true)]
-        [int]$Id
-    )
-
-    $response = @($Responses | Where-Object { $_.id -eq $Id })
-    if ($response.Count -ne 1) {
-        throw "Expected exactly one JSON-RPC response with id $Id, received $($response.Count)"
-    }
-    if ($null -ne $response[0].error) {
-        throw "JSON-RPC request $Id failed: $($response[0].error.message)"
-    }
-    return $response[0]
-}
-
-$initialize = ConvertTo-JsonRpcLine ([ordered]@{
+$initialize = ConvertTo-McpJsonLine ([ordered]@{
     jsonrpc = "2.0"
     id = 1
     method = "initialize"
@@ -175,18 +63,18 @@ $initialize = ConvertTo-JsonRpcLine ([ordered]@{
         clientInfo = [ordered]@{ name = "meridian-mcp-smoke-test"; version = "1.0" }
     }
 })
-$list = ConvertTo-JsonRpcLine ([ordered]@{
+$list = ConvertTo-McpJsonLine ([ordered]@{
     jsonrpc = "2.0"
     id = 2
     method = "tools/list"
     params = [ordered]@{}
 })
-$initialized = ConvertTo-JsonRpcLine ([ordered]@{
+$initialized = ConvertTo-McpJsonLine ([ordered]@{
     jsonrpc = "2.0"
     method = "notifications/initialized"
     params = [ordered]@{}
 })
-$status = ConvertTo-JsonRpcLine ([ordered]@{
+$status = ConvertTo-McpJsonLine ([ordered]@{
     jsonrpc = "2.0"
     id = 6
     method = "tools/call"
@@ -195,7 +83,7 @@ $status = ConvertTo-JsonRpcLine ([ordered]@{
         arguments = [ordered]@{}
     }
 })
-$waitWithoutProcess = ConvertTo-JsonRpcLine ([ordered]@{
+$waitWithoutProcess = ConvertTo-McpJsonLine ([ordered]@{
     jsonrpc = "2.0"
     id = 7
     method = "tools/call"
@@ -217,7 +105,7 @@ if ($DmePath) {
         throw "DME file not found: $DmePath"
     }
 
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 3
         method = "tools/call"
@@ -233,7 +121,7 @@ if ($CompileDmePath) {
         throw "Compile DME file not found: $CompileDmePath"
     }
 
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 8
         method = "tools/call"
@@ -248,7 +136,7 @@ if ($TypePath) {
     if (-not $DmePath) {
         throw '-TypePath requires -DmePath'
     }
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 4
         method = "tools/call"
@@ -258,7 +146,7 @@ if ($TypePath) {
         }
     })
     if ($ProcName) {
-        $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        $requests += ConvertTo-McpJsonLine ([ordered]@{
             jsonrpc = "2.0"
             id = 5
             method = "tools/call"
@@ -274,7 +162,7 @@ if ($SearchQuery) {
     if (-not $DmePath) {
         throw '-SearchQuery requires -DmePath'
     }
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 9
         method = "tools/call"
@@ -298,7 +186,7 @@ if ($RuntimeDmbPath) {
         throw '-RuntimeDmbPath requires -RuntimeReadyMarker'
     }
 
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 10
         method = "tools/call"
@@ -312,14 +200,14 @@ if ($RuntimeDmbPath) {
             }
         }
     })
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 11
         method = "tools/call"
         params = [ordered]@{ name = "dm_status"; arguments = [ordered]@{} }
     })
     if ($RuntimeTopic) {
-        $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        $requests += ConvertTo-McpJsonLine ([ordered]@{
             jsonrpc = "2.0"
             id = 12
             method = "tools/call"
@@ -329,13 +217,13 @@ if ($RuntimeDmbPath) {
             }
         })
     }
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 14
         method = "tools/call"
         params = [ordered]@{ name = "dm_stop"; arguments = [ordered]@{} }
     })
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 15
         method = "tools/call"
@@ -347,7 +235,7 @@ if ($MapDmmPath) {
     if (-not (Test-Path -LiteralPath $MapDmmPath -PathType Leaf)) {
         throw "Map DMM file not found: $MapDmmPath"
     }
-    $requests += ConvertTo-JsonRpcLine ([ordered]@{
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
         jsonrpc = "2.0"
         id = 16
         method = "tools/call"
@@ -357,7 +245,7 @@ if ($MapDmmPath) {
         }
     })
     if ($MapTypePath) {
-        $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        $requests += ConvertTo-McpJsonLine ([ordered]@{
             jsonrpc = "2.0"
             id = 17
             method = "tools/call"
@@ -374,7 +262,7 @@ if ($MapDmmPath) {
         if (-not $DmePath) {
             throw '-MapRenderOutputPath requires -DmePath for icon and type metadata'
         }
-        $requests += ConvertTo-JsonRpcLine ([ordered]@{
+        $requests += ConvertTo-McpJsonLine ([ordered]@{
             jsonrpc = "2.0"
             id = 18
             method = "tools/call"
@@ -391,13 +279,39 @@ if ($MapDmmPath) {
     }
 }
 
-$session = Invoke-McpSession -Requests $requests -TimeoutMilliseconds ($TimeoutSeconds * 1000)
+$workspaceRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$workspaceRoots.Add((Resolve-Path -LiteralPath $repoRoot).Path) | Out-Null
+foreach ($candidatePath in @($DmePath, $CompileDmePath, $RuntimeDmbPath, $MapDmmPath, $MapRenderOutputPath)) {
+    if (-not $candidatePath) {
+        continue
+    }
+    $candidateRoot = if (Test-Path -LiteralPath $candidatePath -PathType Container) {
+        (Resolve-Path -LiteralPath $candidatePath).Path
+    } elseif (Test-Path -LiteralPath $candidatePath) {
+        Split-Path -Parent (Resolve-Path -LiteralPath $candidatePath).Path
+    } else {
+        Split-Path -Parent ([System.IO.Path]::GetFullPath($candidatePath))
+    }
+    if ($candidateRoot) {
+        $workspaceRoots.Add($candidateRoot) | Out-Null
+    }
+}
+$sessionEnvironment = @{
+    MERIDIAN_MCP_MODE = $Mode
+    MERIDIAN_MCP_ROOTS = [string]::Join([System.IO.Path]::PathSeparator, $workspaceRoots)
+}
+$session = Invoke-McpSession `
+    -BinaryPath $BinaryPath `
+    -WorkingDirectory $repoRoot `
+    -Environment $sessionEnvironment `
+    -Requests $requests `
+    -TimeoutMilliseconds ($TimeoutSeconds * 1000)
 $sessionExitCode = $session.ExitCode
 if ($sessionExitCode -ne 0) {
     throw "meridian-mcp exited with code $sessionExitCode`n(stderr: $($session.Stderr))"
 }
-$initializeResponse = Assert-Response -Responses $session.Responses -Id 1
-$toolsResponse = Assert-Response -Responses $session.Responses -Id 2
+$initializeResponse = Get-McpResponse -Responses $session.Responses -Id 1
+$toolsResponse = Get-McpResponse -Responses $session.Responses -Id 2
 
 if (-not $initializeResponse.result.protocolVersion) {
     throw "MCP initialize response did not negotiate a protocol version"
@@ -414,8 +328,8 @@ if ($tools.Count -eq 0) {
     throw "tools/list returned no tools"
 }
 if ($Mode -eq "development") {
-    $statusResponse = Assert-Response -Responses $session.Responses -Id 6
-    $waitResponse = Assert-Response -Responses $session.Responses -Id 7
+    $statusResponse = Get-McpResponse -Responses $session.Responses -Id 6
+    $waitResponse = Get-McpResponse -Responses $session.Responses -Id 7
     if ($statusResponse.result.isError -eq $true) {
         throw "dm_status returned an MCP tool error in a fresh session: $($statusResponse.result.content[0].text)"
     }
@@ -438,7 +352,7 @@ foreach ($requiredTool in $requiredTools) {
 if ($Mode -eq "development") {
     $compileTool = @($tools | Where-Object { $_.name -eq "dm_compile" })
     $compileProperties = @($compileTool[0].inputSchema.properties.PSObject.Properties.Name)
-    foreach ($compileProperty in @("compiler_path", "working_directory", "defines", "timeout_ms", "idle_timeout_ms")) {
+    foreach ($compileProperty in @("compiler_path", "working_directory", "defines", "timeout_ms", "idle_timeout_ms", "capture_network")) {
         if ($compileProperties -notcontains $compileProperty) {
             throw "dm_compile schema is missing implemented property: $compileProperty"
         }
@@ -463,7 +377,7 @@ if (@($searchTool[0].inputSchema.required) -notcontains "query") {
 }
 
 if ($DmePath) {
-    $parseResponse = Assert-Response -Responses $session.Responses -Id 3
+    $parseResponse = Get-McpResponse -Responses $session.Responses -Id 3
     if ($parseResponse.result.isError -eq $true) {
         $message = $parseResponse.result.content[0].text
         throw "dm_parse_environment returned an MCP tool error: $message"
@@ -471,7 +385,7 @@ if ($DmePath) {
 }
 
 if ($TypePath) {
-    $typeResponse = Assert-Response -Responses $session.Responses -Id 4
+    $typeResponse = Get-McpResponse -Responses $session.Responses -Id 4
     if ($typeResponse.result.isError -eq $true) {
         throw "dm_get_type returned an MCP tool error: $($typeResponse.result.content[0].text)"
     }
@@ -481,7 +395,7 @@ if ($TypePath) {
     }
 }
 if ($ProcName) {
-    $procResponse = Assert-Response -Responses $session.Responses -Id 5
+    $procResponse = Get-McpResponse -Responses $session.Responses -Id 5
     if ($procResponse.result.isError -eq $true) {
         throw "dm_get_proc returned an MCP tool error: $($procResponse.result.content[0].text)"
     }
@@ -495,7 +409,7 @@ if ($ProcName) {
 }
 
 if ($SearchQuery) {
-    $searchResponse = Assert-Response -Responses $session.Responses -Id 9
+    $searchResponse = Get-McpResponse -Responses $session.Responses -Id 9
     if ($searchResponse.result.isError -eq $true) {
         throw "dm_search_context returned an MCP tool error: $($searchResponse.result.content[0].text)"
     }
@@ -515,7 +429,7 @@ if ($SearchQuery) {
 }
 
 if ($RuntimeDmbPath) {
-    $runResponse = Assert-Response -Responses $session.Responses -Id 10
+    $runResponse = Get-McpResponse -Responses $session.Responses -Id 10
     if ($runResponse.result.isError) {
         throw "dm_run returned an MCP tool error: $($runResponse.result.content[0].text)"
     }
@@ -524,14 +438,14 @@ if ($RuntimeDmbPath) {
         throw "dm_run did not verify readiness: $($runResponse.result.content[0].text)"
     }
 
-    $runningResponse = Assert-Response -Responses $session.Responses -Id 11
+    $runningResponse = Get-McpResponse -Responses $session.Responses -Id 11
     $runningPayload = $runningResponse.result.content[0].text | ConvertFrom-Json
     if (-not $runningPayload.running) {
         throw "dm_status did not report the fixture as running"
     }
 
     if ($RuntimeTopic) {
-        $topicResponse = Assert-Response -Responses $session.Responses -Id 12
+        $topicResponse = Get-McpResponse -Responses $session.Responses -Id 12
         if ($topicResponse.result.isError) {
             throw "dm_topic returned an MCP tool error: $($topicResponse.result.content[0].text)"
         }
@@ -542,11 +456,11 @@ if ($RuntimeDmbPath) {
         }
     }
 
-    $stopResponse = Assert-Response -Responses $session.Responses -Id 14
+    $stopResponse = Get-McpResponse -Responses $session.Responses -Id 14
     if ($stopResponse.result.isError) {
         throw "dm_stop returned an MCP tool error: $($stopResponse.result.content[0].text)"
     }
-    $stoppedResponse = Assert-Response -Responses $session.Responses -Id 15
+    $stoppedResponse = Get-McpResponse -Responses $session.Responses -Id 15
     $stoppedPayload = $stoppedResponse.result.content[0].text | ConvertFrom-Json
     if ($stoppedPayload.running) {
         throw "dm_status still reported the fixture as running after dm_stop"
@@ -554,7 +468,7 @@ if ($RuntimeDmbPath) {
 }
 
 if ($MapDmmPath) {
-    $mapInfoResponse = Assert-Response -Responses $session.Responses -Id 16
+    $mapInfoResponse = Get-McpResponse -Responses $session.Responses -Id 16
     if ($mapInfoResponse.result.isError) {
         throw "dm_map_info returned an MCP tool error: $($mapInfoResponse.result.content[0].text)"
     }
@@ -565,7 +479,7 @@ if ($MapDmmPath) {
     }
 
     if ($MapTypePath) {
-        $findResponse = Assert-Response -Responses $session.Responses -Id 17
+        $findResponse = Get-McpResponse -Responses $session.Responses -Id 17
         if ($findResponse.result.isError) {
             throw "dm_find_on_map returned an MCP tool error: $($findResponse.result.content[0].text)"
         }
@@ -576,7 +490,7 @@ if ($MapDmmPath) {
     }
 
     if ($MapRenderOutputPath) {
-        $renderResponse = Assert-Response -Responses $session.Responses -Id 18
+        $renderResponse = Get-McpResponse -Responses $session.Responses -Id 18
         if ($renderResponse.result.isError) {
             throw "dm_render_map returned an MCP tool error: $($renderResponse.result.content[0].text)"
         }
@@ -598,7 +512,7 @@ if ($MapDmmPath) {
 }
 
 if ($CompileDmePath) {
-    $compileResponse = Assert-Response -Responses $session.Responses -Id 8
+    $compileResponse = Get-McpResponse -Responses $session.Responses -Id 8
     $compileFailed = $compileResponse.result.isError -eq $true
     if ($ExpectCompileFailure -and -not $compileFailed) {
         throw "dm_compile accepted a compile that was expected to contain errors"

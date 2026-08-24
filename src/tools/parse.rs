@@ -532,4 +532,36 @@ mod tests {
 
         std::fs::remove_dir_all(directory).unwrap();
     }
+
+    #[tokio::test]
+    async fn failed_reparse_preserves_the_active_project_profile() {
+        let (directory, dme_path) = write_environment_fixture();
+        let mut state = ServerState::new();
+        let first = parse_environment(&mut state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        assert_eq!(first.is_error, None);
+        let generation = state.state_generation();
+        let active_dme = state
+            .project_profile()
+            .expect("successful parse should discover a profile")
+            .dme_path()
+            .to_owned();
+
+        let missing_dme = directory.join("missing.dme");
+        let failed = parse_environment(&mut state, json!({"dme_path": missing_dme}))
+            .await
+            .unwrap();
+
+        assert_eq!(failed.is_error, Some(true));
+        assert_eq!(state.state_generation(), generation);
+        assert_eq!(
+            state
+                .project_profile()
+                .expect("failed parse should preserve the prior profile")
+                .dme_path(),
+            active_dme
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

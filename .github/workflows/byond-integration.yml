@@ -2,19 +2,55 @@ name: BYOND integration
 
 on:
   workflow_dispatch:
+    inputs:
+      meridian_ref:
+        description: Optional Meridian-Rift branch, tag, or SHA
+        required: false
+        type: string
   schedule:
     - cron: "17 4 * * 1"
 
 jobs:
-  fixtures:
+  compatibility:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: Check out Meridian-Rift
+        uses: actions/checkout@v7
+        with:
+          repository: AphelionDevelopment/Meridian-Rift
+          ref: ${{ inputs.meridian_ref }}
+          path: integration/Meridian-Rift
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify Meridian-Rift BYOND pin
+        shell: pwsh
+        run: |
+          $dependencies = Get-Content ./integration/Meridian-Rift/dependencies.sh
+          $major = ($dependencies | Select-String '^export BYOND_MAJOR=([0-9]+)$').Matches.Groups[1].Value
+          $minor = ($dependencies | Select-String '^export BYOND_MINOR=([0-9]+)$').Matches.Groups[1].Value
+          if ("$major.$minor" -ne '516.1685') {
+            throw "Meridian-Rift pins BYOND $major.$minor; review the named compatibility baseline before updating this workflow."
+          }
       - name: Install BYOND 516.1685
-        shell: powershell
+        shell: pwsh
         run: |
           Invoke-WebRequest https://www.byond.com/download/build/516/516.1685_byond.zip -OutFile $env:RUNNER_TEMP\byond.zip
           Expand-Archive $env:RUNNER_TEMP\byond.zip -DestinationPath $env:RUNNER_TEMP\byond
-      - name: Compile owned runtime fixture
-        shell: powershell
-        run: .\scripts\run-byond-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe"
+      - name: Build release Meridian-MCP
+        run: cargo build --release
+      - name: Run owned fixture and Meridian-Rift compatibility gates
+        shell: pwsh
+        run: |
+          ./scripts/run-byond-integration.ps1 `
+            -MeridianRiftRoot ./integration/Meridian-Rift `
+            -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" `
+            -BinaryPath ./target/release/meridian-mcp.exe `
+            -EvidencePath ./integration/evidence/meridian-compatibility.json
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: meridian-compatibility-evidence
+          path: integration/evidence/*.json
+          if-no-files-found: warn

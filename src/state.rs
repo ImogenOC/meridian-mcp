@@ -109,6 +109,10 @@ impl ServerState {
         self.state_generation
     }
 
+    pub fn project_profile(&self) -> Option<&ProjectProfile> {
+        self.project_profile.as_ref()
+    }
+
     pub(crate) fn replace_environment(
         &mut self,
         path: PathBuf,

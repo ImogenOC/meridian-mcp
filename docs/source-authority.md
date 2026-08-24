@@ -10,4 +10,4 @@ Use the authority that answers the question:
 6. The original dm-mcp repository establishes lineage only.
 7. Meridian-MCP documentation claims only tested behavior or explicitly labeled provisional, experimental, or unsupported behavior.
 
-For Meridian-Rift, `BUILD.cmd` and repository guidance are the full-project acceptance boundary. `dm_compile` is a faster direct DreamMaker gate, not an equivalent full build.
+For Meridian-Rift, human use of `BUILD.cmd` and repository guidance remains the full-project acceptance boundary. `RIFT_BUILD.cmd` is a separate agent-owned non-interactive wrapper over the same base build target and is the only full-build entry point exposed to `rift_compile`. `dm_compile` is a faster direct DreamMaker gate, not an equivalent full build. Parser, direct compiler, wrapper, and human-build evidence must be reported separately.

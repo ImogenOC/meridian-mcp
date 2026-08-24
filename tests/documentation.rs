@@ -38,6 +38,45 @@ fn local_markdown_links_resolve() {
     }
 }
 
+#[test]
+fn readme_documents_the_two_compilers_and_build_access_controls() {
+    let readme = std::fs::read_to_string("README.md").expect("README should be readable");
+    for required in [
+        "| `dm_compile` |",
+        "| `rift_compile` |",
+        "MERIDIAN_MCP_RIFT_BUILD",
+        "`disabled`",
+        "`offline`",
+        "`network`",
+        "`network_mode=offline`",
+        "`network_mode=allow`",
+        "](docs/security.md)",
+        "](docs/compatibility.md)",
+        "](TESTING.md)",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
+}
+
+#[test]
+fn compatibility_document_tracks_deferred_named_gates() {
+    let compatibility = std::fs::read_to_string("docs/compatibility.md")
+        .expect("compatibility documentation should be readable");
+    for heading in [
+        "| Capability | Owned fixture | Named-platform/real-repository gate | Required semantic evidence | Current blocker | Status |",
+        "DreamChecker",
+        "Map inspection",
+        "PNG rendering",
+        "DreamDaemon lifecycle",
+        "`Topic()`",
+    ] {
+        assert!(
+            compatibility.contains(heading),
+            "compatibility documentation is missing {heading}"
+        );
+    }
+}
+
 fn markdown_link_targets(text: &str) -> Vec<String> {
     text.split("](")
         .skip(1)

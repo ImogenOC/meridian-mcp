@@ -1,0 +1,578 @@
+use super::ToolExecutionContext;
+use crate::artifact::ArtifactSnapshot;
+use crate::mcp::ToolResult;
+use crate::parameters::{RiftCompileParams, RiftNetworkMode};
+use crate::process::{run_contained_process, ProcessOutcome, ProcessSpec, TerminationReason};
+use crate::state::ServerState;
+use crate::{ProjectProfile, RiftBuildAccess};
+use anyhow::{anyhow, Context, Result};
+use regex::Regex;
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildEvidence {
+    FreshArtifacts,
+    ValidCacheHit,
+    BuildFailed,
+    InsufficientEvidence,
+}
+
+struct ValidatedProject {
+    root: PathBuf,
+    dme: PathBuf,
+    human_build: PathBuf,
+    rift_build: PathBuf,
+    dmb: PathBuf,
+    rsc: PathBuf,
+}
+
+struct ArtifactPair {
+    dmb: ArtifactSnapshot,
+    rsc: ArtifactSnapshot,
+}
+
+pub async fn compile(
+    context: &ToolExecutionContext,
+    state: &mut ServerState,
+    args: Value,
+) -> Result<ToolResult> {
+    let params: RiftCompileParams = match serde_json::from_value(args) {
+        Ok(params) => params,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "invalid_arguments",
+                format!("invalid rift_compile arguments: {error}"),
+                "Use only the fields advertised by the rift_compile schema.",
+            ));
+        }
+    };
+    let (timeout_ms, idle_timeout_ms) = match params.validated_timeouts() {
+        Ok(timeouts) => timeouts,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "invalid_arguments",
+                error,
+                "Use timeout values within the advertised bounds.",
+            ));
+        }
+    };
+    if params.network_mode() == RiftNetworkMode::Allow
+        && context.rift_build_access() != RiftBuildAccess::Network
+    {
+        return Ok(ToolResult::structured_error(
+            "network_mode_denied",
+            "network_mode=allow exceeds the immutable startup ceiling",
+            "Restart Meridian-MCP with MERIDIAN_MCP_RIFT_BUILD=network only when network bootstrap is explicitly approved.",
+        ));
+    }
+
+    let generation = state.state_generation();
+    let Some(profile) = state.project_profile().cloned() else {
+        return Ok(ToolResult::structured_error(
+            "project_not_parsed",
+            "No parsed project profile is active.",
+            "Call dm_parse_environment for the contained Meridian-Rift tgstation.dme first.",
+        ));
+    };
+    if !profile.is_rift_build_qualified() {
+        return Ok(ToolResult::structured_error(
+            "project_not_qualified",
+            "The active parsed project does not qualify for the Meridian-Rift full build.",
+            "Use a contained tgstation.dme with root BUILD.cmd, RIFT_BUILD.cmd, and literal BYOND pins.",
+        ));
+    }
+
+    let compiler = match context.policy().compiler_allowlist() {
+        [] => {
+            return Ok(ToolResult::structured_error(
+                "compiler_not_configured",
+                "rift_compile requires exactly one startup-allowlisted DreamMaker compiler.",
+                "Restart Meridian-MCP with the intended dm.exe as the sole MERIDIAN_MCP_COMPILERS entry.",
+            ));
+        }
+        [compiler] => compiler.clone(),
+        _ => {
+            return Ok(ToolResult::structured_error(
+                "compiler_ambiguous",
+                "rift_compile cannot select among multiple startup-allowlisted compilers.",
+                "Restart Meridian-MCP with exactly one DreamMaker compiler for this compatibility run.",
+            ));
+        }
+    };
+
+    let project = match validate_project(context, &profile) {
+        Ok(project) => project,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "project_not_qualified",
+                error.to_string(),
+                "Reparse the contained project after restoring its fixed root entry points.",
+            ));
+        }
+    };
+    if state.state_generation() != generation {
+        return Ok(ToolResult::structured_error(
+            "state_generation_changed",
+            "The active parsed project changed during build preparation.",
+            "Retry rift_compile against the current parsed generation.",
+        ));
+    }
+
+    let before = match capture_artifacts(&project) {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "insufficient_evidence",
+                error.to_string(),
+                "Restore canonical contained artifact paths and retry.",
+            ));
+        }
+    };
+    let command_processor = match system_command_processor() {
+        Ok(command_processor) => command_processor,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "build_spawn_failed",
+                format!("cannot resolve the trusted system command processor: {error}"),
+                "Verify the Windows system directory and retry without changing the fixed wrapper path.",
+            ));
+        }
+    };
+    let (environment, mut warnings) = build_environment(
+        context,
+        &command_processor,
+        &compiler,
+        params.network_mode(),
+        params.force_rebuild,
+    );
+    let script_argument = match cmd_script_argument(&project.rift_build) {
+        Ok(argument) => argument,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "project_not_qualified",
+                error.to_string(),
+                "Move the checkout to a path without Windows command metacharacters and reparse it.",
+            ));
+        }
+    };
+    let outcome = match run_contained_process(ProcessSpec {
+        program: command_processor,
+        arguments: vec![
+            "/D".into(),
+            "/S".into(),
+            "/C".into(),
+            "call".into(),
+            script_argument,
+        ],
+        working_directory: project.root.clone(),
+        environment,
+        timeout: Duration::from_millis(timeout_ms),
+        idle_timeout: Duration::from_millis(idle_timeout_ms),
+        capture_network: params.capture_network,
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "build_spawn_failed",
+                format!("contained process setup failed: {error}"),
+                "Check Windows Job Object support and the fixed RIFT_BUILD.cmd entry point.",
+            ));
+        }
+    };
+    if state.state_generation() != generation {
+        return Ok(ToolResult::structured_error(
+            "state_generation_changed",
+            "The active parsed project changed while the full build was running.",
+            "Reparse and retry against a stable project generation.",
+        ));
+    }
+
+    if let Some(warning) = outcome.network_audit.warning.clone() {
+        warnings.push(warning);
+    }
+    let after = match capture_artifacts(&project) {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "insufficient_evidence",
+                error.to_string(),
+                "Restore canonical contained build artifacts and rerun the full build.",
+            ));
+        }
+    };
+    classify_result(
+        context,
+        &profile,
+        &project,
+        generation,
+        &params,
+        timeout_ms,
+        idle_timeout_ms,
+        before,
+        after,
+        outcome,
+        warnings,
+    )
+}
+
+fn validate_project(
+    context: &ToolExecutionContext,
+    profile: &ProjectProfile,
+) -> Result<ValidatedProject> {
+    let policy = context.policy();
+    let root = policy.read_path(profile.root())?;
+    if root != profile.root() {
+        return Err(anyhow!("the canonical project root changed after parsing"));
+    }
+    let dme = policy.read_path(profile.dme_path())?;
+    let human_build = policy.read_path(
+        profile
+            .human_build_entrypoint()
+            .ok_or_else(|| anyhow!("BUILD.cmd is missing"))?,
+    )?;
+    let rift_build = policy.read_path(
+        profile
+            .rift_build_entrypoint()
+            .ok_or_else(|| anyhow!("RIFT_BUILD.cmd is missing"))?,
+    )?;
+    require_direct_root_file(&root, &human_build, "BUILD.cmd")?;
+    require_direct_root_file(&root, &rift_build, "RIFT_BUILD.cmd")?;
+    let dmb = policy.output_path(root.join("tgstation.dmb"), true)?;
+    let rsc = policy.output_path(root.join("tgstation.rsc"), true)?;
+    Ok(ValidatedProject {
+        root,
+        dme,
+        human_build,
+        rift_build,
+        dmb,
+        rsc,
+    })
+}
+
+fn require_direct_root_file(root: &Path, path: &Path, expected_name: &str) -> Result<()> {
+    if path.parent() != Some(root) || path.file_name() != Some(OsStr::new(expected_name)) {
+        return Err(anyhow!(
+            "{} is not the canonical contained root entry point",
+            expected_name
+        ));
+    }
+    Ok(())
+}
+
+fn capture_artifacts(project: &ValidatedProject) -> Result<ArtifactPair> {
+    Ok(ArtifactPair {
+        dmb: ArtifactSnapshot::capture(&project.root, &project.dmb)?,
+        rsc: ArtifactSnapshot::capture(&project.root, &project.rsc)?,
+    })
+}
+
+fn build_environment(
+    context: &ToolExecutionContext,
+    command_processor: &Path,
+    compiler: &Path,
+    network_mode: RiftNetworkMode,
+    force_rebuild: bool,
+) -> (Vec<(OsString, OsString)>, Vec<String>) {
+    let mut environment = Vec::new();
+    for name in [
+        "SystemRoot",
+        "SystemDrive",
+        "WINDIR",
+        "PATH",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "ProgramData",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "USERPROFILE",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            environment.push((name.into(), value));
+        }
+    }
+    environment.push(("ComSpec".into(), command_processor.as_os_str().to_owned()));
+    environment.push(("DM_EXE".into(), compiler.as_os_str().to_owned()));
+    environment.push((
+        "MERIDIAN_RIFT_BUILD_NETWORK".into(),
+        match network_mode {
+            RiftNetworkMode::Offline => "offline",
+            RiftNetworkMode::Allow => "allow",
+        }
+        .into(),
+    ));
+    environment.push((
+        "MERIDIAN_RIFT_FORCE_REBUILD".into(),
+        if force_rebuild { "1" } else { "0" }.into(),
+    ));
+
+    let mut warnings = Vec::new();
+    if let Some(cache) = std::env::var_os("TG_BOOTSTRAP_CACHE") {
+        match context.policy().read_path(PathBuf::from(&cache)) {
+            Ok(cache) if cache.is_dir() => {
+                environment.push(("TG_BOOTSTRAP_CACHE".into(), cache.into_os_string()));
+            }
+            _ => warnings.push(
+                "TG_BOOTSTRAP_CACHE was omitted because it is not a contained directory"
+                    .to_string(),
+            ),
+        }
+    }
+    (environment, warnings)
+}
+
+#[cfg(windows)]
+fn system_command_processor() -> Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0_u16; 32_768];
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 || length as usize >= buffer.len() {
+        return Err(std::io::Error::last_os_error()).context("cannot resolve system directory");
+    }
+    buffer.truncate(length as usize);
+    let system_directory = OsString::from_wide(&buffer);
+    PathBuf::from(system_directory)
+        .join("cmd.exe")
+        .canonicalize()
+        .context("cannot canonicalize the system command processor")
+}
+
+#[cfg(not(windows))]
+fn system_command_processor() -> Result<PathBuf> {
+    Err(anyhow!("rift_compile is supported only on Windows"))
+}
+
+fn cmd_script_argument(script: &Path) -> Result<OsString> {
+    let script = command_path(script);
+    let text = script.to_string_lossy();
+    if text
+        .chars()
+        .any(|character| "&|<>^()%!".contains(character))
+    {
+        return Err(anyhow!(
+            "the fixed RIFT_BUILD.cmd path contains a Windows command metacharacter"
+        ));
+    }
+    Ok(script.into_os_string())
+}
+
+fn command_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(unc_path) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc_path}"));
+        }
+        if let Some(dos_path) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(dos_path);
+        }
+    }
+    path.to_owned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_result(
+    context: &ToolExecutionContext,
+    profile: &ProjectProfile,
+    project: &ValidatedProject,
+    generation: u64,
+    params: &RiftCompileParams,
+    timeout_ms: u64,
+    idle_timeout_ms: u64,
+    before: ArtifactPair,
+    after: ArtifactPair,
+    outcome: ProcessOutcome,
+    warnings: Vec<String>,
+) -> Result<ToolResult> {
+    let combined_output = format!("{}\n{}", outcome.stdout.text, outcome.stderr.text);
+    let diagnostics = parsed_error_lines(&combined_output);
+    let cache_evidence = dm_cache_marker(&combined_output);
+    let artifacts_valid = valid_artifact(&after.dmb) && valid_artifact(&after.rsc);
+    let artifacts_changed =
+        artifact_changed(&before.dmb, &after.dmb) || artifact_changed(&before.rsc, &after.rsc);
+
+    let (evidence, failure_code) = if outcome.termination == TerminationReason::WallTimeout {
+        (BuildEvidence::BuildFailed, Some("build_timed_out"))
+    } else if outcome.termination == TerminationReason::IdleTimeout {
+        (BuildEvidence::BuildFailed, Some("build_idle_timed_out"))
+    } else if outcome.termination == TerminationReason::SpawnFailed {
+        (BuildEvidence::BuildFailed, Some("build_spawn_failed"))
+    } else if outcome.exit_code != Some(0) || !diagnostics.is_empty() {
+        (
+            BuildEvidence::BuildFailed,
+            explicit_wrapper_failure(&combined_output).or(Some("build_failed")),
+        )
+    } else if !artifacts_valid {
+        (BuildEvidence::BuildFailed, Some("artifact_missing"))
+    } else if artifacts_changed {
+        (BuildEvidence::FreshArtifacts, None)
+    } else if cache_evidence.is_some() && !params.force_rebuild {
+        (BuildEvidence::ValidCacheHit, None)
+    } else {
+        (
+            BuildEvidence::InsufficientEvidence,
+            Some("insufficient_evidence"),
+        )
+    };
+
+    let recovery = failure_code.map(recovery_for).unwrap_or("");
+    let result = json!({
+        "success": failure_code.is_none(),
+        "code": failure_code,
+        "evidence": evidence,
+        "project_root": project.root,
+        "human_build_entrypoint": project.human_build,
+        "rift_build_entrypoint": project.rift_build,
+        "dme_path": project.dme,
+        "state_generation": generation,
+        "byond_version": profile.byond_version(),
+        "startup_ceiling": access_name(context.rift_build_access()),
+        "network_mode": network_mode_name(params.network_mode()),
+        "force_rebuild": params.force_rebuild,
+        "capture_network": params.capture_network,
+        "timeout_ms": timeout_ms,
+        "idle_timeout_ms": idle_timeout_ms,
+        "duration_ms": outcome.duration_ms,
+        "termination": outcome.termination,
+        "exit_code": outcome.exit_code,
+        "stdout": outcome.stdout.text,
+        "stderr": outcome.stderr.text,
+        "stdout_truncated_bytes": outcome.stdout.truncated_bytes,
+        "stderr_truncated_bytes": outcome.stderr.truncated_bytes,
+        "diagnostics": diagnostics,
+        "cache_evidence": cache_evidence,
+        "artifact_before": {
+            "dmb": before.dmb,
+            "rsc": before.rsc,
+        },
+        "artifact_after": {
+            "dmb": after.dmb,
+            "rsc": after.rsc,
+        },
+        "network_audit": outcome.network_audit,
+        "warnings": warnings,
+        "recovery": recovery,
+    });
+    let text = serde_json::to_string_pretty(&result)?;
+    if failure_code.is_some() {
+        Ok(ToolResult::error(text))
+    } else {
+        Ok(ToolResult::text(text))
+    }
+}
+
+fn valid_artifact(snapshot: &ArtifactSnapshot) -> bool {
+    snapshot.exists && snapshot.size.is_some_and(|size| size > 0) && snapshot.sha256.is_some()
+}
+
+fn artifact_changed(before: &ArtifactSnapshot, after: &ArtifactSnapshot) -> bool {
+    after.exists
+        && (!before.exists
+            || before.size != after.size
+            || before.modified_unix_ms != after.modified_unix_ms
+            || before.sha256 != after.sha256)
+}
+
+fn dm_cache_regex() -> &'static Regex {
+    static CACHE_REGEX: OnceLock<Regex> = OnceLock::new();
+    CACHE_REGEX.get_or_init(|| {
+        Regex::new(r#"(?i)Skipping\s+['\"]?dm['\"]?\s*\(up\s+to\s+date\)"#)
+            .expect("cache marker regex must be valid")
+    })
+}
+
+fn dm_cache_marker(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find(|line| dm_cache_regex().is_match(line))
+        .map(str::trim)
+        .map(str::to_owned)
+}
+
+fn diagnostic_regex() -> &'static Regex {
+    static DIAGNOSTIC_REGEX: OnceLock<Regex> = OnceLock::new();
+    DIAGNOSTIC_REGEX.get_or_init(|| {
+        Regex::new(r"(?i):\d+(?::\d+)?:\s*error\b").expect("build diagnostic regex must be valid")
+    })
+}
+
+fn parsed_error_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| diagnostic_regex().is_match(line))
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn explicit_wrapper_failure(output: &str) -> Option<&'static str> {
+    ["offline_preflight_failed"]
+        .into_iter()
+        .find(|code| output.contains(&format!("[{code}]")))
+}
+
+fn recovery_for(code: &str) -> &'static str {
+    match code {
+        "offline_preflight_failed" => {
+            "Warm the pinned repository dependency cache using an explicitly approved network build, then retry offline."
+        }
+        "build_timed_out" => "Inspect bounded build output and retry with an approved timeout.",
+        "build_idle_timed_out" => {
+            "Inspect the last build output; verify the build is not waiting for interactive input."
+        }
+        "build_spawn_failed" => {
+            "Verify the fixed wrapper and Windows process containment are available."
+        }
+        "artifact_missing" => {
+            "Inspect build diagnostics and confirm both tgstation.dmb and tgstation.rsc are generated."
+        }
+        "insufficient_evidence" => {
+            "Retry with force_rebuild=true or inspect why the wrapper produced neither changed artifacts nor the exact DM cache marker."
+        }
+        _ => "Inspect the bounded full-build output, correct the repository error, and retry.",
+    }
+}
+
+fn access_name(access: RiftBuildAccess) -> &'static str {
+    match access {
+        RiftBuildAccess::Disabled => "disabled",
+        RiftBuildAccess::Offline => "offline",
+        RiftBuildAccess::Network => "network",
+    }
+}
+
+fn network_mode_name(mode: RiftNetworkMode) -> &'static str {
+    match mode {
+        RiftNetworkMode::Offline => "offline",
+        RiftNetworkMode::Allow => "allow",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_marker_is_specific_to_the_dm_target() {
+        assert_eq!(
+            dm_cache_marker("Skipping 'dm' (up to date)"),
+            Some("Skipping 'dm' (up to date)".to_string())
+        );
+        assert_eq!(dm_cache_marker("Skipping 'tgui' (up to date)"), None);
+    }
+}

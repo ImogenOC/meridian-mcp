@@ -1,4 +1,4 @@
-use crate::CapabilityMode;
+use crate::{CapabilityMode, RiftBuildAccess};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ToolEffects {
@@ -6,6 +6,7 @@ pub struct ToolEffects {
     pub writes_files: bool,
     pub spawns_process: bool,
     pub network_loopback: bool,
+    pub network_external: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,36 +33,49 @@ const READ: ToolEffects = ToolEffects {
     writes_files: false,
     spawns_process: false,
     network_loopback: false,
+    network_external: false,
 };
 const MEMORY: ToolEffects = ToolEffects {
     reads_files: false,
     writes_files: false,
     spawns_process: false,
     network_loopback: false,
+    network_external: false,
 };
 const COMPILE: ToolEffects = ToolEffects {
     reads_files: true,
     writes_files: true,
     spawns_process: true,
     network_loopback: false,
+    network_external: false,
+};
+const RIFT_COMPILE: ToolEffects = ToolEffects {
+    reads_files: true,
+    writes_files: true,
+    spawns_process: true,
+    network_loopback: false,
+    network_external: true,
 };
 const RENDER: ToolEffects = ToolEffects {
     reads_files: true,
     writes_files: true,
     spawns_process: false,
     network_loopback: false,
+    network_external: false,
 };
 const RUNTIME: ToolEffects = ToolEffects {
     reads_files: true,
     writes_files: true,
     spawns_process: true,
     network_loopback: true,
+    network_external: false,
 };
 const TOPIC: ToolEffects = ToolEffects {
     reads_files: false,
     writes_files: false,
     spawns_process: false,
     network_loopback: true,
+    network_external: false,
 };
 
 macro_rules! contract {
@@ -188,6 +202,15 @@ static CONTRACTS: &[ToolContract] = &[
         1_048_576
     ),
     contract!(
+        "rift_compile",
+        "Run Meridian-Rift's contained RIFT_BUILD.cmd full-build gate.",
+        Development,
+        RIFT_COMPILE,
+        Provisional,
+        Some(1_800_000),
+        1_048_576
+    ),
+    contract!(
         "dm_render_map",
         "Render a contained DMM/TGM map output.",
         Development,
@@ -248,12 +271,23 @@ pub fn all_contracts() -> &'static [ToolContract] {
 }
 
 pub fn contracts_for(mode: CapabilityMode) -> Vec<&'static ToolContract> {
+    contracts_for_configuration(mode, RiftBuildAccess::Disabled)
+}
+
+pub fn contracts_for_configuration(
+    mode: CapabilityMode,
+    rift_build: RiftBuildAccess,
+) -> Vec<&'static ToolContract> {
     CONTRACTS
         .iter()
         .filter(|contract| {
             contract.support != SupportLevel::Unsupported
                 && (contract.mode == CapabilityMode::Analysis
                     || mode == CapabilityMode::Development)
+                && (contract.name != "rift_compile"
+                    || (cfg!(windows)
+                        && mode == CapabilityMode::Development
+                        && rift_build != RiftBuildAccess::Disabled))
         })
         .collect()
 }
@@ -275,6 +309,9 @@ pub fn render_tool_reference(contracts: &[ToolContract]) -> String {
         }
         if contract.effects.network_loopback {
             effects.push("loopback");
+        }
+        if contract.effects.network_external {
+            effects.push("network");
         }
         output.push_str(&format!(
             "| `{}` | {:?} | {:?} | {} | {} | {} | {} |\n",

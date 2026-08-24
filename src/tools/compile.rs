@@ -1,16 +1,15 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde_json::{json, Value};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime};
-use tokio::io::AsyncRead;
-use tokio::process::Command;
-use tokio::sync::mpsc;
+use std::time::Duration;
 use tracing::info;
 
+use crate::artifact::ArtifactSnapshot;
 use crate::mcp::ToolResult;
+use crate::process::{run_contained_process, ProcessSpec, TerminationReason};
 
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 45_000;
 const MAX_IDLE_TIMEOUT_MS: u64 = 900_000;
@@ -80,49 +79,6 @@ fn compile_succeeded(process_succeeded: bool, error_count: usize) -> bool {
     process_succeeded && error_count == 0
 }
 
-#[cfg(windows)]
-fn process_cpu_time_100ns(pid: u32) -> Option<u64> {
-    use std::mem::MaybeUninit;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return None;
-        }
-
-        let mut creation_time = MaybeUninit::<FILETIME>::uninit();
-        let mut exit_time = MaybeUninit::<FILETIME>::uninit();
-        let mut kernel_time = MaybeUninit::<FILETIME>::uninit();
-        let mut user_time = MaybeUninit::<FILETIME>::uninit();
-        let result = GetProcessTimes(
-            handle,
-            creation_time.as_mut_ptr(),
-            exit_time.as_mut_ptr(),
-            kernel_time.as_mut_ptr(),
-            user_time.as_mut_ptr(),
-        );
-        CloseHandle(handle);
-        if result == 0 {
-            return None;
-        }
-
-        let kernel_time = kernel_time.assume_init();
-        let user_time = user_time.assume_init();
-        let to_u64 =
-            |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
-        Some(to_u64(kernel_time).saturating_add(to_u64(user_time)))
-    }
-}
-
-#[cfg(not(windows))]
-fn process_cpu_time_100ns(_pid: u32) -> Option<u64> {
-    None
-}
-
 fn normalize_spawn_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -145,146 +101,6 @@ fn compiler_dme_argument(path: &Path, working_directory: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
-}
-
-struct CompilerRun {
-    status: Option<ExitStatus>,
-    timed_out: bool,
-    idle: bool,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-#[derive(Clone, Copy)]
-enum CompilerStream {
-    Stdout,
-    Stderr,
-}
-
-async fn capture_compiler_stream<R>(
-    mut stream: R,
-    stream_kind: CompilerStream,
-    sender: mpsc::Sender<(CompilerStream, Vec<u8>)>,
-) where
-    R: AsyncRead + Unpin,
-{
-    let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        let bytes_read = match tokio::io::AsyncReadExt::read(&mut stream, &mut buffer).await {
-            Ok(0) => break,
-            Ok(bytes_read) => bytes_read,
-            Err(_) => break,
-        };
-        if sender
-            .send((stream_kind, buffer[..bytes_read].to_vec()))
-            .await
-            .is_err()
-        {
-            break;
-        }
-    }
-}
-
-async fn run_compiler(
-    compiler: &Path,
-    arguments: &[String],
-    working_directory: Option<&Path>,
-    timeout_ms: u64,
-    _idle_timeout_ms: u64,
-) -> Result<CompilerRun> {
-    let mut command = Command::new(compiler);
-    command
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    if let Some(working_directory) = working_directory {
-        command.current_dir(working_directory);
-    }
-
-    let mut child = command.spawn()?;
-    let process_id = child.id().unwrap_or_default();
-    drop(child.stdin.take());
-    let (sender, mut receiver) = mpsc::channel(32);
-    let mut reader_tasks = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        reader_tasks.push(tokio::spawn(capture_compiler_stream(
-            stdout,
-            CompilerStream::Stdout,
-            sender.clone(),
-        )));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        reader_tasks.push(tokio::spawn(capture_compiler_stream(
-            stderr,
-            CompilerStream::Stderr,
-            sender.clone(),
-        )));
-    }
-
-    let started_at = tokio::time::Instant::now();
-    let mut last_progress = started_at;
-    let mut previous_cpu_time = process_cpu_time_100ns(process_id);
-    let timeout = Duration::from_millis(timeout_ms);
-    let idle_timeout = Duration::from_millis(_idle_timeout_ms);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-
-    let (status, timed_out, idle) = loop {
-        let now = tokio::time::Instant::now();
-        if now.duration_since(started_at) >= timeout {
-            let _ = child.kill().await;
-            break (child.wait().await.ok(), true, false);
-        }
-
-        tokio::select! {
-            exit_status = child.wait() => {
-                break (exit_status.ok(), false, false);
-            }
-            output = receiver.recv() => {
-                if let Some((stream_kind, bytes)) = output {
-                    last_progress = tokio::time::Instant::now();
-                    match stream_kind {
-                        CompilerStream::Stdout => stdout.extend(bytes),
-                        CompilerStream::Stderr => stderr.extend(bytes),
-                    }
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
-        }
-
-        if let Some(cpu_time) = process_cpu_time_100ns(process_id) {
-            if previous_cpu_time.is_none_or(|previous| cpu_time > previous) {
-                last_progress = tokio::time::Instant::now();
-            }
-            previous_cpu_time = Some(cpu_time);
-        }
-
-        if tokio::time::Instant::now().duration_since(last_progress) >= idle_timeout {
-            let _ = child.kill().await;
-            break (child.wait().await.ok(), false, true);
-        }
-    };
-
-    drop(sender);
-    while let Some((stream_kind, bytes)) = receiver.recv().await {
-        match stream_kind {
-            CompilerStream::Stdout => stdout.extend(bytes),
-            CompilerStream::Stderr => stderr.extend(bytes),
-        }
-    }
-    for reader_task in reader_tasks {
-        let _ = reader_task.await;
-    }
-
-    Ok(CompilerRun {
-        status,
-        timed_out,
-        idle,
-        stdout,
-        stderr,
-    })
 }
 
 #[allow(clippy::items_after_test_module)]
@@ -408,6 +224,36 @@ fn resolve_requested_path(requested_path: &Path, working_directory: Option<&Path
     }
 }
 
+fn compiler_environment() -> Vec<(OsString, OsString)> {
+    #[cfg(windows)]
+    let names = [
+        "SystemRoot",
+        "SystemDrive",
+        "WINDIR",
+        "ComSpec",
+        "PATH",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "ProgramData",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "USERPROFILE",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    ];
+    #[cfg(not(windows))]
+    let names = ["PATH", "HOME", "TMPDIR", "LD_LIBRARY_PATH"];
+
+    names
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name.into(), value)))
+        .collect()
+}
+
 /// Compile a DreamMaker environment
 pub async fn compile(args: Value) -> Result<ToolResult> {
     let dme_path = args
@@ -431,7 +277,8 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
         .and_then(|value| value.as_str())
         .map(PathBuf::from)
         .or_else(find_dm_compiler)
-        .ok_or_else(|| anyhow!("DreamMaker compiler not found. Please install BYOND."))?;
+        .ok_or_else(|| anyhow!("DreamMaker compiler not found. Please install BYOND."))?
+        .canonicalize()?;
 
     let timeout_ms = args
         .get("timeout_ms")
@@ -473,28 +320,39 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
         dme_path, compiler, timeout_ms
     );
 
-    let started_at = SystemTime::now();
     let spawn_path = normalize_spawn_path(&path);
     let spawn_working_directory = working_directory.as_deref().map(normalize_spawn_path);
     let compiler_working_directory = spawn_working_directory
         .as_deref()
         .unwrap_or_else(|| spawn_path.parent().unwrap_or(Path::new(".")));
     let dme_argument = compiler_dme_argument(&spawn_path, compiler_working_directory);
-    let arguments: Vec<String> = defines
+    let arguments: Vec<OsString> = defines
         .into_iter()
-        .chain(std::iter::once(dme_argument.clone()))
+        .map(OsString::from)
+        .chain(std::iter::once(OsString::from(&dme_argument)))
         .collect();
-    let execution = run_compiler(
-        &compiler,
-        &arguments,
-        spawn_working_directory.as_deref(),
-        timeout_ms,
-        idle_timeout_ms,
-    )
+    let dmb_path = path.with_extension("dmb");
+    let project_root = path
+        .parent()
+        .ok_or_else(|| anyhow!("DreamMaker environment has no project root"))?;
+    let artifact_before = ArtifactSnapshot::capture(project_root, &dmb_path)?;
+    let capture_network = args
+        .get("capture_network")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let execution = run_contained_process(ProcessSpec {
+        program: normalize_spawn_path(&compiler),
+        arguments,
+        working_directory: compiler_working_directory.to_owned(),
+        environment: compiler_environment(),
+        timeout: Duration::from_millis(timeout_ms),
+        idle_timeout: Duration::from_millis(idle_timeout_ms),
+        capture_network,
+    })
     .await?;
 
-    let stdout = String::from_utf8_lossy(&execution.stdout);
-    let stderr = String::from_utf8_lossy(&execution.stderr);
+    let stdout = &execution.stdout.text;
+    let stderr = &execution.stderr.text;
 
     // Parse output for errors/warnings
     let mut errors: Vec<Value> = Vec::new();
@@ -509,41 +367,44 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
         }
     }
 
-    let process_succeeded = execution
-        .status
-        .as_ref()
-        .map(ExitStatus::success)
-        .unwrap_or(false);
-    let success = !execution.timed_out
-        && !execution.idle
-        && compile_succeeded(process_succeeded, errors.len());
-    let dmb_path = path.with_extension("dmb");
-    let dmb_metadata = std::fs::metadata(&dmb_path).ok();
-    let dmb_exists = dmb_metadata.is_some();
-    let dmb_updated = dmb_metadata
-        .and_then(|metadata| metadata.modified().ok())
-        .map(|modified| modified >= started_at)
-        .unwrap_or(false);
+    let process_succeeded =
+        execution.termination == TerminationReason::Exited && execution.exit_code == Some(0);
+    let success = compile_succeeded(process_succeeded, errors.len());
+    let artifact_after = ArtifactSnapshot::capture(project_root, &dmb_path)?;
+    let dmb_exists = artifact_after.exists;
+    let dmb_updated = artifact_after.exists
+        && (!artifact_before.exists
+            || artifact_before.sha256 != artifact_after.sha256
+            || artifact_before.modified_unix_ms != artifact_after.modified_unix_ms);
+    let timed_out = execution.termination == TerminationReason::WallTimeout;
+    let idle = execution.termination == TerminationReason::IdleTimeout;
 
     let result = json!({
         "success": success,
-        "timed_out": execution.timed_out,
-        "idle": execution.idle,
+        "timed_out": timed_out,
+        "idle": idle,
+        "termination": execution.termination,
+        "duration_ms": execution.duration_ms,
         "timeout_ms": timeout_ms,
         "idle_timeout_ms": idle_timeout_ms,
-        "exit_code": execution.status.and_then(|status| status.code()),
+        "exit_code": execution.exit_code,
         "dme_argument": dme_argument,
         "spawn_working_directory": compiler_working_directory.display().to_string(),
         "dmb_exists": dmb_exists,
         "dmb_updated": dmb_updated,
-        "dmb_path": if dmb_exists { Some(dmb_path.display().to_string()) } else { None },
+        "dmb_path": if dmb_exists { Some(artifact_after.path.display().to_string()) } else { None },
+        "artifact_before": artifact_before,
+        "artifact_after": artifact_after,
         "compiler": compiler.display().to_string(),
         "working_directory": working_directory.map(|directory| directory.display().to_string()),
         "defines": args.get("defines").cloned().unwrap_or_else(|| json!([])),
         "errors": errors,
         "warnings": warnings,
-        "stdout": stdout.to_string(),
-        "stderr": stderr.to_string()
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_truncated_bytes": execution.stdout.truncated_bytes,
+        "stderr_truncated_bytes": execution.stderr.truncated_bytes,
+        "network_audit": execution.network_audit
     });
 
     if success {

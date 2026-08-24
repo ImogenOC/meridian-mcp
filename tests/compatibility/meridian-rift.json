@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "covered_tools": [
+    "dm_parse_environment",
+    "dm_get_type",
+    "dm_get_proc",
+    "dm_get_var",
+    "dm_list_types",
+    "dm_search_symbols",
+    "dm_search_context",
+    "dm_get_definition"
+  ],
+  "types": [
+    {
+      "path": "/datum/controller/subsystem",
+      "file_suffix": "code/controllers/subsystem.dm"
+    },
+    {
+      "path": "/obj/item",
+      "file_suffix": "code/game/objects/items.dm"
+    },
+    {
+      "path": "/mob/living/carbon/human",
+      "parent": "/mob/living/carbon"
+    }
+  ],
+  "procs": [
+    {
+      "type_path": "/datum/controller/subsystem",
+      "name": "fire",
+      "file_suffix": "code/controllers/subsystem.dm"
+    },
+    {
+      "type_path": "/obj/item/bedsheet",
+      "name": "attempt_pickup",
+      "inherited_from": "/obj/item"
+    }
+  ],
+  "vars": [
+    {
+      "type_path": "/datum/controller/subsystem",
+      "name": "next_fire",
+      "file_suffix": "code/controllers/subsystem.dm"
+    },
+    {
+      "type_path": "/obj/item/bedsheet",
+      "name": "w_class",
+      "inherited_from": "/obj/item"
+    }
+  ],
+  "type_lists": [
+    {
+      "prefix": "/datum/controller/subsystem",
+      "contains": [
+        "/datum/controller/subsystem"
+      ]
+    }
+  ],
+  "symbol_searches": [
+    {
+      "query": "update_nextfire",
+      "kind": "proc",
+      "contains_name": "update_nextfire"
+    },
+    {
+      "query": "w_class",
+      "kind": "var",
+      "contains_name": "w_class"
+    }
+  ],
+  "context_searches": [
+    {
+      "query": "scheduled world time for next subsystem fire",
+      "top": 10,
+      "contains_symbol": "/datum/controller/subsystem/proc/update_nextfire"
+    }
+  ],
+  "definitions": [
+    {
+      "type_path": "/datum/controller/subsystem",
+      "kind": "type",
+      "file_suffix": "code/controllers/subsystem.dm"
+    },
+    {
+      "type_path": "/obj/item/bedsheet",
+      "member": "w_class",
+      "kind": "var",
+      "defined_in": "/obj/item"
+    }
+  ]
+}

@@ -2,6 +2,7 @@ mod analysis;
 mod compile;
 mod map;
 mod parse;
+pub mod rift;
 mod runtime;
 mod search;
 
@@ -10,21 +11,42 @@ use serde_json::{json, Value};
 
 use crate::mcp::{ToolDefinition, ToolResult};
 use crate::state::ServerState;
-use crate::{contracts_for, CapabilityMode, PathPolicy};
+use crate::{contracts_for_configuration, CapabilityMode, PathPolicy, RiftBuildAccess};
 
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     mode: CapabilityMode,
     policy: PathPolicy,
+    rift_build: RiftBuildAccess,
 }
 
 impl ToolExecutionContext {
     pub fn new(mode: CapabilityMode, policy: PathPolicy) -> Self {
-        Self { mode, policy }
+        Self::with_rift_build(mode, policy, RiftBuildAccess::Disabled)
+    }
+
+    pub fn with_rift_build(
+        mode: CapabilityMode,
+        policy: PathPolicy,
+        rift_build: RiftBuildAccess,
+    ) -> Self {
+        Self {
+            mode,
+            policy,
+            rift_build,
+        }
     }
 
     pub fn mode(&self) -> CapabilityMode {
         self.mode
+    }
+
+    pub fn rift_build_access(&self) -> RiftBuildAccess {
+        self.rift_build
+    }
+
+    pub(crate) fn policy(&self) -> &PathPolicy {
+        &self.policy
     }
 }
 
@@ -256,9 +278,48 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "type": "integer",
                     "minimum": 1000,
                     "description": "Fail if DreamMaker produces no output and consumes no CPU for this long (default: 45000, capped at 900000)"
+                },
+                "capture_network": {
+                    "type": "boolean",
+                    "description": "Request best-effort endpoint observation (default: false)"
                 }
             },
             "required": ["dme_path"]
+        }),
+    });
+
+    tools.push(ToolDefinition {
+        name: "rift_compile".to_string(),
+        description: "Run Meridian-Rift's contained RIFT_BUILD.cmd full-build gate.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "network_mode": {
+                    "type": "string",
+                    "enum": ["offline", "allow"],
+                    "description": "Dependency network mode (default: offline)"
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 1800000,
+                    "description": "Wall timeout in milliseconds (default: 1800000)"
+                },
+                "idle_timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 900000,
+                    "description": "No-output and no-CPU timeout in milliseconds (default: 120000)"
+                },
+                "capture_network": {
+                    "type": "boolean",
+                    "description": "Request best-effort endpoint observation (default: false)"
+                },
+                "force_rebuild": {
+                    "type": "boolean",
+                    "description": "Remove only canonical root build artifacts before building (default: false)"
+                }
+            }
         }),
     });
 
@@ -436,8 +497,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     tools
 }
 
-pub fn get_tool_definitions_for(mode: CapabilityMode) -> Vec<ToolDefinition> {
-    let active: std::collections::HashSet<_> = contracts_for(mode)
+pub fn get_tool_definitions_for(
+    mode: CapabilityMode,
+    rift_build: RiftBuildAccess,
+) -> Vec<ToolDefinition> {
+    let active: std::collections::HashSet<_> = contracts_for_configuration(mode, rift_build)
         .into_iter()
         .map(|contract| contract.name)
         .collect();
@@ -454,7 +518,14 @@ pub async fn call_tool(
     name: &str,
     mut args: Value,
 ) -> Result<ToolResult> {
-    if !contracts_for(context.mode)
+    if name == "rift_compile" && !cfg!(windows) {
+        return Ok(policy_error(
+            "unsupported_platform",
+            "rift_compile is supported only on Windows".to_string(),
+            None,
+        ));
+    }
+    if !contracts_for_configuration(context.mode, context.rift_build)
         .iter()
         .any(|contract| contract.name == name)
     {
@@ -487,6 +558,7 @@ pub async fn call_tool(
 
         // Compile tool
         "dm_compile" => compile::compile(args).await,
+        "rift_compile" => rift::compile(context, state, args).await,
 
         // Map tools
         "dm_render_map" => map::render_map(state, args).await,
@@ -587,11 +659,13 @@ mod tests {
     use super::get_tool_definitions;
 
     #[test]
-    fn tool_definitions_keep_dm_name_prefixes() {
+    fn tool_definitions_use_supported_name_prefixes() {
         let definitions = get_tool_definitions();
 
         assert!(!definitions.is_empty());
-        assert!(definitions.iter().all(|tool| tool.name.starts_with("dm_")));
+        assert!(definitions
+            .iter()
+            .all(|tool| tool.name.starts_with("dm_") || tool.name == "rift_compile"));
     }
 
     #[test]

@@ -1,13 +1,67 @@
 use meridian_mcp::result::{ToolContent, ToolResult};
 use meridian_mcp::state::ServerState;
 use meridian_mcp::tools::{call_tool, ToolExecutionContext};
-use meridian_mcp::{CapabilityMode, PathPolicy};
+use meridian_mcp::{CapabilityMode, PathPolicy, RiftBuildAccess};
 use serde_json::json;
 
 fn message(result: &ToolResult) -> &str {
     match &result.content[0] {
         ToolContent::Text { text } => text,
     }
+}
+
+#[tokio::test]
+async fn rift_compile_cannot_broaden_the_startup_network_ceiling() {
+    let root =
+        std::env::temp_dir().join(format!("meridian-mcp-rift-ceiling-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let context = ToolExecutionContext::with_rift_build(
+        CapabilityMode::Development,
+        PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+        RiftBuildAccess::Offline,
+    );
+    let result = call_tool(
+        &context,
+        &mut ServerState::new(),
+        "rift_compile",
+        json!({"network_mode": "allow"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.is_error, Some(true));
+    #[cfg(windows)]
+    assert!(message(&result).contains("network_mode_denied"));
+    #[cfg(not(windows))]
+    assert!(message(&result).contains("unsupported_platform"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn rift_compile_rejects_zero_duration_limits() {
+    let root =
+        std::env::temp_dir().join(format!("meridian-mcp-rift-timeout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let context = ToolExecutionContext::with_rift_build(
+        CapabilityMode::Development,
+        PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+        RiftBuildAccess::Offline,
+    );
+    let result = call_tool(
+        &context,
+        &mut ServerState::new(),
+        "rift_compile",
+        json!({"timeout_ms": 0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.is_error, Some(true));
+    #[cfg(windows)]
+    assert!(message(&result).contains("invalid_arguments"));
+    #[cfg(not(windows))]
+    assert!(message(&result).contains("unsupported_platform"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]

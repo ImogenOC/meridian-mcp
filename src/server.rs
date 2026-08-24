@@ -27,7 +27,11 @@ impl MeridianServer {
             config.workspace_roots().to_vec(),
             config.compiler_allowlist().to_vec(),
         )?;
-        let execution = ToolExecutionContext::new(config.mode(), policy);
+        let execution = ToolExecutionContext::with_rift_build(
+            config.mode(),
+            policy,
+            config.rift_build_access(),
+        );
         Ok(Self {
             config: Arc::new(config),
             execution,
@@ -36,16 +40,16 @@ impl MeridianServer {
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        tools::get_tool_definitions_for(self.config.mode())
+        tools::get_tool_definitions_for(self.config.mode(), self.config.rift_build_access())
             .into_iter()
             .map(|definition| definition.name)
             .collect()
     }
 
     fn tools(&self) -> Vec<Tool> {
-        tools::get_tool_definitions_for(self.config.mode())
+        tools::get_tool_definitions_for(self.config.mode(), self.config.rift_build_access())
             .into_iter()
-            .map(to_sdk_tool)
+            .map(|definition| to_sdk_tool(definition, self.config.rift_build_access()))
             .collect()
     }
 }
@@ -83,7 +87,7 @@ impl ServerHandler for MeridianServer {
     }
 }
 
-fn to_sdk_tool(definition: ToolDefinition) -> Tool {
+fn to_sdk_tool(definition: ToolDefinition, rift_build: crate::RiftBuildAccess) -> Tool {
     let input_schema = definition
         .input_schema
         .as_object()
@@ -93,14 +97,17 @@ fn to_sdk_tool(definition: ToolDefinition) -> Tool {
         .iter()
         .find(|contract| contract.name == definition.name);
     let annotations = contract.map(|contract| {
+        let external_network =
+            contract.effects.network_external && rift_build == crate::RiftBuildAccess::Network;
         ToolAnnotations::new()
             .read_only(
                 !contract.effects.writes_files
                     && !contract.effects.spawns_process
-                    && !contract.effects.network_loopback,
+                    && !contract.effects.network_loopback
+                    && !external_network,
             )
             .destructive(false)
-            .open_world(false)
+            .open_world(external_network)
     });
     let mut tool = Tool::new(definition.name, definition.description, input_schema);
     tool.annotations = annotations;

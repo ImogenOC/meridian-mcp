@@ -1,4 +1,4 @@
-use meridian_mcp::{CapabilityMode, PathPolicy, ServerConfig};
+use meridian_mcp::{CapabilityMode, PathPolicy, RiftBuildAccess, ServerConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -11,6 +11,41 @@ fn fixture() -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+#[test]
+fn rift_build_access_is_disabled_by_default_and_strict_when_configured() {
+    let root = fixture();
+    let compatible =
+        ServerConfig::from_values(Some("development"), vec![root.clone()], Vec::new()).unwrap();
+    assert_eq!(compatible.rift_build_access(), RiftBuildAccess::Disabled);
+
+    let offline = ServerConfig::from_values_with_rift_build(
+        Some("development"),
+        vec![root.clone()],
+        Vec::new(),
+        Some("offline"),
+    )
+    .unwrap();
+    assert_eq!(offline.rift_build_access(), RiftBuildAccess::Offline);
+
+    let network = ServerConfig::from_values_with_rift_build(
+        Some("development"),
+        vec![root.clone()],
+        Vec::new(),
+        Some("network"),
+    )
+    .unwrap();
+    assert_eq!(network.rift_build_access(), RiftBuildAccess::Network);
+
+    assert!(ServerConfig::from_values_with_rift_build(
+        Some("development"),
+        vec![root.clone()],
+        Vec::new(),
+        Some("internet"),
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

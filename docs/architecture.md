@@ -2,7 +2,7 @@
 
 `main.rs` configures stderr logging and loads immutable `ServerConfig`. `mcp.rs` starts the official `rmcp` stdio transport. `MeridianServer` owns the active mode, canonical `PathPolicy`, and a mutex-protected `ServerState`.
 
-The server exposes only contracts active for its startup mode. Analysis mode contains parsing, indexing, exact lookup, search, diagnostics, and read-only map inspection. Development mode additionally exposes direct compilation, PNG output, DreamDaemon lifecycle, and loopback `Topic()` calls.
+The server exposes only contracts active for its startup configuration. Analysis mode contains parsing, indexing, exact lookup, search, diagnostics, and read-only map inspection. Development mode additionally exposes direct compilation, PNG output, DreamDaemon lifecycle, and loopback `Topic()` calls. Windows `rift_compile` is a further conditional contract controlled by the immutable full-build ceiling.
 
 Tool calls cross these boundaries in order:
 
@@ -11,6 +11,8 @@ Tool calls cross these boundaries in order:
 3. Path policy canonicalizes inputs, checks roots, enforces compiler allowlisting, and requires explicit output overwrite.
 4. Domain adapters invoke SpacemanDMM or controlled BYOND operations and return transport-independent results.
 5. The server converts domain results to SDK result models.
+
+Direct DreamMaker compilation and Meridian-Rift full builds share bounded output, timeout, process-tree termination, artifact snapshots, and optional observational endpoint auditing. Tool modules retain command construction and acceptance semantics. `dm_compile` runs one allowlisted compiler. `rift_compile` requires a qualified active profile and runs only the canonical `RIFT_BUILD.cmd`, which delegates to the unchanged human build implementation without accepting client-controlled commands.
 
 A successful parse builds the context, object tree, search index, and project profile before replacing state. It then advances `state_generation`. A failed parse retains the complete prior generation and reports `state_preserved: true`.
 

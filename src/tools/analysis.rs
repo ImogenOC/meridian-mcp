@@ -85,36 +85,6 @@ pub async fn get_definition(state: &mut ServerState, args: Value) -> Result<Tool
     match objtree.find(type_path) {
         Some(ty) => {
             if let Some(member) = member_name {
-                // Look for var first, then proc
-                if let Some(var) = ty.vars.get(member) {
-                    let file_path = get_file_path(context, var.value.location.file);
-                    let result = json!({
-                        "kind": "var",
-                        "name": member,
-                        "type_path": type_path,
-                        "file": file_path,
-                        "line": var.value.location.line,
-                        "column": var.value.location.column
-                    });
-                    return Ok(ToolResult::text(serde_json::to_string_pretty(&result)?));
-                }
-
-                if let Some(proc) = ty.procs.get(member) {
-                    if let Some(first) = proc.value.first() {
-                        let file_path = get_file_path(context, first.location.file);
-                        let result = json!({
-                            "kind": "proc",
-                            "name": member,
-                            "type_path": type_path,
-                            "file": file_path,
-                            "line": first.location.line,
-                            "column": first.location.column
-                        });
-                        return Ok(ToolResult::text(serde_json::to_string_pretty(&result)?));
-                    }
-                }
-
-                // Try walking up the parent chain
                 let mut current = Some(ty);
                 while let Some(t) = current {
                     if let Some(var) = t.vars.get(member) {
@@ -173,5 +143,79 @@ pub async fn get_definition(state: &mut ServerState, args: Value) -> Result<Tool
             }
         }
         None => Ok(ToolResult::error(format!("Type not found: {type_path}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::ToolContent;
+    use crate::tools::parse::parse_environment;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn result_json(result: &ToolResult) -> Value {
+        let ToolContent::Text { text } = &result.content[0];
+        serde_json::from_str(text).expect("tool result should be JSON")
+    }
+
+    async fn inherited_definition_fixture() -> (std::path::PathBuf, ServerState) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "meridian-mcp-definition-{}-{unique}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let dme_path = directory.join("fixture.dme");
+        std::fs::write(&dme_path, "#include \"fixture.dm\"\n").unwrap();
+        std::fs::write(
+            directory.join("fixture.dm"),
+            r#"/datum/definition_parent
+	var/inherited_value = 1
+
+/datum/definition_parent/proc/inherited_proc()
+	return inherited_value
+
+/datum/definition_parent/child
+	inherited_value = 2
+"#,
+        )
+        .unwrap();
+
+        let mut state = ServerState::new();
+        let parse_result = parse_environment(&mut state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        assert_eq!(parse_result.is_error, None);
+        (directory, state)
+    }
+
+    #[tokio::test]
+    async fn inherited_member_definitions_report_the_declaring_type() {
+        let (directory, mut state) = inherited_definition_fixture().await;
+
+        for (member, kind) in [("inherited_value", "var"), ("inherited_proc", "proc")] {
+            let result = get_definition(
+                &mut state,
+                json!({
+                    "type_path": "/datum/definition_parent/child",
+                    "member_name": member,
+                }),
+            )
+            .await
+            .unwrap();
+            let payload = result_json(&result);
+            assert_eq!(payload["kind"], kind);
+            assert_eq!(payload["defined_in"], "/datum/definition_parent");
+            assert_eq!(payload["type_path"], "/datum/definition_parent/child");
+        }
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
