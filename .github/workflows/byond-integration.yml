@@ -38,7 +38,8 @@ jobs:
           ./scripts/install-byond.ps1 `
             -Version 516.1685 `
             -ArchivePath "$env:RUNNER_TEMP\byond.zip" `
-            -DestinationPath "$env:RUNNER_TEMP\byond"
+            -DestinationPath "$env:RUNNER_TEMP\byond" `
+            -ExpectedSha256 E24078F1E6D719681118D6505B2A3F263FB173C1B63465D2F68F3E0EC177126F
       - name: Build release Meridian-MCP
         run: cargo build --release
       - name: Run owned fixture and Meridian-Rift compatibility gates

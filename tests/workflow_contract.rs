@@ -35,6 +35,10 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
         "Invoke-WebRequest",
         "Expand-Archive",
         "MaxAttempts",
+        "ExpectedSha256",
+        "Get-FileHash",
+        "byond-builds.dm-lang.org",
+        "tgstation/1.0 CI Script",
         "dm.exe",
     ] {
         assert!(
