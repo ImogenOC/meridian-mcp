@@ -1,4 +1,5 @@
 use serde::Serialize;
+#[cfg(windows)]
 use std::collections::HashMap;
 
 pub const MAX_NETWORK_OBSERVATIONS: usize = 256;
@@ -30,6 +31,7 @@ pub struct NetworkAuditReport {
     pub warning: Option<String>,
 }
 
+#[cfg(windows)]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ObservationKey {
     protocol: EndpointProtocol,
@@ -40,6 +42,7 @@ struct ObservationKey {
 
 pub(crate) struct NetworkAuditCollector {
     report: NetworkAuditReport,
+    #[cfg(windows)]
     indices: HashMap<ObservationKey, usize>,
 }
 
@@ -56,15 +59,16 @@ impl NetworkAuditCollector {
                 warning: (requested && !cfg!(windows))
                     .then(|| "network_audit_unavailable".to_string()),
             },
+            #[cfg(windows)]
             indices: HashMap::new(),
         }
     }
 
+    #[cfg(windows)]
     pub(crate) fn sample(&mut self, process_ids: &[u32], elapsed_ms: u128) {
         if !self.report.requested || !self.report.available || process_ids.is_empty() {
             return;
         }
-        #[cfg(windows)]
         match windows::sample(process_ids) {
             Ok(observations) => {
                 for (protocol, process_id, local_endpoint, remote_endpoint) in observations {
@@ -84,6 +88,10 @@ impl NetworkAuditCollector {
         }
     }
 
+    #[cfg(not(windows))]
+    pub(crate) fn sample(&mut self, _process_ids: &[u32], _elapsed_ms: u128) {}
+
+    #[cfg(windows)]
     fn record(
         &mut self,
         protocol: EndpointProtocol,

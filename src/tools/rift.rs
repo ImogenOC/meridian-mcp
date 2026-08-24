@@ -5,7 +5,9 @@ use crate::parameters::{RiftCompileParams, RiftNetworkMode};
 use crate::process::{run_contained_process, ProcessOutcome, ProcessSpec, TerminationReason};
 use crate::state::ServerState;
 use crate::{ProjectProfile, RiftBuildAccess};
-use anyhow::{anyhow, Context, Result};
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};

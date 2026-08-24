@@ -2,8 +2,10 @@ use meridian_mcp::artifact::ArtifactSnapshot;
 use meridian_mcp::process::{
     run_contained_process, ProcessSpec, TerminationReason, MAX_PROCESS_OUTPUT_BYTES,
 };
+#[cfg(windows)]
 use std::ffi::OsString;
 use std::io::Write;
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

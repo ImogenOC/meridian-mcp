@@ -173,8 +173,29 @@ pub async fn get_proc(state: &mut ServerState, args: Value) -> Result<ToolResult
 
     match objtree.find(type_path) {
         Some(ty) => {
-            match ty.procs.get(proc_name) {
-                Some(proc) => {
+            let mut current_type = Some(ty);
+            let mut resolved_type_path = None;
+            while let Some(candidate_type) = current_type {
+                if let Some(proc_entry) = candidate_type.procs.get(proc_name) {
+                    if resolved_type_path.is_none() || proc_entry.declaration.is_some() {
+                        resolved_type_path = Some(candidate_type.path.to_string());
+                    }
+                    if proc_entry.declaration.is_some() {
+                        break;
+                    }
+                }
+                current_type = candidate_type.parent_type();
+            }
+
+            match resolved_type_path {
+                Some(declared_in) => {
+                    let declaring_type = objtree
+                        .find(&declared_in)
+                        .expect("resolved proc owner should remain in the object tree");
+                    let proc = declaring_type
+                        .procs
+                        .get(proc_name)
+                        .expect("resolved proc should remain on its owner");
                     let values: Vec<Value> = proc.value.iter()
                         .map(|v| {
                             let params: Vec<Value> = v.parameters.iter()
@@ -208,7 +229,7 @@ pub async fn get_proc(state: &mut ServerState, args: Value) -> Result<ToolResult
                     let result = json!({
                         "name": proc_name,
                         "type_path": type_path,
-                        "declared": proc.declaration.is_some(),
+                        "declared": declared_in == type_path && proc.declaration.is_some(),
                         "overrides": values
                     });
 
@@ -506,6 +527,28 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Return the supplied value"));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn proc_inspection_resolves_inherited_procs() {
+        let (directory, mut state) = parsed_fixture().await;
+        let result = get_proc(
+            &mut state,
+            json!({
+                "type_path": "/datum/meridian_fixture/child",
+                "proc_name": "do_work"
+            }),
+        )
+        .await
+        .unwrap();
+        let payload = result_json(&result);
+
+        assert_eq!(result.is_error, None);
+        assert_eq!(payload["type_path"], "/datum/meridian_fixture/child");
+        assert_eq!(payload["declared"], false);
+        assert_eq!(payload["overrides"][0]["has_body"], true);
 
         std::fs::remove_dir_all(directory).unwrap();
     }

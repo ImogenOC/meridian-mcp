@@ -2,10 +2,14 @@ use meridian_mcp::result::{ToolContent, ToolResult};
 use meridian_mcp::state::ServerState;
 use meridian_mcp::tools::{call_tool, ToolExecutionContext};
 use meridian_mcp::{CapabilityMode, PathPolicy, RiftBuildAccess};
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(windows)]
+use serde_json::Value;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(windows)]
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn text(result: &ToolResult) -> &str {
@@ -13,10 +17,12 @@ fn text(result: &ToolResult) -> &str {
     text
 }
 
+#[cfg(windows)]
 fn payload(result: &ToolResult) -> Value {
     serde_json::from_str(text(result)).expect("rift_compile result should be JSON")
 }
 
+#[cfg(windows)]
 fn fixture(name: &str, dme_name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "meridian-mcp-rift-{name}-{}-{}",
@@ -64,6 +70,7 @@ fn context(root: &Path, compilers: Vec<PathBuf>, access: RiftBuildAccess) -> Too
     )
 }
 
+#[cfg(windows)]
 async fn parse_project(context: &ToolExecutionContext, state: &mut ServerState, dme: &Path) {
     let result = call_tool(
         context,
