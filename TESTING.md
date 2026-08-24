@@ -4,6 +4,8 @@ Run checks from the repository root with PowerShell 7 on Windows or Linux.
 
 ## Rust and contract gates
 
+The checked-in `rust-toolchain.toml` pins Rust 1.88.0 with rustfmt and Clippy, matching CI. Do not override that toolchain when reproducing a CI failure; confirm `rustc --version` reports 1.88.0 before trusting a local green result.
+
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings

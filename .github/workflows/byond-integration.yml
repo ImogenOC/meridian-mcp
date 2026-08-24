@@ -35,8 +35,10 @@ jobs:
       - name: Install BYOND 516.1685
         shell: pwsh
         run: |
-          Invoke-WebRequest https://www.byond.com/download/build/516/516.1685_byond.zip -OutFile $env:RUNNER_TEMP\byond.zip
-          Expand-Archive $env:RUNNER_TEMP\byond.zip -DestinationPath $env:RUNNER_TEMP\byond
+          ./scripts/install-byond.ps1 `
+            -Version 516.1685 `
+            -ArchivePath "$env:RUNNER_TEMP\byond.zip" `
+            -DestinationPath "$env:RUNNER_TEMP\byond"
       - name: Build release Meridian-MCP
         run: cargo build --release
       - name: Run owned fixture and Meridian-Rift compatibility gates

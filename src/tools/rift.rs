@@ -260,8 +260,7 @@ fn validate_project(
 fn require_direct_root_file(root: &Path, path: &Path, expected_name: &str) -> Result<()> {
     if path.parent() != Some(root) || path.file_name() != Some(OsStr::new(expected_name)) {
         return Err(anyhow!(
-            "{} is not the canonical contained root entry point",
-            expected_name
+            "{expected_name} is not the canonical contained root entry point"
         ));
     }
     Ok(())

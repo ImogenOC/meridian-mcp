@@ -13,6 +13,7 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
         "actions/checkout@v7",
         "AphelionDevelopment/Meridian-Rift",
         "path: integration/Meridian-Rift",
+        "scripts/install-byond.ps1",
         "cargo build --release",
         "scripts/run-byond-integration.ps1",
         "if: always()",
@@ -27,6 +28,28 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
     let integration_script = fs::read_to_string("scripts/run-byond-integration.ps1")
         .expect("BYOND integration script should be readable");
     assert!(integration_script.contains("run-meridian-compatibility.ps1"));
+
+    let installer = fs::read_to_string("scripts/install-byond.ps1")
+        .expect("BYOND installer should be readable");
+    for required in [
+        "Invoke-WebRequest",
+        "Expand-Archive",
+        "MaxAttempts",
+        "dm.exe",
+    ] {
+        assert!(
+            installer.contains(required),
+            "BYOND installer is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn repository_pins_the_ci_rust_toolchain() {
+    let toolchain = fs::read_to_string("rust-toolchain.toml")
+        .expect("repository Rust toolchain should be pinned");
+    assert!(toolchain.contains("channel = \"1.88.0\""));
+    assert!(toolchain.contains("components = [\"rustfmt\", \"clippy\"]"));
 }
 
 #[test]

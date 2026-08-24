@@ -65,7 +65,7 @@ Analysis mode exposes the eleven read-only tools below. Development mode adds se
 
 ## Build
 
-Prerequisites are Rust 1.88 or newer and, for BYOND integration gates, the project-pinned BYOND version.
+The repository pins Rust 1.88.0 with rustfmt and Clippy to match CI. BYOND integration gates additionally require the project-pinned BYOND version.
 
 ```powershell
 cargo build --release
