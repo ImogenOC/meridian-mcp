@@ -10,7 +10,7 @@
 | Windows | Current host, 2026-08-24 | Verified for existing owned gates | Rust and installed stdio fixture evidence exists. New full-corpus analysis and `rift_compile` capabilities remain provisional until the scheduled workflow records a green run against exact repository SHAs. |
 | Linux | Ubuntu 24.04 GitHub-hosted runner | Provisional | Per-change all-feature Rust checks, release build, installed stdio protocol/tool smoke, and owned-fixture parse/search are configured. Promote after the first green Ubuntu run; no BYOND claim. |
 | macOS | Any | Unsupported | No test evidence. |
-| Rust | 1.88 minimum | Verified | Declared in Cargo and configured in CI. |
+| Rust | 1.95.0 | Verified | Pinned in `rust-toolchain.toml` and configured in CI. |
 | BYOND | 516.1685 Meridian-Rift pin | Provisional | The named Windows workflow now records direct compiler, network full-build, warm human-build, and offline full-build evidence. No promotion occurs until that workflow is green. |
 | SpacemanDMM | `7fdd00d8e9b7f7583df4960b5ed38269685ec432` | Provisional | Parser, search, map, and diagnostic tests. |
 | MCP transport | `rmcp` 3.1.3 | Verified | Official SDK tests and installed stdio negotiation/tool smoke passed. |

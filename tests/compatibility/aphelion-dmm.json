@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "client": "apheliondmm",
+  "allowed_tools": [
+    "dm_parse_environment",
+    "dm_map_info",
+    "dm_check_errors"
+  ],
+  "required_sequence": [
+    "dm_parse_environment",
+    "dm_map_info",
+    "dm_check_errors"
+  ],
+  "parse_required_after_source_change": true,
+  "limits": {
+    "max_request_bytes": 262144,
+    "max_response_bytes": 1048576
+  },
+  "repository": {
+    "identity_required": true,
+    "paths_from_startup_configuration": true,
+    "client_paths_allowed": false
+  },
+  "required_result_metadata": [
+    "meridian_mcp_version",
+    "state_generation"
+  ]
+}

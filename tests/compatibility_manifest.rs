@@ -7,6 +7,12 @@ fn manifest() -> Value {
     serde_json::from_str(&text).expect("compatibility manifest must be valid JSON")
 }
 
+fn aphelion_manifest() -> Value {
+    let text = std::fs::read_to_string("tests/compatibility/aphelion-dmm.json")
+        .expect("AphelionDMM compatibility manifest must be checked in");
+    serde_json::from_str(&text).expect("AphelionDMM compatibility manifest must be valid JSON")
+}
+
 #[test]
 fn manifest_is_versioned_unique_bounded_and_covers_analysis_contract() {
     let manifest = manifest();
@@ -116,4 +122,27 @@ fn collect_strings_named<'a>(value: &'a Value, name: &str) -> Vec<&'a str> {
         _ => {}
     }
     output
+}
+
+#[test]
+fn aphelion_manifest_is_versioned_bounded_and_read_only() {
+    let manifest = aphelion_manifest();
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["client"], "apheliondmm");
+    assert_eq!(
+        manifest["allowed_tools"],
+        serde_json::json!(["dm_parse_environment", "dm_map_info", "dm_check_errors"])
+    );
+    assert_eq!(manifest["limits"]["max_request_bytes"], 262_144);
+    assert_eq!(manifest["limits"]["max_response_bytes"], 1_048_576);
+    assert_eq!(manifest["repository"]["identity_required"], true);
+    assert_eq!(
+        manifest["repository"]["paths_from_startup_configuration"],
+        true
+    );
+    assert_eq!(manifest["repository"]["client_paths_allowed"], false);
+    assert_eq!(
+        manifest["required_result_metadata"],
+        serde_json::json!(["meridian_mcp_version", "state_generation"])
+    );
 }

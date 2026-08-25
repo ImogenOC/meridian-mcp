@@ -122,6 +122,8 @@ Every configured root must already exist. Client tool calls cannot change the mo
 
 Call `dm_parse_environment` before source analysis. Use `dm_search_context` for repository-scale discovery, then verify candidates with `dm_get_type`, `dm_get_proc`, `dm_get_var`, or `dm_get_definition`. Reparse after source changes.
 
+AphelionDMM uses the versioned compatibility declaration at `tests/compatibility/aphelion-dmm.json`. Its adapter is limited to `dm_parse_environment`, `dm_map_info`, and `dm_check_errors`, resolves repository identities through trusted startup configuration, and records the negotiated Meridian-MCP version plus the parsed state generation. It is not a generic MCP proxy and accepts no client-selected executable, method name, repository root, or filesystem path.
+
 Active operations are available only in development mode. `dm_compile` invokes DreamMaker directly. For Meridian-Rift, `rift_compile` invokes the separate agent-owned `RIFT_BUILD.cmd`; humans continue to use the authoritative `BUILD.cmd`. Full-build output can optionally include bounded, observational endpoint samples, but `capture_complete` is always `false`.
 
 ## Platform support

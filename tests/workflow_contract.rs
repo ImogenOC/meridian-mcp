@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::fs;
 
 #[test]
@@ -124,4 +125,17 @@ fn portable_ci_tests_the_unsupported_platform_boundary_without_byond() {
             "portable CI must not attempt BYOND or the Windows build wrapper: {forbidden}"
         );
     }
+}
+
+#[test]
+fn aphelion_workflow_requires_parse_before_map_and_diagnostics() {
+    let text = fs::read_to_string("tests/compatibility/aphelion-dmm.json")
+        .expect("AphelionDMM compatibility manifest should be readable");
+    let manifest: Value = serde_json::from_str(&text)
+        .expect("AphelionDMM compatibility manifest should be valid JSON");
+    assert_eq!(
+        manifest["required_sequence"],
+        serde_json::json!(["dm_parse_environment", "dm_map_info", "dm_check_errors"])
+    );
+    assert_eq!(manifest["parse_required_after_source_change"], true);
 }
