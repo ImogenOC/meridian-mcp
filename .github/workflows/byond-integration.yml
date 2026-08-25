@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       meridian_ref:
-        description: Optional Meridian-Rift branch, tag, or SHA
+        description: Meridian-Rift branch, tag, or SHA
         required: false
+        default: aphelion-agents
         type: string
   schedule:
     - cron: "17 4 * * 1"
@@ -25,8 +26,17 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: AphelionDevelopment/Meridian-Rift
-          ref: ${{ inputs.meridian_ref }}
+          ref: ${{ inputs.meridian_ref || 'aphelion-agents' }}
           path: integration/Meridian-Rift
+      - name: Verify Meridian-Rift full-build qualification inputs
+        shell: pwsh
+        run: |
+          foreach ($requiredPath in @('tgstation.dme', 'BUILD.cmd', 'RIFT_BUILD.cmd', 'dependencies.sh')) {
+            $resolvedPath = Join-Path './integration/Meridian-Rift' $requiredPath
+            if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
+              throw "The selected Meridian-Rift ref is not qualified for full-build compatibility: missing $requiredPath."
+            }
+          }
       - uses: actions/checkout@v7
         with:
           repository: wolfpld/tracy

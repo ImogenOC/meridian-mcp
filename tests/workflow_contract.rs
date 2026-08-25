@@ -63,6 +63,24 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
 }
 
 #[test]
+fn byond_workflow_defaults_to_a_rift_build_qualified_ref() {
+    let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
+        .expect("BYOND integration workflow should be readable");
+
+    for required in [
+        "default: aphelion-agents",
+        "ref: ${{ inputs.meridian_ref || 'aphelion-agents' }}",
+        "Verify Meridian-Rift full-build qualification inputs",
+        "'RIFT_BUILD.cmd'",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "BYOND workflow can select an unqualified Meridian-Rift ref: missing {required}"
+        );
+    }
+}
+
+#[test]
 fn ubuntu_meridian_analysis_is_real_repository_and_byond_free() {
     let workflow = fs::read_to_string(".github/workflows/ci.yml").unwrap();
     for required in [

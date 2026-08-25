@@ -259,7 +259,7 @@ async fn non_windows_direct_call_returns_stable_unsupported_platform() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let context = context(&root, Vec::new(), RiftBuildAccess::Offline);
-    let result = call_tool(&context, &mut ServerState::new(), "rift_compile", json!({}))
+    let result = call_tool(&context, &ServerState::new(), "rift_compile", json!({}))
         .await
         .unwrap();
     assert!(text(&result).contains("unsupported_platform"));
