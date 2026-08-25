@@ -6,10 +6,12 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncRead;
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub const MAX_PROCESS_OUTPUT_BYTES: usize = 512 * 1024;
+pub const MAX_PROCESS_INPUT_BYTES: usize = 1024 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -30,15 +32,17 @@ pub enum TerminationReason {
     SpawnFailed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ProcessSpec {
     pub program: PathBuf,
     pub arguments: Vec<OsString>,
     pub working_directory: PathBuf,
     pub environment: Vec<(OsString, OsString)>,
+    pub stdin: Option<Vec<u8>>,
     pub timeout: Duration,
     pub idle_timeout: Duration,
     pub capture_network: bool,
+    pub cancellation: Option<watch::Receiver<bool>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -126,6 +130,13 @@ async fn capture_stream<R>(
 }
 
 pub async fn run_contained_process(spec: ProcessSpec) -> Result<ProcessOutcome> {
+    if spec
+        .stdin
+        .as_ref()
+        .is_some_and(|input| input.len() > MAX_PROCESS_INPUT_BYTES)
+    {
+        anyhow::bail!("process stdin exceeds the {MAX_PROCESS_INPUT_BYTES}-byte limit");
+    }
     let started_at = tokio::time::Instant::now();
     let mut audit = NetworkAuditCollector::new(spec.capture_network);
     let containment = ProcessContainment::new().context("cannot create process containment")?;
@@ -135,7 +146,11 @@ pub async fn run_contained_process(spec: ProcessSpec) -> Result<ProcessOutcome> 
         .current_dir(&spec.working_directory)
         .env_clear()
         .envs(spec.environment.iter().cloned())
-        .stdin(Stdio::null())
+        .stdin(if spec.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -165,6 +180,14 @@ pub async fn run_contained_process(spec: ProcessSpec) -> Result<ProcessOutcome> 
         return Err(error).context("refusing to run a process outside containment");
     }
 
+    let stdin_task = match (spec.stdin, child.stdin.take()) {
+        (Some(input), Some(mut stdin)) => Some(tokio::spawn(async move {
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await
+        })),
+        _ => None,
+    };
+
     let (sender, mut receiver) = mpsc::channel(64);
     let mut reader_tasks = Vec::new();
     if let Some(stdout) = child.stdout.take() {
@@ -186,6 +209,7 @@ pub async fn run_contained_process(spec: ProcessSpec) -> Result<ProcessOutcome> 
     let mut stderr = TailBuffer::new();
     let mut last_progress = started_at;
     let mut previous_cpu_time = containment.cpu_time_100ns();
+    let mut cancellation = spec.cancellation;
     let (termination, exit_code) = loop {
         let now = tokio::time::Instant::now();
         if now.duration_since(started_at) >= spec.timeout {
@@ -214,6 +238,20 @@ pub async fn run_contained_process(spec: ProcessSpec) -> Result<ProcessOutcome> 
                     append_output(&mut stdout, &mut stderr, stream, &bytes);
                 }
             }
+            changed = async {
+                match cancellation.as_mut() {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_ok() && cancellation.as_ref().is_some_and(|receiver| *receiver.borrow()) {
+                    terminate_child(&containment, &mut child).await?;
+                    break (
+                        TerminationReason::Cancelled,
+                        child.wait().await.ok().and_then(|status| status.code()),
+                    );
+                }
+            }
             _ = tokio::time::sleep(PROCESS_POLL_INTERVAL) => {}
         }
 
@@ -232,6 +270,18 @@ pub async fn run_contained_process(spec: ProcessSpec) -> Result<ProcessOutcome> 
     let _ = containment.terminate(1);
     drop(sender);
     drain_output(&mut receiver, &mut stdout, &mut stderr, &mut reader_tasks).await;
+    if let Some(task) = stdin_task {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if termination == TerminationReason::Exited => {
+                return Err(error).context("failed writing bounded process stdin");
+            }
+            Err(error) if termination == TerminationReason::Exited => {
+                return Err(error).context("bounded process stdin task failed");
+            }
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
 
     Ok(ProcessOutcome {
         exit_code,

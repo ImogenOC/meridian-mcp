@@ -32,6 +32,12 @@ pub async fn launch(
     state: &ServerState,
     args: Value,
 ) -> Result<ToolResult> {
+    let _lifecycle = state.lifecycle().await;
+    if state.runtime().await.is_game_running() {
+        return Err(anyhow!(
+            "a DreamDaemon runtime is active; stop it before launching the debugger"
+        ));
+    }
     let installation = context
         .debugger()
         .ok_or_else(|| anyhow!("auxtools debugger is unavailable"))?;

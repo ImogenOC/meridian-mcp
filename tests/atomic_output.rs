@@ -1,4 +1,6 @@
-use meridian_mcp::atomic_output::{write_atomic, AtomicOutputError};
+use meridian_mcp::atomic_output::{
+    promote_external_atomic, reserve_external_atomic, write_atomic, AtomicOutputError,
+};
 use meridian_mcp::PathPolicy;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,5 +105,66 @@ fn writer_failure_preserves_the_original_and_removes_temporary_files() {
     assert_eq!(error.to_string(), "deliberate writer failure");
     assert_eq!(std::fs::read_to_string(&output).unwrap(), "original");
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn external_output_is_promoted_only_after_successful_validation() {
+    let root = fixture();
+    let output = root.join("capture.tracy");
+    let policy = PathPolicy::new(vec![root.clone()], Vec::new()).unwrap();
+
+    let artifact = promote_external_atomic(&policy, &output, false, |temporary| {
+        std::fs::write(temporary, b"trace bytes")?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(artifact.path, output.canonicalize().unwrap());
+    assert_eq!(artifact.bytes, 11);
+    assert_eq!(std::fs::read(&output).unwrap(), b"trace bytes");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn external_output_failure_preserves_existing_output_and_cleans_temporary_file() {
+    let root = fixture();
+    let output = root.join("capture.tracy");
+    std::fs::write(&output, b"original").unwrap();
+    let policy = PathPolicy::new(vec![root.clone()], Vec::new()).unwrap();
+
+    let error = promote_external_atomic(&policy, &output, true, |temporary| {
+        std::fs::write(temporary, b"partial")?;
+        Err(AtomicOutputError::writer("capture failed"))
+    })
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "capture failed");
+    assert_eq!(std::fs::read(&output).unwrap(), b"original");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reserved_external_output_is_private_until_commit_and_cleans_on_drop() {
+    let root = fixture();
+    let output = root.join("capture.tracy");
+    let policy = PathPolicy::new(vec![root.clone()], Vec::new()).unwrap();
+
+    let reserved = reserve_external_atomic(&policy, &output, false).unwrap();
+    assert!(!output.exists());
+    std::fs::write(reserved.temporary_path(), b"complete trace").unwrap();
+    let artifact = reserved.commit().unwrap();
+
+    assert_eq!(artifact.bytes, 14);
+    assert_eq!(std::fs::read(&output).unwrap(), b"complete trace");
+
+    let abandoned = root.join("abandoned.tracy");
+    let reserved = reserve_external_atomic(&policy, &abandoned, false).unwrap();
+    let temporary = reserved.temporary_path().to_owned();
+    drop(reserved);
+    assert!(!temporary.exists());
+    assert!(!abandoned.exists());
     std::fs::remove_dir_all(root).unwrap();
 }

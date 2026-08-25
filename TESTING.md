@@ -16,6 +16,22 @@ cargo deny --all-features check
 
 The suite covers owned DreamMaker and DMM fixtures, parse generations, exact lookup and source excerpts, ranked search, map coordinates and PNG output, path containment, executable allowlisting, overwrite policy, mode inventories, runtime buffering, readiness, `Topic()` framing, generated contract drift, and documentation links.
 
+## Tracy native gates
+
+Check out Tracy and byond-tracy at the exact revisions recorded in `tracy-capabilities.json`, then build from those local sources. The builder never downloads source and merges its schema-v2 entries into an existing dmdoc manifest.
+
+```powershell
+./scripts/build-tracy-helpers.ps1 `
+    -TracyPath C:\path\to\tracy `
+    -ByondTracyPath C:\path\to\byond-tracy `
+    -OutputDirectory ./target/tracy-package `
+    -ManifestPath ./target/tracy-package/helpers/manifest.json
+```
+
+This runs only the Meridian-owned CTests, builds the host x86_64 fixed-command helper and x86 BYOND hook, records SHA-256 hashes, and copies both licenses. Windows uses x86 MSVC; Ubuntu requires CMake, a C++20 compiler, PowerShell, and `gcc-multilib`. Native helper build success is not live BYOND compatibility evidence.
+
+For an installed opt-in session, pass `-EnableTracy` to both installation/configuration scripts, start Codex after configuration, then exercise `prepare`, `launch`, `capture`, offline analysis, `status`, and `stop` against the pinned BYOND fixture. A real Meridian-Rift smoke remains a separate named gate and must not modify `BUILD.cmd`.
+
 Run installed sessions with analysis/disabled, development/disabled, development/offline, and development/network startup configurations when changing contract visibility or build policy. The startup ceiling is immutable; `network_mode=allow` must fail under an offline ceiling.
 
 ## Installed stdio gate

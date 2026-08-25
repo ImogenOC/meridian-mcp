@@ -27,11 +27,26 @@ jobs:
           repository: AphelionDevelopment/Meridian-Rift
           ref: ${{ inputs.meridian_ref }}
           path: integration/Meridian-Rift
+      - uses: actions/checkout@v7
+        with:
+          repository: wolfpld/tracy
+          ref: 099df3de3dc37eca4712c06b8320fb9c53596edd
+          path: integration/tracy
+      - uses: actions/checkout@v7
+        with:
+          repository: spacestation13/byond-tracy
+          ref: d1ec404737b04b1ea73d6df4a1b477deacdb1900
+          path: integration/byond-tracy
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Build exact dmdoc helper
         shell: pwsh
         run: ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
+      - name: Build exact Tracy helper and hook
+        shell: pwsh
+        run: |
+          $env:PATH = 'C:\Program Files\Git\usr\bin;' + $env:PATH
+          ./scripts/build-tracy-helpers.ps1 -TracyPath ./integration/tracy -ByondTracyPath ./integration/byond-tracy -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
       - name: Verify Meridian-Rift BYOND pin
         shell: pwsh
         run: |
@@ -66,10 +81,58 @@ jobs:
       - name: Run live auxtools debugger gate
         shell: pwsh
         run: ./scripts/run-auxtools-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -EvidencePath ./integration/evidence/auxtools-compatibility.json
+      - name: Run live Tracy profiler gate
+        shell: pwsh
+        run: ./scripts/run-tracy-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -HelperManifestPath ./integration/helpers-manifest.json -EvidencePath ./integration/evidence/tracy-compatibility.json
       - name: Upload compatibility evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: meridian-compatibility-evidence
+          path: integration/evidence/*.json
+          if-no-files-found: warn
+
+  tracy-linux-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: wolfpld/tracy
+          ref: 099df3de3dc37eca4712c06b8320fb9c53596edd
+          path: integration/tracy
+      - uses: actions/checkout@v7
+        with:
+          repository: spacestation13/byond-tracy
+          ref: d1ec404737b04b1ea73d6df4a1b477deacdb1900
+          path: integration/byond-tracy
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install x86 runtime and build support
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends gcc-multilib g++-multilib patch lib32z1 libcurl4t64:i386
+      - name: Install verified Linux BYOND 516.1685
+        shell: pwsh
+        run: ./scripts/install-byond-linux.ps1 -Version 516.1685 -ArchivePath "$env:RUNNER_TEMP/byond-linux.zip" -DestinationPath "$env:RUNNER_TEMP/byond-linux" -ExpectedSha256 041CC8CA22F43D3CE9477FB4251B119F61495D6E59DF1FCACA5B3DFC3B4ADB1B
+      - name: Build Tracy package and release MCP
+        shell: pwsh
+        run: |
+          ./scripts/build-tracy-helpers.ps1 -TracyPath ./integration/tracy -ByondTracyPath ./integration/byond-tracy -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
+          cargo build --locked --release
+      - name: Run live Linux Tracy profiler gate
+        shell: pwsh
+        run: |
+          $byondBin = "$env:RUNNER_TEMP/byond-linux/byond/bin"
+          $env:PATH = $byondBin + [IO.Path]::PathSeparator + $env:PATH
+          $env:LD_LIBRARY_PATH = $byondBin
+          ./scripts/run-tracy-integration.ps1 -DreamMakerPath "$byondBin/DreamMaker" -BinaryPath ./target/release/meridian-mcp -HelperManifestPath ./integration/helpers-manifest.json -EvidencePath ./integration/evidence/tracy-linux-compatibility.json
+      - name: Upload Linux Tracy compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: tracy-linux-compatibility-evidence
           path: integration/evidence/*.json
           if-no-files-found: warn

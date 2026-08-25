@@ -1,4 +1,4 @@
-use meridian_mcp::{CapabilityMode, PathPolicy, RiftBuildAccess, ServerConfig};
+use meridian_mcp::{CapabilityMode, PathPolicy, RiftBuildAccess, ServerConfig, TracyAccess};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -56,6 +56,54 @@ fn analysis_is_the_default_and_development_is_explicit() {
     let development =
         ServerConfig::from_values(Some("development"), vec![root.clone()], Vec::new()).unwrap();
     assert_eq!(development.mode(), CapabilityMode::Development);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tracy_is_disabled_by_default_and_requires_development_with_a_manifest() {
+    let root = fixture();
+    let default =
+        ServerConfig::from_values(Some("development"), vec![root.clone()], Vec::new()).unwrap();
+    assert_eq!(default.tracy_access(), TracyAccess::Disabled);
+
+    assert!(ServerConfig::from_values_with_features(
+        Some("analysis"),
+        vec![root.clone()],
+        Vec::new(),
+        None,
+        Some("byond"),
+        Some(root.join("manifest.json")),
+    )
+    .is_err());
+    assert!(ServerConfig::from_values_with_features(
+        Some("development"),
+        vec![root.clone()],
+        Vec::new(),
+        None,
+        Some("byond"),
+        None,
+    )
+    .is_err());
+    assert!(ServerConfig::from_values_with_features(
+        Some("development"),
+        vec![root.clone()],
+        Vec::new(),
+        None,
+        Some("remote"),
+        Some(root.join("manifest.json")),
+    )
+    .is_err());
+    std::fs::write(root.join("manifest.json"), "{}").unwrap();
+    let enabled = ServerConfig::from_values_with_features(
+        Some("development"),
+        vec![root.clone()],
+        Vec::new(),
+        None,
+        Some("byond"),
+        Some(root.join("manifest.json")),
+    )
+    .unwrap();
+    assert_eq!(enabled.tracy_access(), TracyAccess::Byond);
     std::fs::remove_dir_all(root).unwrap();
 }
 

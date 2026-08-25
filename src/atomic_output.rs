@@ -50,6 +50,31 @@ struct TemporaryOutput {
     armed: bool,
 }
 
+pub struct ReservedExternalOutput {
+    output: PathBuf,
+    temporary: TemporaryOutput,
+}
+
+impl ReservedExternalOutput {
+    pub fn temporary_path(&self) -> &Path {
+        &self.temporary.path
+    }
+
+    pub fn commit(self) -> Result<OutputArtifact, AtomicOutputError> {
+        let metadata = std::fs::symlink_metadata(&self.temporary.path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(AtomicOutputError::InvalidOutputType(
+                self.temporary.path.clone(),
+            ));
+        }
+        OpenOptions::new()
+            .write(true)
+            .open(&self.temporary.path)?
+            .sync_all()?;
+        install_temporary(self.output, self.temporary)
+    }
+}
+
 impl TemporaryOutput {
     fn disarm(&mut self) {
         self.armed = false;
@@ -84,7 +109,7 @@ where
         ))
     })?;
     let (temporary_path, mut temporary_file) = create_private_file(parent, "tmp")?;
-    let mut temporary = TemporaryOutput {
+    let temporary = TemporaryOutput {
         path: temporary_path,
         armed: true,
     };
@@ -93,6 +118,85 @@ where
     temporary_file.flush()?;
     temporary_file.sync_all()?;
     drop(temporary_file);
+
+    install_temporary(output, temporary)
+}
+
+pub fn promote_external_atomic<F>(
+    policy: &PathPolicy,
+    output: &Path,
+    overwrite: bool,
+    produce: F,
+) -> Result<OutputArtifact, AtomicOutputError>
+where
+    F: FnOnce(&Path) -> Result<(), AtomicOutputError>,
+{
+    let output = policy.output_path(output, overwrite)?;
+    if output.exists() && !output.is_file() {
+        return Err(AtomicOutputError::InvalidOutputType(output));
+    }
+    let parent = output.parent().ok_or_else(|| {
+        AtomicOutputError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "output path has no parent",
+        ))
+    })?;
+    let (temporary_path, temporary_file) = create_private_file(parent, "external")?;
+    drop(temporary_file);
+    let temporary = TemporaryOutput {
+        path: temporary_path,
+        armed: true,
+    };
+
+    produce(&temporary.path)?;
+    let metadata = std::fs::symlink_metadata(&temporary.path)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(AtomicOutputError::InvalidOutputType(temporary.path.clone()));
+    }
+    OpenOptions::new()
+        .write(true)
+        .open(&temporary.path)?
+        .sync_all()?;
+
+    install_temporary(output, temporary)
+}
+
+pub fn reserve_external_atomic(
+    policy: &PathPolicy,
+    output: &Path,
+    overwrite: bool,
+) -> Result<ReservedExternalOutput, AtomicOutputError> {
+    let output = policy.output_path(output, overwrite)?;
+    if output.exists() && !output.is_file() {
+        return Err(AtomicOutputError::InvalidOutputType(output));
+    }
+    let parent = output.parent().ok_or_else(|| {
+        AtomicOutputError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "output path has no parent",
+        ))
+    })?;
+    let (temporary_path, temporary_file) = create_private_file(parent, "external")?;
+    drop(temporary_file);
+    Ok(ReservedExternalOutput {
+        output,
+        temporary: TemporaryOutput {
+            path: temporary_path,
+            armed: true,
+        },
+    })
+}
+
+fn install_temporary(
+    output: PathBuf,
+    mut temporary: TemporaryOutput,
+) -> Result<OutputArtifact, AtomicOutputError> {
+    let parent = output.parent().ok_or_else(|| {
+        AtomicOutputError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "output path has no parent",
+        ))
+    })?;
 
     let bytes = std::fs::metadata(&temporary.path)?.len();
     let sha256 = hash_file(&temporary.path)?;

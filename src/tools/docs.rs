@@ -51,9 +51,11 @@ pub async fn generate(
         ],
         working_directory: environment_root(&snapshot.environment_path)?.to_owned(),
         environment: Vec::new(),
+        stdin: None,
         timeout: Duration::from_millis(limits.max_docs_duration_ms),
         idle_timeout: Duration::from_millis(limits.max_docs_duration_ms),
         capture_network: false,
+        cancellation: None,
     })
     .await?;
     if outcome.termination != TerminationReason::Exited || outcome.exit_code != Some(0) {

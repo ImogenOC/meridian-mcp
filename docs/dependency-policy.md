@@ -6,6 +6,10 @@ Updating SpacemanDMM requires parser and diagnostic fixtures, DMM/TGM tests when
 
 The approved integration baseline is SpacemanDMM revision `351ddc0ffb2439876d4565ce5130bb6b027ee605`, whose workspace MSRV is Rust 1.95. Meridian-MCP therefore pins Rust 1.95.0 in both local tooling and CI; use that exact compiler for dependency, Clippy, test, and release evidence.
 
+Native profiler dependencies are pinned independently: Tracy `099df3de3dc37eca4712c06b8320fb9c53596edd` (v0.14.0), byond-tracy `d1ec404737b04b1ea73d6df4a1b477deacdb1900`, and protocol 82. Updating any one requires review of wire compatibility, supported BYOND offsets, licenses, fixed-command helper APIs, native CTests on Windows and Ubuntu, package hashes, and fresh live evidence for each claimed BYOND/platform pair. Do not substitute Tracy `master`, a release binary, or an unverified byond-tracy hook; matching protocol numbers alone do not prove the hook supports every server query.
+
+The byond-tracy build also requires the checked-in empty-queue initialization patch. The builder applies it to a private copied source file and fails if it no longer applies cleanly. Review or remove the patch explicitly when changing the upstream hook revision; never carry it forward by fuzzy manual editing.
+
 Run `cargo update` only for an intentional dependency change. Review the lockfile diff, then run formatting, clippy, all-feature tests, release build, and `cargo deny check`. Advisory exceptions must be narrow, documented, time-bounded, and later removed.
 
 ## Temporary advisory exceptions

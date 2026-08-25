@@ -31,7 +31,18 @@ impl MeridianServer {
         )?;
         let dmdoc_helper = config
             .helper_manifest()
-            .map(crate::spaceman::docs::verified_dmdoc_helper)
+            .map(crate::spaceman::docs::optional_verified_dmdoc_helper)
+            .transpose()?
+            .flatten();
+        let tracy = (config.tracy_access() == crate::TracyAccess::Byond)
+            .then(|| {
+                crate::tracy::TracyInstallation::validate(
+                    config
+                        .helper_manifest()
+                        .expect("Tracy config requires a manifest"),
+                    "516.1685",
+                )
+            })
             .transpose()?;
         let execution = ToolExecutionContext::with_features(
             config.mode(),
@@ -39,6 +50,7 @@ impl MeridianServer {
             config.rift_build_access(),
             dmdoc_helper,
             debugger,
+            tracy,
         );
         Ok(Self {
             config: Arc::new(config),
@@ -53,6 +65,7 @@ impl MeridianServer {
             self.config.rift_build_access(),
             self.execution.dmdoc_helper().is_some(),
             self.execution.debugger().is_some(),
+            self.execution.tracy().is_some(),
         )
         .into_iter()
         .map(|definition| definition.name)
@@ -65,6 +78,7 @@ impl MeridianServer {
             self.config.rift_build_access(),
             self.execution.dmdoc_helper().is_some(),
             self.execution.debugger().is_some(),
+            self.execution.tracy().is_some(),
         )
         .into_iter()
         .map(|definition| to_sdk_tool(definition, self.config.rift_build_access()))

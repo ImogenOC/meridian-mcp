@@ -47,5 +47,14 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | `dm_status` | Development | Provisional | memory | - | 1048576 | Inspect server-owned DreamDaemon state. |
 | `dm_stop` | Development | Provisional | memory | - | 262144 | Stop the server-owned DreamDaemon process. |
 | `dm_topic` | Development | Provisional | loopback | 60000 | 262144 | Call world.Topic on the loopback game server. |
+| `dm_tracy_capture` | Development | Experimental | read, write, process, loopback | 330000 | 1048576 | Capture a bounded trace through the fixed Tracy helper. |
+| `dm_tracy_compare` | Development | Experimental | read, process | 180000 | 1048576 | Compare two traces by proc source identity. |
+| `dm_tracy_frame_stats` | Development | Experimental | read, process | 120000 | 262144 | Summarize ServerTick frame durations. |
+| `dm_tracy_hotspots` | Development | Experimental | read, process | 120000 | 1048576 | Return bounded deterministic trace hotspots. |
+| `dm_tracy_launch` | Development | Experimental | read, write, process, loopback | 60000 | 262144 | Launch an MCP-owned profiled DreamDaemon on loopback. |
+| `dm_tracy_prepare` | Development | Experimental | read, write | - | 262144 | Install the verified byond-tracy hook beside a contained DMB. |
+| `dm_tracy_status` | Development | Experimental | memory | - | 262144 | Inspect profiled runtime and capture state. |
+| `dm_tracy_stop` | Development | Experimental | memory | 30000 | 262144 | Stop capture and the profiled DreamDaemon. |
+| `dm_tracy_zone` | Development | Experimental | read, process | 120000 | 1048576 | Inspect one profiled proc across source locations. |
 | `dm_wait_for_output` | Development | Provisional | memory | 300000 | 1048576 | Wait for bounded server-owned DreamDaemon output. |
 | `rift_compile` | Development | Provisional | read, write, process, network | 1800000 | 1048576 | Run Meridian-Rift's contained RIFT_BUILD.cmd full-build gate. |

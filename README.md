@@ -26,6 +26,7 @@ The default capability mode is read-only analysis. Development mode must be enab
 | DMM/TGM information, differences, search, and rendering | Provisional | Parser-backed dimensions, models, coordinates, render passes, bounds, and typed batches. |
 | HTML documentation | Experimental | Exact-revision, hash-verified dmdoc helper; unavailable unless packaged at startup. |
 | Auxtools debugger | Experimental | Windows development-mode opt-in; one MCP-owned DreamSeeker session, no attach/restart/disassembly. |
+| Tracy profiling | Experimental | Explicit development-mode opt-in; pinned native hook and fixed-command helper, MCP-owned loopback runtime, bounded capture, and offline trace analysis. |
 | DreamMaker compilation | Provisional | A direct compiler gate only; not `BUILD.cmd` or a tgstation full build. |
 | Meridian-Rift full build | Provisional | Windows-only `rift_compile` through the contained `RIFT_BUILD.cmd`; promotion awaits a recorded green named integration run. |
 | PNG rendering, DreamDaemon, and `Topic()` | Provisional | Development mode with containment, loopback, and process-ownership controls. |
@@ -80,6 +81,22 @@ Analysis mode exposes the eleven read-only tools below. Development mode adds se
 
 When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, the server also advertises `dm_debug_launch`, `dm_debug_stop`, `dm_debug_set_breakpoints`, `dm_debug_set_function_breakpoints`, `dm_debug_set_exception_breakpoints`, `dm_debug_control`, `dm_debug_threads`, `dm_debug_stack_trace`, `dm_debug_scopes`, `dm_debug_variables`, `dm_debug_evaluate`, `dm_debug_exception_info`, `dm_debug_source`, and `dm_debug_wait_for_event`. These tools own one DreamSeeker process, use loopback only, and never attach to an arbitrary PID.
 
+When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both native artifacts validate against the helper manifest, the server adds these tools. The current baseline is Tracy protocol 82 and BYOND 516.1685-1687; it remains experimental until the named live gates record green evidence.
+
+| Tool | Description |
+| --- | --- |
+| `dm_tracy_prepare` | Copy the exact hash-verified x86 byond-tracy hook beside a contained DMB. A matching hook is idempotent; replacing a different file requires `overwrite=true`. |
+| `dm_tracy_launch` | Start one MCP-owned DreamDaemon with fixed `-params tracy`, a private loopback profiler endpoint, a minimal environment, and no arbitrary profiler arguments. The matching hook must already be prepared. |
+| `dm_tracy_capture` | Connect the fixed native helper to the active profiled runtime, enforce duration and memory bounds, optionally record best-effort endpoint observations, and atomically publish the trace only after success. |
+| `dm_tracy_status` | Report runtime kind, DreamDaemon and profiler ports, PID, capture activity/output, last exit code, and the last capture error. |
+| `dm_tracy_stop` | Cancel an active helper capture first, then terminate only the MCP-owned Tracy DreamDaemon. It does not target a standard runtime or unrelated process. |
+| `dm_tracy_hotspots` | Load a contained trace and return a bounded, deterministic proc/file/line ranking by inclusive time, self time, call count, or maximum duration. |
+| `dm_tracy_zone` | Return bounded aggregate statistics for an exact profiled proc name across its recorded file/line identities. |
+| `dm_tracy_frame_stats` | Summarize the trace's base `ServerTick` frame series with count, span, mean, extrema, and p50/p95/p99 durations. |
+| `dm_tracy_compare` | Compare two contained traces by exact proc/file/line identity and return bounded inclusive, self-time, and count deltas. |
+
+Offline analysis works without a parsed environment. When one is active, matching trace file/line records receive additive source-correlation metadata; profiler measurements are not rewritten.
+
 ## Build
 
 The repository pins Rust 1.95.0 with rustfmt and Clippy to match CI. BYOND integration gates additionally require the project-pinned BYOND version.
@@ -101,6 +118,7 @@ The server reads immutable startup configuration:
 - `MERIDIAN_MCP_RIFT_BUILD`: `disabled` (default), `offline`, or `network`. The ceiling is immutable and `rift_compile` remains absent unless enabled.
 - `MERIDIAN_MCP_HELPER_MANIFEST`: build-produced manifest for the exact dmdoc helper; absent or mismatched helpers keep `dm_generate_docs` unavailable.
 - `MERIDIAN_MCP_DEBUGGER`: `disabled` (default) or `auxtools`. Auxtools requires development mode, one allowlisted `dm.exe`, its sibling `dreamseeker.exe`, and the fixed hash-verified DLL beside Meridian-MCP.
+- `MERIDIAN_MCP_TRACY`: `disabled` (default) or `byond`. Tracy requires development mode and exact `tracy-server-helper` (host x86_64) and `byond-tracy` (x86) manifest entries for the current platform and BYOND baseline.
 
 Every configured root must already exist. Client tool calls cannot change the mode, roots, executable allowlist, or full-build ceiling. `rift_compile` defaults to `network_mode=offline`; `network_mode=allow` is accepted only under the startup value `network`. Offline mode is cooperative preflight and strict process-local package-manager configuration, not an operating-system firewall.
 

@@ -77,6 +77,36 @@ fn compatibility_document_tracks_deferred_named_gates() {
     }
 }
 
+#[test]
+fn tracy_is_explicitly_opt_in_and_each_tool_is_documented() {
+    let readme = std::fs::read_to_string("README.md").expect("README should be readable");
+    for required in [
+        "MERIDIAN_MCP_TRACY",
+        "`disabled` (default) or `byond`",
+        "`dm_tracy_prepare`",
+        "`dm_tracy_launch`",
+        "`dm_tracy_capture`",
+        "`dm_tracy_status`",
+        "`dm_tracy_stop`",
+        "`dm_tracy_hotspots`",
+        "`dm_tracy_zone`",
+        "`dm_tracy_frame_stats`",
+        "`dm_tracy_compare`",
+        "protocol 82",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
+    let configure = std::fs::read_to_string("scripts/configure-codex-meridian-mcp.ps1")
+        .expect("configure script should be readable");
+    let install = std::fs::read_to_string("scripts/install-meridian-mcp.ps1")
+        .expect("install script should be readable");
+    assert!(configure.contains("[switch]$EnableTracy"));
+    assert!(configure.contains("[string]$ServerName = 'meridian-mcp'"));
+    assert!(!configure.contains("mcp_servers\\.dm-mcp"));
+    assert!(install.contains("[switch]$EnableTracy"));
+    assert!(install.contains("PSObject.Properties['protocol_version']"));
+}
+
 fn markdown_link_targets(text: &str) -> Vec<String> {
     text.split("](")
         .skip(1)

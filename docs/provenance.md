@@ -11,8 +11,13 @@ The local history begins at `d6ad23a` and currently includes substantial integra
 | Ranked contextual search | Locally implemented. |
 | Compiler, DreamDaemon, and `Topic()` adapters | Inherited and substantially revised; retained behind development controls. |
 | DMM inspection and rendering | Substantially revised around SpacemanDMM's map pipeline. |
+| Tracy profiling | Meridian-owned fixed-command integration over pinned Tracy server internals and pinned byond-tracy; no code or arbitrary-expression surface is imported from the Python Tracy MCP. |
 | BYOND client login, packets, and RUNSUB | Inherited, unverified, and removed from the supported product. |
 
-SpacemanDMM crates currently resolve to revision `7fdd00d8e9b7f7583df4960b5ed38269685ec432`. `Cargo.toml` and `Cargo.lock` must name the same exact revision before release.
+SpacemanDMM crates currently resolve to revision `351ddc0ffb2439876d4565ce5130bb6b027ee605`. Tracy helpers are built from Tracy `099df3de3dc37eca4712c06b8320fb9c53596edd` (v0.14.0) and byond-tracy `d1ec404737b04b1ea73d6df4a1b477deacdb1900` (build-d1ec404), using Tracy protocol 82. The native artifacts are never downloaded at runtime: release packaging verifies local Git HEADs, builds x86_64/x86 outputs, runs Meridian-owned CTests, hashes every artifact, and records the identities in helper-manifest schema v2.
+
+Tracy is BSD-3-Clause and byond-tracy is BSD-2-Clause. Packaged copies of both license files accompany the native artifacts. The binding/API sources in Tracy are a reference for server internals; Meridian-MCP exposes its own fixed protocol and does not ship the Tracy GUI or Python evaluator/HTTP MCP surface.
+
+The packaged hook applies one Meridian-owned source patch after verifying the upstream Git HEAD: `helpers/tracy/byond-tracy-empty-queue.patch` changes the freshly initialized ring-buffer head from 1 to 0 so an empty queue cannot expose an uninitialized event when the profiler connects immediately. A diagnostic live fixture reproduced the upstream race at `utracy_consume_queue`; repeated post-patch live capture is required before compatibility promotion. Artifact hashes cover the patched binary.
 
 This engineering inventory is not legal advice. Review dependency licenses under [dependency policy](dependency-policy.md).

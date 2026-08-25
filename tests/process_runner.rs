@@ -1,6 +1,7 @@
 use meridian_mcp::artifact::ArtifactSnapshot;
 use meridian_mcp::process::{
-    run_contained_process, ProcessSpec, TerminationReason, MAX_PROCESS_OUTPUT_BYTES,
+    run_contained_process, ProcessSpec, TerminationReason, MAX_PROCESS_INPUT_BYTES,
+    MAX_PROCESS_OUTPUT_BYTES,
 };
 #[cfg(windows)]
 use std::ffi::OsString;
@@ -20,9 +21,11 @@ fn fixture_spec(mode: &str, timeout: Duration, idle_timeout: Duration) -> Proces
         ],
         working_directory: std::env::current_dir().unwrap(),
         environment: vec![("MERIDIAN_PROCESS_FIXTURE_MODE".into(), mode.into())],
+        stdin: None,
         timeout,
         idle_timeout,
         capture_network: false,
+        cancellation: None,
     }
 }
 
@@ -53,8 +56,51 @@ fn process_fixture_helper() {
         },
         "idle" => std::thread::sleep(Duration::from_secs(30)),
         "success" => println!("fixture success"),
+        "stdin" => {
+            let mut input = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).unwrap();
+            println!("stdin_bytes={}", input.len());
+        }
         other => panic!("unknown helper mode: {other}"),
     }
+}
+
+#[tokio::test]
+async fn bounded_stdin_is_written_then_closed_without_entering_output() {
+    let secret = b"helper request secret".to_vec();
+    let mut spec = fixture_spec("stdin", Duration::from_secs(5), Duration::from_secs(2));
+    spec.stdin = Some(secret.clone());
+
+    let outcome = run_contained_process(spec).await.unwrap();
+
+    assert_eq!(outcome.termination, TerminationReason::Exited);
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(outcome
+        .stdout
+        .text
+        .contains(&format!("stdin_bytes={}", secret.len())));
+    assert!(!outcome.stdout.text.contains("helper request secret"));
+    assert!(!outcome.stderr.text.contains("helper request secret"));
+}
+
+#[tokio::test]
+async fn oversized_stdin_is_rejected_before_process_execution() {
+    let marker = std::env::temp_dir().join(format!(
+        "meridian-oversized-stdin-marker-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let mut spec = fixture_spec("success", Duration::from_secs(5), Duration::from_secs(2));
+    spec.stdin = Some(vec![b'x'; MAX_PROCESS_INPUT_BYTES + 1]);
+    spec.environment.push((
+        "MERIDIAN_PROCESS_MARKER".into(),
+        marker.clone().into_os_string(),
+    ));
+
+    let error = run_contained_process(spec).await.unwrap_err();
+
+    assert!(error.to_string().contains("stdin exceeds"));
+    assert!(!marker.exists());
 }
 
 #[tokio::test]
@@ -115,6 +161,21 @@ async fn wall_and_idle_timeouts_are_distinct() {
     .await
     .unwrap();
     assert_eq!(idle.termination, TerminationReason::IdleTimeout);
+}
+
+#[tokio::test]
+async fn cancellation_terminates_the_process() {
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    let mut spec = fixture_spec("wall", Duration::from_secs(30), Duration::from_secs(30));
+    spec.cancellation = Some(receiver);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        sender.send(true).unwrap();
+    });
+
+    let outcome = run_contained_process(spec).await.unwrap();
+
+    assert_eq!(outcome.termination, TerminationReason::Cancelled);
 }
 
 #[tokio::test]
@@ -201,9 +262,11 @@ async fn windows_job_timeout_terminates_descendants_and_audit_is_bounded() {
         ],
         working_directory: fixture_root,
         environment,
+        stdin: None,
         timeout: Duration::from_secs(1),
         idle_timeout: Duration::from_secs(5),
         capture_network: true,
+        cancellation: None,
     })
     .await
     .unwrap();

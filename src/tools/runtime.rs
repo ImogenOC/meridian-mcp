@@ -11,6 +11,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::process::Command;
 use tracing::info;
 
+use crate::process_environment::minimal_runtime_environment;
+
 const DEFAULT_OUTPUT_WAIT_TIMEOUT_MS: u64 = 30_000;
 const MAX_OUTPUT_WAIT_TIMEOUT_MS: u64 = 300_000;
 const OUTPUT_WAIT_POLL_INTERVAL_MS: u64 = 100;
@@ -83,6 +85,34 @@ fn readiness_succeeded(readiness: &Value) -> bool {
 
 /// Start DreamDaemon with a .dmb file
 pub async fn run(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let _lifecycle = state.lifecycle().await;
+    if state.debugger().await.is_some() {
+        return Err(anyhow!(
+            "a debugger session is active; stop it before launching DreamDaemon"
+        ));
+    }
+    run_internal(state, args, None).await
+}
+
+pub(crate) async fn run_profiled(
+    state: &ServerState,
+    args: Value,
+    profiler_port: u16,
+) -> Result<ToolResult> {
+    let _lifecycle = state.lifecycle().await;
+    if state.debugger().await.is_some() {
+        return Err(anyhow!(
+            "a debugger session is active; stop it before launching Tracy"
+        ));
+    }
+    run_internal(state, args, Some(profiler_port)).await
+}
+
+async fn run_internal(
+    state: &ServerState,
+    args: Value,
+    profiler_port: Option<u16>,
+) -> Result<ToolResult> {
     let mut state = state.runtime().await;
     // Check if already running
     if state.is_game_running() {
@@ -122,7 +152,7 @@ pub async fn run(state: &ServerState, args: Value) -> Result<ToolResult> {
         )
     })?;
 
-    let extra_args: Vec<String> = args
+    let mut extra_args: Vec<String> = args
         .get("daemon_args")
         .and_then(|value| value.as_array())
         .map(|values| {
@@ -138,6 +168,9 @@ pub async fn run(state: &ServerState, args: Value) -> Result<ToolResult> {
         })
         .transpose()?
         .unwrap_or_default();
+    if profiler_port.is_some() {
+        extra_args.extend(["-params".to_owned(), "tracy".to_owned()]);
+    }
 
     let dreamdaemon = find_dreamdaemon()
         .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?;
@@ -157,18 +190,30 @@ pub async fn run(state: &ServerState, args: Value) -> Result<ToolResult> {
     let log_start_offset = std::fs::metadata(&log_path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    let mut child = Command::new(&dreamdaemon)
+    let mut command = Command::new(&dreamdaemon);
+    command
         .args(&daemon_args)
         .current_dir(working_directory)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(profiler_port) = profiler_port {
+        command
+            .env_clear()
+            .envs(minimal_runtime_environment())
+            .env("UTRACY_BIND_ADDRESS", "127.0.0.1")
+            .env("UTRACY_BIND_PORT", profiler_port.to_string());
+    }
+    let mut child = command.spawn()?;
 
     let pid = child.id();
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    state.set_game_process(child, port);
+    if let Some(profiler_port) = profiler_port {
+        state.set_profiled_game_process(child, port, profiler_port);
+    } else {
+        state.set_game_process(child, port);
+    }
 
     if let Some(stdout) = stdout {
         let output_log = Arc::clone(&state.output_log);
@@ -215,6 +260,8 @@ pub async fn run(state: &ServerState, args: Value) -> Result<ToolResult> {
         "port": port,
         "dmb_path": dmb_path,
         "working_directory": working_directory.display().to_string(),
+        "runtime_kind": if profiler_port.is_some() { "tracy" } else { "standard" },
+        "profiler_port": profiler_port,
         "message": format!("DreamDaemon started on port {}", port)
     });
 
@@ -641,6 +688,7 @@ pub async fn status(state: &ServerState, _args: Value) -> Result<ToolResult> {
         return Ok(ToolResult::text(
             json!({
                 "running": false,
+                "runtime_kind": state.kind,
                 "last_exit_code": state.last_exit_code,
                 "recent_output": state.recent_output(50)
             })
@@ -654,7 +702,9 @@ pub async fn status(state: &ServerState, _args: Value) -> Result<ToolResult> {
     Ok(ToolResult::text(
         json!({
             "running": true,
+            "runtime_kind": state.kind,
             "port": port,
+            "profiler_port": state.profiler_port,
             "pid": pid,
             "recent_output": state.recent_output(50)
         })

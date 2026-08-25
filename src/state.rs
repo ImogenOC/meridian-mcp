@@ -15,6 +15,13 @@ pub(crate) const OUTPUT_LOG_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const OUTPUT_TRUNCATED_SUFFIX: &str = "... [truncated]";
 pub type OutputLog = Arc<StdMutex<VecDeque<String>>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeKind {
+    Standard,
+    Tracy,
+}
+
 pub fn push_output_line(log: &OutputLog, line: String) {
     let line = truncate_output_line(line);
     let mut lines = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -66,6 +73,8 @@ pub struct RuntimeState {
     pub(crate) output_log: OutputLog,
     pub(crate) runtime_output_tasks: Vec<JoinHandle<()>>,
     pub(crate) last_exit_code: Option<i32>,
+    pub(crate) kind: Option<RuntimeKind>,
+    pub(crate) profiler_port: Option<u16>,
 }
 
 impl RuntimeState {
@@ -76,6 +85,8 @@ impl RuntimeState {
             output_log: Arc::new(StdMutex::new(VecDeque::with_capacity(OUTPUT_LOG_CAPACITY))),
             runtime_output_tasks: Vec::new(),
             last_exit_code: None,
+            kind: None,
+            profiler_port: None,
         }
     }
 
@@ -83,6 +94,19 @@ impl RuntimeState {
         self.game_process = Some(process);
         self.game_port = Some(port);
         self.last_exit_code = None;
+        self.kind = Some(RuntimeKind::Standard);
+        self.profiler_port = None;
+    }
+
+    pub(crate) fn set_profiled_game_process(
+        &mut self,
+        process: Child,
+        port: u16,
+        profiler_port: u16,
+    ) {
+        self.set_game_process(process, port);
+        self.kind = Some(RuntimeKind::Tracy);
+        self.profiler_port = Some(profiler_port);
     }
 
     pub(crate) fn clear_runtime_diagnostics(&mut self) {
@@ -138,12 +162,16 @@ impl RuntimeState {
                     self.last_exit_code = status.code();
                     self.game_process = None;
                     self.game_port = None;
+                    self.kind = None;
+                    self.profiler_port = None;
                     false
                 }
                 Ok(None) => true,
                 Err(_) => {
                     self.game_process = None;
                     self.game_port = None;
+                    self.kind = None;
+                    self.profiler_port = None;
                     false
                 }
             }
@@ -161,8 +189,18 @@ impl RuntimeState {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         self.abort_runtime_output_tasks();
         self.game_port = None;
+        self.kind = None;
+        self.profiler_port = None;
         Ok(())
     }
+}
+
+#[derive(Default)]
+pub struct TracyCaptureState {
+    pub(crate) active: bool,
+    pub(crate) cancellation: Option<tokio::sync::watch::Sender<bool>>,
+    pub(crate) output_path: Option<std::path::PathBuf>,
+    pub(crate) last_error: Option<String>,
 }
 
 impl Default for RuntimeState {
@@ -176,6 +214,8 @@ pub struct ServerState {
     runtime: Mutex<RuntimeState>,
     assets: Mutex<DmiCache>,
     debugger: Mutex<Option<DebuggerSession>>,
+    lifecycle: Mutex<()>,
+    tracy_capture: Mutex<TracyCaptureState>,
 }
 
 impl ServerState {
@@ -185,6 +225,8 @@ impl ServerState {
             runtime: Mutex::new(RuntimeState::new()),
             assets: Mutex::new(DmiCache::default()),
             debugger: Mutex::new(None),
+            lifecycle: Mutex::new(()),
+            tracy_capture: Mutex::new(TracyCaptureState::default()),
         }
     }
 
@@ -227,6 +269,14 @@ impl ServerState {
 
     pub async fn debugger(&self) -> MutexGuard<'_, Option<DebuggerSession>> {
         self.debugger.lock().await
+    }
+
+    pub(crate) async fn lifecycle(&self) -> MutexGuard<'_, ()> {
+        self.lifecycle.lock().await
+    }
+
+    pub(crate) async fn tracy_capture(&self) -> MutexGuard<'_, TracyCaptureState> {
+        self.tracy_capture.lock().await
     }
 }
 
