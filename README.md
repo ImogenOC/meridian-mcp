@@ -36,7 +36,7 @@ Support labels are defined in [compatibility](docs/compatibility.md). A passing 
 
 ## Available tools
 
-Analysis mode exposes the eleven read-only tools below. Development mode adds seven general active tools and can add the separately gated `rift_compile`; active tools are not advertised or callable unless development mode was enabled when the server launched. See [tool contracts](docs/tool-contracts.md) for the generated capability mode, support level, side effects, timeout, and output limit of every tool.
+Analysis mode exposes the read-only tools below. Development mode adds the active compiler, rendering, documentation, and runtime tools. `rift_compile`, the auxtools debugger, and Tracy profiling have separate immutable startup gates; gated tools are not advertised or callable when their prerequisites are absent. See [tool contracts](docs/tool-contracts.md) for the generated capability mode, support level, side effects, timeout, and output limit of every tool.
 
 ### Analysis mode
 
@@ -79,7 +79,40 @@ Analysis mode exposes the eleven read-only tools below. Development mode adds se
 | `dm_stop` | Stop and clean up the DreamDaemon process owned by this Meridian-MCP server. It does not target unrelated system processes. |
 | `dm_topic` | Send a bounded `world.Topic()` request to the running loopback DreamDaemon process and return the decoded response. This is intended for project-provided debug and test handlers. |
 
-When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, the server also advertises `dm_debug_launch`, `dm_debug_stop`, `dm_debug_set_breakpoints`, `dm_debug_set_function_breakpoints`, `dm_debug_set_exception_breakpoints`, `dm_debug_control`, `dm_debug_threads`, `dm_debug_stack_trace`, `dm_debug_scopes`, `dm_debug_variables`, `dm_debug_evaluate`, `dm_debug_exception_info`, `dm_debug_source`, and `dm_debug_wait_for_event`. These tools own one DreamSeeker process, use loopback only, and never attach to an arbitrary PID.
+### Auxtools debugger
+
+When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, Meridian-MCP exposes a restricted debugger adapter over the pinned auxtools protocol.
+
+| Tool | Description |
+| --- | --- |
+| `dm_debug_launch` | Launch one contained DMB through the `dreamseeker.exe` beside the single allowlisted `dm.exe`. Meridian-MCP injects only the fixed hash-verified debugger DLL, opens an ephemeral loopback listener, owns the process tree, retains the debugger-provided `stddef.dm`, and refuses to start while a normal or Tracy DreamDaemon runtime is active. |
+| `dm_debug_set_breakpoints` | Replace the complete source-breakpoint set with lines from one contained file in the active parsed generation. Each line must resolve inside a parsed procedure; optional bounded conditions are passed to auxtools. Reparse invalidates this source mapping, so stop and relaunch the debugger after source changes. |
+| `dm_debug_set_function_breakpoints` | Replace the complete breakpoint set using canonical DreamMaker procedure paths, with optional override identifiers, instruction offsets, and bounded conditions. Use this when the exact procedure identity is known or source-line mapping is inappropriate. |
+| `dm_debug_set_exception_breakpoints` | Enable or disable breaking when DreamMaker reports a runtime exception. This controls only the active owned debugger session. |
+| `dm_debug_control` | Pause, continue, step into, step over, or step out of the active debuggee. Step actions use a debugger-issued thread identifier; actions are a fixed enum rather than arbitrary protocol requests. |
+| `dm_debug_threads` | List the active debuggee's bounded thread inventory and debugger-issued identifiers. Use the returned identifiers for stack and control operations. |
+| `dm_debug_stack_trace` | Read a bounded page of frames for one debugger-issued thread identifier. Frames include procedure identity and source information when the parsed snapshot can resolve it. |
+| `dm_debug_scopes` | Return argument, local, and global variable references for one debugger-issued frame identifier. The references are valid only for the active session. |
+| `dm_debug_variables` | Read one bounded page of values from a debugger-issued variables reference. Nested values may return further references for subsequent calls. |
+| `dm_debug_evaluate` | Evaluate a bounded DreamMaker expression in an optional frame using the `watch`, `repl`, or `hover` context. Evaluation executes inside the active debuggee and can have game-state side effects; do not use it as a read-only query for untrusted expressions. |
+| `dm_debug_exception_info` | Return the most recently retained runtime-exception message and current event sequence from the active session. It is not a historical exception log. |
+| `dm_debug_source` | Read the retained debugger-provided `stddef.dm` only through source reference `1`, which is issued by the active adapter. It accepts no caller-selected file path or URL. |
+| `dm_debug_wait_for_event` | Wait for the first bounded breakpoint, step, pause, runtime, output, or termination event after an optional sequence number. Calls can filter event kinds and wait for at most 300 seconds; results report queue eviction when older events were dropped. |
+| `dm_debug_stop` | Disconnect the debugger and terminate only the DreamSeeker process tree owned by this Meridian-MCP session. It never detaches and never accepts a PID. |
+
+#### Debugger workflow
+
+1. Compile the target DMB and call `dm_parse_environment` for its matching DME before using source-oriented breakpoints.
+2. Call `dm_debug_launch` with the contained DMB. Only one debugger session may exist, and it is mutually exclusive with standard and Tracy runtimes.
+3. Configure source, function, and/or runtime-exception breakpoints. Each breakpoint-setting call replaces the relevant active set; send the complete desired list.
+4. Use `dm_debug_control` to continue or step, then `dm_debug_wait_for_event` with the last observed sequence to avoid replaying an older event.
+5. On a stop event, inspect `dm_debug_threads`, `dm_debug_stack_trace`, `dm_debug_scopes`, and `dm_debug_variables`. Use `dm_debug_exception_info` for the latest runtime and `dm_debug_source` only for an issued standard-definition reference.
+6. Use `dm_debug_evaluate` only when executing that expression in the game is intentional.
+7. Call `dm_debug_stop` before recompiling, reparsing changed source, starting DreamDaemon, or ending the client session.
+
+The adapter does not support attaching to an existing process, selecting another DLL, choosing a non-loopback endpoint, restarting a debuggee in place, arbitrary DAP/auxtools passthrough, or legacy extools disassembly. Timeout, disconnect, MCP shutdown, and explicit stop clean up the owned process rather than leaving it detached. Auxtools remains Windows-only and experimental even when its live integration gate passes.
+
+### Tracy profiler
 
 When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both native artifacts validate against the helper manifest, the server adds these tools. The current baseline is Tracy protocol 82 and BYOND 516.1685-1687; it remains experimental until the named live gates record green evidence.
 
@@ -97,16 +130,70 @@ When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both nativ
 
 Offline analysis works without a parsed environment. When one is active, matching trace file/line records receive additive source-correlation metadata; profiler measurements are not rewritten.
 
-## Build
+## Build and operator commands
+
+### Rust build and verification
 
 The repository pins Rust 1.95.0 with rustfmt and Clippy to match CI. BYOND integration gates additionally require the project-pinned BYOND version.
 
 ```powershell
-cargo build --release
-cargo test
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo build --locked --release
+cargo deny check
 ```
 
 The release binary is `target\release\meridian-mcp.exe` on Windows and `target/release/meridian-mcp` on Linux.
+
+### Repository command inventory
+
+Run these PowerShell entry points from the repository root. Scripts that accept paths resolve and validate them before executing; integration scripts are evidence gates, not substitutes for a downstream repository's own build and test workflow.
+
+| Command | Purpose |
+| --- | --- |
+| `test_mcp.ps1` | Build or exercise an installed Meridian-MCP binary over real stdio JSON-RPC. It validates initialization, exact tool inventories and schemas, bounded errors, optional DME parse/search, compile, runtime, Topic, and map behavior. Use `-SkipBuild` with `-BinaryPath`/`-ServerPath` to test an exact release artifact. |
+| `scripts/audit-spacemandmm-capabilities.ps1` | Compare the checked-in SpacemanDMM capability registry with its declared coverage; `-Check` is the non-mutating CI audit. An exact upstream checkout can be supplied for source-aware auditing. |
+| `scripts/build-spacemandmm-helpers.ps1` | Build dmdoc from the pinned local SpacemanDMM checkout, copy the platform helper, hash it, and write or merge the helper manifest. It does not select an arbitrary revision. |
+| `scripts/build-tracy-helpers.ps1` | Build and test the fixed-command native Tracy helper plus the patched x86 byond-tracy hook from exact local source revisions, copy licenses, hash artifacts, and merge schema-v2 manifest entries. It performs no source download. |
+| `scripts/fetch-auxtools.ps1` | Download auxtools `debug_server.dll` v2.3.7 from the fixed release URL, verify its fixed SHA-256, and atomically install it below a supplied destination root. |
+| `scripts/install-byond.ps1` | Install the pinned Windows BYOND archive for CI/integration use through verified download and archive checks. This is test infrastructure, not a project build command. |
+| `scripts/install-byond-linux.ps1` | Install the pinned Linux BYOND archive for the Ubuntu live-integration job after verifying the exact archive hash and compiler artifact. |
+| `scripts/install-meridian-mcp.ps1` | Atomically install a release binary, manifest-selected dmdoc/Tracy helpers, and the verified auxtools DLL into a destination root. `-EnableTracy` requires both native Tracy manifest identities. The script does not edit Codex configuration. |
+| `scripts/configure-codex-meridian-mcp.ps1` | Update one named Meridian-MCP server entry in an existing Codex TOML configuration with the installed binary and helper manifest. `-EnableTracy` writes the explicit Tracy opt-in; existing roots, compiler, mode, and build ceiling remain untouched. |
+| `scripts/run-byond-integration.ps1` | Compile the owned BYOND fixtures used by the runtime integration gate. |
+| `scripts/run-auxtools-integration.ps1` | Compile the technical debugger fixture and drive the installed MCP through auxtools launch, inventory/query, exception-breakpoint configuration, and clean stop, writing machine-readable evidence. |
+| `scripts/run-tracy-integration.ps1` | Compile the technical profiling fixture and drive prepare, launch, capture, hotspot/zone/frame queries, comparison, status, and stop through the installed MCP, writing machine-readable evidence. |
+| `scripts/run-meridian-analysis-compatibility.ps1` | Run the versioned read-only parse, lookup, definition, search, diagnostics, DMI, map, render, and documentation compatibility manifest against a real Meridian-Rift checkout. |
+| `scripts/run-meridian-compatibility.ps1` | Run the named Windows Meridian-Rift compatibility sequence, including direct compile, network and offline `rift_compile`, the warm authoritative human build, negative-policy sessions, and evidence output. Use only with a disposable integration checkout as described in `TESTING.md`. |
+| `scripts/test_unsupported_rift_compile.ps1` | Verify the stable non-Windows `unsupported_platform` response without installing BYOND or invoking a Windows build wrapper. |
+
+`scripts/MeridianMcpSession.psm1` is the shared stdio-session module used by integration scripts; it is not a standalone command. Exact parameters, fixtures, destructive-gate warnings, and CI-equivalent invocations are documented in [TESTING.md](TESTING.md).
+
+### Packaging and configuration example
+
+```powershell
+./scripts/build-spacemandmm-helpers.ps1 `
+    -UpstreamPath C:\path\to\SpacemanDMM `
+    -OutputDirectory ./target/package `
+    -ManifestPath ./target/package/helpers/manifest.json
+
+./scripts/fetch-auxtools.ps1 -DestinationRoot ./target/package
+
+./scripts/install-meridian-mcp.ps1 `
+    -BinaryPath ./target/release/meridian-mcp.exe `
+    -HelperManifestPath ./target/package/helpers/manifest.json `
+    -AuxtoolsRoot ./target/package `
+    -DestinationRoot C:\path\to\installed-meridian-mcp `
+    -InstalledName meridian-mcp.exe
+
+./scripts/configure-codex-meridian-mcp.ps1 `
+    -ConfigPath C:\path\to\.codex\config.toml `
+    -BinaryPath C:\path\to\installed-meridian-mcp\meridian-mcp.exe `
+    -HelperManifestPath C:\path\to\installed-meridian-mcp\helpers\manifest.json
+```
+
+Add `-EnableTracy` to both installation and configuration only when the combined manifest contains the verified Tracy helper and hook. Restart Codex after changing its MCP configuration.
 
 ## Configuration
 

@@ -59,6 +59,19 @@ fn readme_documents_the_two_compilers_and_build_access_controls() {
 }
 
 #[test]
+fn readme_has_an_individual_description_for_every_public_tool() {
+    let readme = std::fs::read_to_string("README.md").expect("README should be readable");
+    for contract in meridian_mcp::all_contracts() {
+        let table_row = format!("| `{}` |", contract.name);
+        assert!(
+            readme.contains(&table_row),
+            "README has no individual table entry for {}",
+            contract.name
+        );
+    }
+}
+
+#[test]
 fn compatibility_document_tracks_deferred_named_gates() {
     let compatibility = std::fs::read_to_string("docs/compatibility.md")
         .expect("compatibility documentation should be readable");
@@ -105,6 +118,25 @@ fn tracy_is_explicitly_opt_in_and_each_tool_is_documented() {
     assert!(!configure.contains("mcp_servers\\.dm-mcp"));
     assert!(install.contains("[switch]$EnableTracy"));
     assert!(install.contains("PSObject.Properties['protocol_version']"));
+}
+
+#[test]
+fn auxtools_documentation_explains_setup_workflow_and_boundaries() {
+    let readme = std::fs::read_to_string("README.md").expect("README should be readable");
+    for required in [
+        "### Auxtools debugger",
+        "#### Debugger workflow",
+        "`dm_debug_launch`",
+        "`dm_debug_wait_for_event`",
+        "`dm_debug_threads`",
+        "`dm_debug_stack_trace`",
+        "`dm_debug_scopes`",
+        "`dm_debug_variables`",
+        "`dm_debug_stop`",
+        "does not support attaching to an existing process",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
 }
 
 fn markdown_link_targets(text: &str) -> Vec<String> {
