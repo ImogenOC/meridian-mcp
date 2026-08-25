@@ -20,6 +20,12 @@ pub enum DebuggerAccess {
     Auxtools,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TracyAccess {
+    Disabled,
+    Byond,
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     mode: CapabilityMode,
@@ -28,6 +34,7 @@ pub struct ServerConfig {
     rift_build_access: RiftBuildAccess,
     helper_manifest: Option<PathBuf>,
     debugger_access: DebuggerAccess,
+    tracy_access: TracyAccess,
 }
 
 impl ServerConfig {
@@ -38,7 +45,9 @@ impl ServerConfig {
         })?;
         let compilers = std::env::var_os("MERIDIAN_MCP_COMPILERS");
         let rift_build = std::env::var("MERIDIAN_MCP_RIFT_BUILD").ok();
-        let mut config = Self::from_values_with_rift_build(
+        let helper_manifest = std::env::var_os("MERIDIAN_MCP_HELPER_MANIFEST").map(PathBuf::from);
+        let tracy = std::env::var("MERIDIAN_MCP_TRACY").ok();
+        let mut config = Self::from_values_with_features(
             mode.as_deref(),
             std::env::split_paths(&roots).collect(),
             compilers
@@ -47,9 +56,9 @@ impl ServerConfig {
                 .map(Iterator::collect)
                 .unwrap_or_default(),
             rift_build.as_deref(),
+            tracy.as_deref(),
+            helper_manifest,
         )?;
-        config.helper_manifest =
-            std::env::var_os("MERIDIAN_MCP_HELPER_MANIFEST").map(PathBuf::from);
         config.debugger_access = match std::env::var("MERIDIAN_MCP_DEBUGGER").ok().as_deref() {
             None | Some("disabled") => DebuggerAccess::Disabled,
             Some("auxtools") if config.mode == CapabilityMode::Development => {
@@ -70,7 +79,7 @@ impl ServerConfig {
         workspace_roots: Vec<PathBuf>,
         compiler_allowlist: Vec<PathBuf>,
     ) -> Result<Self> {
-        Self::from_values_with_rift_build(mode, workspace_roots, compiler_allowlist, None)
+        Self::from_values_with_features(mode, workspace_roots, compiler_allowlist, None, None, None)
     }
 
     pub fn from_values_with_rift_build(
@@ -78,6 +87,24 @@ impl ServerConfig {
         workspace_roots: Vec<PathBuf>,
         compiler_allowlist: Vec<PathBuf>,
         rift_build: Option<&str>,
+    ) -> Result<Self> {
+        Self::from_values_with_features(
+            mode,
+            workspace_roots,
+            compiler_allowlist,
+            rift_build,
+            None,
+            None,
+        )
+    }
+
+    pub fn from_values_with_features(
+        mode: Option<&str>,
+        workspace_roots: Vec<PathBuf>,
+        compiler_allowlist: Vec<PathBuf>,
+        rift_build: Option<&str>,
+        tracy: Option<&str>,
+        helper_manifest: Option<PathBuf>,
     ) -> Result<Self> {
         let mode = match mode.unwrap_or("analysis") {
             "analysis" => CapabilityMode::Analysis,
@@ -95,13 +122,37 @@ impl ServerConfig {
         if workspace_roots.is_empty() {
             return Err(anyhow!("at least one workspace root is required"));
         }
+        let tracy_access = match tracy.unwrap_or("disabled") {
+            "disabled" => TracyAccess::Disabled,
+            "byond" if mode == CapabilityMode::Development && helper_manifest.is_some() => {
+                TracyAccess::Byond
+            }
+            "byond" if mode != CapabilityMode::Development => {
+                return Err(anyhow!(
+                    "MERIDIAN_MCP_TRACY=byond requires development mode"
+                ));
+            }
+            "byond" => {
+                return Err(anyhow!(
+                    "MERIDIAN_MCP_TRACY=byond requires MERIDIAN_MCP_HELPER_MANIFEST"
+                ));
+            }
+            other => return Err(anyhow!("unknown MERIDIAN_MCP_TRACY value: {other}")),
+        };
         Ok(Self {
             mode,
             workspace_roots: canonicalize_all(workspace_roots, "workspace root")?,
             compiler_allowlist: canonicalize_all(compiler_allowlist, "compiler")?,
             rift_build_access,
-            helper_manifest: None,
+            helper_manifest: helper_manifest
+                .map(|path| {
+                    path.canonicalize().with_context(|| {
+                        format!("cannot canonicalize helper manifest: {}", path.display())
+                    })
+                })
+                .transpose()?,
             debugger_access: DebuggerAccess::Disabled,
+            tracy_access,
         })
     }
 
@@ -122,6 +173,9 @@ impl ServerConfig {
     }
     pub fn debugger_access(&self) -> DebuggerAccess {
         self.debugger_access
+    }
+    pub fn tracy_access(&self) -> TracyAccess {
+        self.tracy_access
     }
 }
 

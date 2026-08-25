@@ -127,6 +127,10 @@ impl PathPolicy {
         &self.executables
     }
 
+    pub fn workspace_roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     fn require_contained(&self, path: PathBuf) -> Result<PathBuf, PolicyError> {
         if self.roots.iter().any(|root| path.starts_with(root)) {
             Ok(path)

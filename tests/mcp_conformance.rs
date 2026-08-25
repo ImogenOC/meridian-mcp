@@ -1,4 +1,5 @@
 use meridian_mcp::{CapabilityMode, MeridianServer, RiftBuildAccess, ServerConfig};
+use sha2::{Digest, Sha256};
 
 fn server(mode: &str, access: RiftBuildAccess) -> MeridianServer {
     let root =
@@ -12,6 +13,41 @@ fn server(mode: &str, access: RiftBuildAccess) -> MeridianServer {
     MeridianServer::new(
         ServerConfig::from_values_with_rift_build(Some(mode), vec![root], Vec::new(), access)
             .unwrap(),
+    )
+    .unwrap()
+}
+
+fn tracy_server() -> MeridianServer {
+    let root = std::env::temp_dir().join(format!("meridian-mcp-tracy-mode-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("helpers")).unwrap();
+    let server_helper = root.join("helpers/server-helper.exe");
+    let hook = root.join("helpers/prof.dll");
+    std::fs::write(&server_helper, b"server helper").unwrap();
+    std::fs::write(&hook, b"hook").unwrap();
+    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let manifest = root.join("manifest.json");
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "helpers": [
+                {"id":"tracy-server-helper","platform":std::env::consts::OS,"target_arch":std::env::consts::ARCH,"path":"helpers/server-helper.exe","sha256":hash(b"server helper"),"source_revision":"099df3de3dc37eca4712c06b8320fb9c53596edd","protocol_version":82},
+                {"id":"byond-tracy","platform":std::env::consts::OS,"target_arch":"x86","path":"helpers/prof.dll","sha256":hash(b"hook"),"source_revision":"d1ec404737b04b1ea73d6df4a1b477deacdb1900","protocol_version":82,"byond_min_version":"516.1685","byond_max_version":"516.1687"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    MeridianServer::new(
+        ServerConfig::from_values_with_features(
+            Some("development"),
+            vec![root],
+            Vec::new(),
+            None,
+            Some("byond"),
+            Some(manifest),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -100,4 +136,34 @@ fn rift_compile_schema_has_no_caller_controlled_paths_or_commands() {
     assert_eq!(properties["timeout_ms"]["maximum"], 1_800_000);
     assert_eq!(properties["idle_timeout_ms"]["minimum"], 1_000);
     assert_eq!(properties["idle_timeout_ms"]["maximum"], 900_000);
+}
+
+#[test]
+fn tracy_inventory_is_opt_in_and_exposes_fixed_command_tools_only() {
+    let ordinary = server("development", RiftBuildAccess::Disabled).tool_names();
+    assert!(!ordinary.iter().any(|name| name.starts_with("dm_tracy_")));
+
+    let tracy = tracy_server().tool_names();
+    let tracy_tools = tracy
+        .iter()
+        .filter(|name| name.starts_with("dm_tracy_"))
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        tracy_tools,
+        [
+            "dm_tracy_prepare",
+            "dm_tracy_launch",
+            "dm_tracy_capture",
+            "dm_tracy_status",
+            "dm_tracy_stop",
+            "dm_tracy_hotspots",
+            "dm_tracy_zone",
+            "dm_tracy_frame_stats",
+            "dm_tracy_compare",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(!tracy.iter().any(|name| name.contains("eval")));
 }

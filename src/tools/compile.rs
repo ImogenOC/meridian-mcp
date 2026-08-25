@@ -345,9 +345,11 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
         arguments,
         working_directory: compiler_working_directory.to_owned(),
         environment: compiler_environment(),
+        stdin: None,
         timeout: Duration::from_millis(timeout_ms),
         idle_timeout: Duration::from_millis(idle_timeout_ms),
         capture_network,
+        cancellation: None,
     })
     .await?;
 

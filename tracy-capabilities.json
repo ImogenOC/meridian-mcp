@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "tracy_revision": "099df3de3dc37eca4712c06b8320fb9c53596edd",
+  "byond_tracy_revision": "d1ec404737b04b1ea73d6df4a1b477deacdb1900",
+  "protocol_version": 82,
+  "capabilities": [
+    {
+      "id": "byond-tracy-hook",
+      "category": "capture",
+      "upstream_component": "spacestation13/byond-tracy prof extension",
+      "disposition": "fixed_helper",
+      "targets": ["dm_tracy_prepare", "dm_tracy_launch", "dm_tracy_status", "dm_tracy_stop"],
+      "platforms": ["windows", "ubuntu"],
+      "verification": "Exact-revision x86 build, hash manifest, BYOND 516.1685 live capture gate.",
+      "evidence": [],
+      "rationale": null
+    },
+    {
+      "id": "tracy-live-capture",
+      "category": "capture",
+      "upstream_component": "TracyServer Worker",
+      "disposition": "fixed_helper",
+      "targets": ["dm_tracy_capture"],
+      "platforms": ["windows", "ubuntu"],
+      "verification": "One-shot helper protocol tests and live bounded capture gate.",
+      "evidence": [],
+      "rationale": null
+    },
+    {
+      "id": "tracy-offline-analysis",
+      "category": "analysis",
+      "upstream_component": "TracyServer Worker trace queries",
+      "disposition": "fixed_helper",
+      "targets": ["dm_tracy_hotspots", "dm_tracy_zone", "dm_tracy_frame_stats", "dm_tracy_compare"],
+      "platforms": ["windows", "ubuntu"],
+      "verification": "Fixture-backed deterministic query tests and live trace source-location gate.",
+      "evidence": [],
+      "rationale": null
+    },
+    {
+      "id": "tracy-python-mcp",
+      "category": "transport",
+      "upstream_component": "extra/mcp/tracy_mcp.py",
+      "disposition": "excluded",
+      "targets": [],
+      "platforms": ["all"],
+      "verification": "Source audit at the pinned Tracy revision.",
+      "evidence": [],
+      "rationale": "The wrapper permits arbitrary Python evaluation and execution, unrestricted paths, and shared HTTP service state; Meridian uses a fixed one-shot native protocol instead."
+    },
+    {
+      "id": "tracy-gui",
+      "category": "presentation",
+      "upstream_component": "Tracy profiler GUI",
+      "disposition": "excluded",
+      "targets": [],
+      "platforms": ["all"],
+      "verification": "Interface review against agent-facing MCP requirements.",
+      "evidence": [],
+      "rationale": "Interactive GUI presentation is outside the MCP server contract; generated traces remain compatible with the Tracy GUI for human inspection."
+    },
+    {
+      "id": "tracy-network-discovery",
+      "category": "network",
+      "upstream_component": "Tracy UDP broadcast discovery",
+      "disposition": "excluded",
+      "targets": [],
+      "platforms": ["all"],
+      "verification": "Network contract test requires a fixed loopback endpoint.",
+      "evidence": [],
+      "rationale": "Automatic network discovery is unnecessary for an MCP-owned local DreamDaemon and broadens the network surface."
+    }
+  ]
+}

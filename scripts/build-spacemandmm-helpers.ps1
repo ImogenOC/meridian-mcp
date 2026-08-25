@@ -22,7 +22,18 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Ou
 Copy-Item -LiteralPath $source -Destination $destination -Force
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
 $relative = [IO.Path]::GetRelativePath((Split-Path -Parent ([IO.Path]::GetFullPath($ManifestPath))), $destination).Replace('\', '/')
-$manifest = [ordered]@{ schema_version = 1; helpers = @([ordered]@{ platform = $platform; path = $relative; sha256 = $hash; source_revision = $revision }) }
+$platformParts = $platform.Split('-', 2)
+$manifest = [ordered]@{
+	schema_version = 2
+	helpers = @([ordered]@{
+		id = 'dmdoc'
+		platform = $platformParts[0]
+		target_arch = $platformParts[1]
+		path = $relative
+		sha256 = $hash
+		source_revision = $revision
+	})
+}
 $json = $manifest | ConvertTo-Json -Depth 5
 $manifestParent = Split-Path -Parent ([IO.Path]::GetFullPath($ManifestPath))
 New-Item -ItemType Directory -Force -Path $manifestParent | Out-Null

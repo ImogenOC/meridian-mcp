@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const SPACEMANDMM_REVISION: &str = "351ddc0ffb2439876d4565ce5130bb6b027ee605";
+pub const TRACY_REVISION: &str = "099df3de3dc37eca4712c06b8320fb9c53596edd";
+pub const BYOND_TRACY_REVISION: &str = "d1ec404737b04b1ea73d6df4a1b477deacdb1900";
+pub const TRACY_PROTOCOL_VERSION: u32 = 82;
 
 pub const APPROVED_TOOL_NAMES: &[&str] = &[
     "dm_audit_icons",
@@ -47,6 +50,15 @@ pub const APPROVED_TOOL_NAMES: &[&str] = &[
     "dm_status",
     "dm_stop",
     "dm_topic",
+    "dm_tracy_capture",
+    "dm_tracy_compare",
+    "dm_tracy_frame_stats",
+    "dm_tracy_hotspots",
+    "dm_tracy_launch",
+    "dm_tracy_prepare",
+    "dm_tracy_status",
+    "dm_tracy_stop",
+    "dm_tracy_zone",
     "dm_wait_for_output",
     "rift_compile",
 ];
@@ -83,6 +95,15 @@ pub struct CapabilityRegistry {
     pub capabilities: Vec<CapabilityRecord>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TracyCapabilityRegistry {
+    pub schema_version: u32,
+    pub tracy_revision: String,
+    pub byond_tracy_revision: String,
+    pub protocol_version: u32,
+    pub capabilities: Vec<CapabilityRecord>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CapabilityRegistryError {
     #[error("checked-in capability registry is invalid JSON: {0}")]
@@ -96,17 +117,44 @@ pub fn capability_registry() -> Result<CapabilityRegistry, CapabilityRegistryErr
     )))?)
 }
 
-pub fn validate_capability_registry(registry: &CapabilityRegistry) -> Result<(), Vec<String>> {
-    let mut errors = Vec::new();
-    let approved_tools: HashSet<_> = APPROVED_TOOL_NAMES.iter().copied().collect();
-    let mut identities = HashSet::new();
+pub fn tracy_capability_registry() -> Result<TracyCapabilityRegistry, CapabilityRegistryError> {
+    Ok(serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tracy-capabilities.json"
+    )))?)
+}
 
-    if registry.schema_version != 1 {
+pub fn validate_tracy_capability_registry(
+    registry: &TracyCapabilityRegistry,
+) -> Result<(), Vec<String>> {
+    let mut errors = validate_records(registry.schema_version, &registry.capabilities);
+    if registry.tracy_revision != TRACY_REVISION {
         errors.push(format!(
-            "unsupported capability registry schema {}",
-            registry.schema_version
+            "Tracy registry revision {} does not match {}",
+            registry.tracy_revision, TRACY_REVISION
         ));
     }
+    if registry.byond_tracy_revision != BYOND_TRACY_REVISION {
+        errors.push(format!(
+            "byond-tracy registry revision {} does not match {}",
+            registry.byond_tracy_revision, BYOND_TRACY_REVISION
+        ));
+    }
+    if registry.protocol_version != TRACY_PROTOCOL_VERSION {
+        errors.push(format!(
+            "Tracy protocol {} does not match {}",
+            registry.protocol_version, TRACY_PROTOCOL_VERSION
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+pub fn validate_capability_registry(registry: &CapabilityRegistry) -> Result<(), Vec<String>> {
+    let mut errors = validate_records(registry.schema_version, &registry.capabilities);
     if registry.spacemandmm_revision != SPACEMANDMM_REVISION {
         errors.push(format!(
             "capability registry revision {} does not match {}",
@@ -114,7 +162,25 @@ pub fn validate_capability_registry(registry: &CapabilityRegistry) -> Result<(),
         ));
     }
 
-    for record in &registry.capabilities {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn validate_records(schema_version: u32, records: &[CapabilityRecord]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let approved_tools: HashSet<_> = APPROVED_TOOL_NAMES.iter().copied().collect();
+    let mut identities = HashSet::new();
+
+    if schema_version != 1 {
+        errors.push(format!(
+            "unsupported capability registry schema {schema_version}"
+        ));
+    }
+
+    for record in records {
         if record.id.trim().is_empty() {
             errors.push("capability record has an empty id".to_owned());
         } else if !identities.insert(record.id.as_str()) {
@@ -160,9 +226,5 @@ pub fn validate_capability_registry(registry: &CapabilityRegistry) -> Result<(),
         }
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
-    }
+    errors
 }

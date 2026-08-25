@@ -2,7 +2,9 @@
 param(
 	[Parameter(Mandatory)][string]$ConfigPath,
 	[Parameter(Mandatory)][string]$BinaryPath,
-	[Parameter(Mandatory)][string]$HelperManifestPath
+	[Parameter(Mandatory)][string]$HelperManifestPath,
+	[string]$ServerName = 'meridian-mcp',
+	[switch]$EnableTracy
 )
 
 Set-StrictMode -Version 2.0
@@ -10,15 +12,20 @@ $ErrorActionPreference = 'Stop'
 $config = (Resolve-Path -LiteralPath $ConfigPath).Path
 $binary = (Resolve-Path -LiteralPath $BinaryPath).Path
 $helperManifest = (Resolve-Path -LiteralPath $HelperManifestPath).Path
+$serverNamePattern = '^[A-Za-z0-9_-]+$'
+if ($ServerName -notmatch $serverNamePattern) { throw 'ServerName may contain only letters, numbers, underscores, and hyphens.' }
+$escapedServerName = [regex]::Escape($ServerName)
 $text = [IO.File]::ReadAllText($config)
-$serverPattern = '(?ms)(\[mcp_servers\.dm-mcp\]\s*\r?\n)command\s*=\s*[^\r\n]+'
-if ([regex]::Matches($text, $serverPattern).Count -ne 1) { throw 'Expected one dm-mcp server command.' }
+$serverPattern = '(?ms)(\[mcp_servers\.' + $escapedServerName + '\]\s*\r?\n)command\s*=\s*[^\r\n]+'
+if ([regex]::Matches($text, $serverPattern).Count -ne 1) { throw "Expected one $ServerName server command." }
 $text = [regex]::Replace($text, $serverPattern, ('$1command = ''' + $binary + ''''))
-$environmentPattern = '(?ms)(\[mcp_servers\.dm-mcp\.env\]\s*\r?\n)(.*?)(?=\r?\n\[|\z)'
+$environmentPattern = '(?ms)(\[mcp_servers\.' + $escapedServerName + '\.env\]\s*\r?\n)(.*?)(?=\r?\n\[|\z)'
 $match = [regex]::Match($text, $environmentPattern)
-if (-not $match.Success) { throw 'Expected one dm-mcp environment section.' }
+if (-not $match.Success) { throw "Expected one $ServerName environment section." }
 $body = $match.Groups[2].Value
 $entries = [ordered]@{ MERIDIAN_MCP_HELPER_MANIFEST = $helperManifest; MERIDIAN_MCP_DEBUGGER = 'auxtools' }
+if ($EnableTracy) { $entries.MERIDIAN_MCP_TRACY = 'byond' }
+$body = [regex]::Replace($body, '(?m)^MERIDIAN_MCP_TRACY\s*=.*(?:\r?\n)?', '')
 foreach ($entry in $entries.GetEnumerator()) {
 	$linePattern = '(?m)^' + [regex]::Escape($entry.Key) + '\s*=.*$'
 	$line = $entry.Key + " = '" + $entry.Value + "'"

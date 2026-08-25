@@ -181,9 +181,11 @@ pub async fn compile(
         ],
         working_directory: project.root.clone(),
         environment,
+        stdin: None,
         timeout: Duration::from_millis(timeout_ms),
         idle_timeout: Duration::from_millis(idle_timeout_ms),
         capture_network: params.capture_network,
+        cancellation: None,
     })
     .await
     {

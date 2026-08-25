@@ -4,6 +4,7 @@ pub mod atomic_output;
 pub mod capabilities;
 pub mod config;
 pub mod contracts;
+pub mod helper_manifest;
 pub mod index;
 pub mod limits;
 pub mod mcp;
@@ -11,6 +12,7 @@ pub mod network_audit;
 pub mod parameters;
 pub mod path_policy;
 pub mod process;
+pub mod process_environment;
 pub mod project;
 pub mod result;
 mod search;
@@ -19,8 +21,10 @@ mod source;
 pub mod spaceman;
 pub mod state;
 pub mod tools;
+pub mod tracy;
+pub mod tracy_protocol;
 
-pub use config::{CapabilityMode, DebuggerAccess, RiftBuildAccess, ServerConfig};
+pub use config::{CapabilityMode, DebuggerAccess, RiftBuildAccess, ServerConfig, TracyAccess};
 pub use contracts::{
     all_contracts, contracts_for, contracts_for_configuration, render_tool_reference, SupportLevel,
     ToolContract, ToolEffects,

@@ -84,6 +84,20 @@ const DEBUG: ToolEffects = ToolEffects {
     network_loopback: true,
     network_external: false,
 };
+const TRACY_PREPARE: ToolEffects = ToolEffects {
+    reads_files: true,
+    writes_files: true,
+    spawns_process: false,
+    network_loopback: false,
+    network_external: false,
+};
+const TRACY_PROCESS: ToolEffects = ToolEffects {
+    reads_files: true,
+    writes_files: false,
+    spawns_process: true,
+    network_loopback: false,
+    network_external: false,
+};
 
 macro_rules! contract {
     ($name:literal, $summary:literal, $mode:ident, $effects:ident, $support:ident, $timeout:expr, $max:expr) => {
@@ -504,6 +518,87 @@ static CONTRACTS: &[ToolContract] = &[
         Provisional,
         Some(60_000),
         262_144
+    ),
+    contract!(
+        "dm_tracy_prepare",
+        "Install the verified byond-tracy hook beside a contained DMB.",
+        Development,
+        TRACY_PREPARE,
+        Experimental,
+        None,
+        262_144
+    ),
+    contract!(
+        "dm_tracy_launch",
+        "Launch an MCP-owned profiled DreamDaemon on loopback.",
+        Development,
+        RUNTIME,
+        Experimental,
+        Some(60_000),
+        262_144
+    ),
+    contract!(
+        "dm_tracy_capture",
+        "Capture a bounded trace through the fixed Tracy helper.",
+        Development,
+        RUNTIME,
+        Experimental,
+        Some(330_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_tracy_status",
+        "Inspect profiled runtime and capture state.",
+        Development,
+        MEMORY,
+        Experimental,
+        None,
+        262_144
+    ),
+    contract!(
+        "dm_tracy_stop",
+        "Stop capture and the profiled DreamDaemon.",
+        Development,
+        MEMORY,
+        Experimental,
+        Some(30_000),
+        262_144
+    ),
+    contract!(
+        "dm_tracy_hotspots",
+        "Return bounded deterministic trace hotspots.",
+        Development,
+        TRACY_PROCESS,
+        Experimental,
+        Some(120_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_tracy_zone",
+        "Inspect one profiled proc across source locations.",
+        Development,
+        TRACY_PROCESS,
+        Experimental,
+        Some(120_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_tracy_frame_stats",
+        "Summarize ServerTick frame durations.",
+        Development,
+        TRACY_PROCESS,
+        Experimental,
+        Some(120_000),
+        262_144
+    ),
+    contract!(
+        "dm_tracy_compare",
+        "Compare two traces by proc source identity.",
+        Development,
+        TRACY_PROCESS,
+        Experimental,
+        Some(180_000),
+        1_048_576
     ),
 ];
 

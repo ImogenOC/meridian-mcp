@@ -1,0 +1,11 @@
+diff --git a/prof.c b/prof.c
+--- a/prof.c
++++ b/prof.c
+@@ -1394,6 +1394,6 @@ int event_queue_init(void) {
+ 	utracy.queue.producer_tail_cache = 0;
+ 	utracy.queue.consumer_head_cache = 0;
+-	atomic_store_seqcst(&utracy.queue.head, 1);
++	atomic_store_seqcst(&utracy.queue.head, 0);
+ 	atomic_store_seqcst(&utracy.queue.tail, 0);
+ 	return 0;
+ }

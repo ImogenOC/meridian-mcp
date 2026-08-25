@@ -9,6 +9,7 @@ mod parse;
 pub mod rift;
 mod runtime;
 mod search;
+mod tracy;
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 use crate::mcp::{ToolDefinition, ToolResult};
 use crate::spaceman::debugger::DebuggerInstallation;
 use crate::state::ServerState;
+use crate::tracy::TracyInstallation;
 use crate::{contracts_for_configuration, CapabilityMode, PathPolicy, RiftBuildAccess};
 
 #[derive(Clone)]
@@ -25,6 +27,7 @@ pub struct ToolExecutionContext {
     rift_build: RiftBuildAccess,
     dmdoc_helper: Option<std::path::PathBuf>,
     debugger: Option<DebuggerInstallation>,
+    tracy: Option<TracyInstallation>,
 }
 
 impl ToolExecutionContext {
@@ -43,6 +46,7 @@ impl ToolExecutionContext {
             rift_build,
             dmdoc_helper: None,
             debugger: None,
+            tracy: None,
         }
     }
 
@@ -52,6 +56,7 @@ impl ToolExecutionContext {
         rift_build: RiftBuildAccess,
         dmdoc_helper: Option<std::path::PathBuf>,
         debugger: Option<DebuggerInstallation>,
+        tracy: Option<TracyInstallation>,
     ) -> Self {
         Self {
             mode,
@@ -59,6 +64,7 @@ impl ToolExecutionContext {
             rift_build,
             dmdoc_helper,
             debugger,
+            tracy,
         }
     }
 
@@ -78,6 +84,9 @@ impl ToolExecutionContext {
     }
     pub(crate) fn debugger(&self) -> Option<&DebuggerInstallation> {
         self.debugger.as_ref()
+    }
+    pub(crate) fn tracy(&self) -> Option<&TracyInstallation> {
+        self.tracy.as_ref()
     }
 }
 
@@ -609,6 +618,22 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         }),
     });
 
+    tools.push(ToolDefinition { name: "dm_tracy_prepare".into(), description: "Place the verified pinned byond-tracy hook beside a contained DMB using atomic replacement rules.".into(), input_schema: json!({"type":"object","properties":{"dmb_path":{"type":"string"},"overwrite":{"type":"boolean","default":false}},"required":["dmb_path"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":{"dmb_path":{"type":"string"},"game_port":{"type":"integer","minimum":1,"maximum":65535},"startup_timeout_ms":{"type":"integer","minimum":1000,"maximum":60000}},"required":["dmb_path"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_capture".into(), description: "Capture the active profiled DreamDaemon through the verified fixed-command Tracy helper into an atomic contained trace.".into(), input_schema: json!({"type":"object","properties":{"output_path":{"type":"string"},"duration_ms":{"type":"integer","minimum":1,"maximum":300000},"memory_limit_mb":{"type":"integer","minimum":16,"maximum":4096},"overwrite":{"type":"boolean","default":false},"capture_network":{"type":"boolean","default":false}},"required":["output_path","duration_ms","memory_limit_mb"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_status".into(), description: "Report profiled DreamDaemon, capture, endpoint, hook, helper, protocol, and last-error state.".into(), input_schema: json!({"type":"object","properties":{}}) });
+    tools.push(ToolDefinition {
+        name: "dm_tracy_stop".into(),
+        description:
+            "Stop the active Tracy capture and then terminate the MCP-owned profiled DreamDaemon."
+                .into(),
+        input_schema: json!({"type":"object","properties":{}}),
+    });
+    tools.push(ToolDefinition { name: "dm_tracy_hotspots".into(), description: "Read a contained Tracy trace and return bounded deterministic DreamMaker hotspot statistics.".into(), input_schema: json!({"type":"object","properties":{"trace_path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100},"sort":{"type":"string","enum":["inclusive","self","count","max"],"default":"inclusive"}},"required":["trace_path"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_zone".into(), description: "Inspect bounded statistics for one DreamMaker proc name across source locations in a contained Tracy trace.".into(), input_schema: json!({"type":"object","properties":{"trace_path":{"type":"string"},"name":{"type":"string","maxLength":4096},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100}},"required":["trace_path","name"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_frame_stats".into(), description: "Summarize ServerTick frame count, span, mean, extrema, and p50/p95/p99 from a contained Tracy trace.".into(), input_schema: json!({"type":"object","properties":{"trace_path":{"type":"string"}},"required":["trace_path"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_compare".into(), description: "Compare two contained Tracy traces by proc, file, and line with bounded deterministic deltas.".into(), input_schema: json!({"type":"object","properties":{"baseline_path":{"type":"string"},"current_path":{"type":"string"},"minimum_delta_ns":{"type":"integer","minimum":0,"default":0},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100}},"required":["baseline_path","current_path"]}) });
+
     tools
 }
 
@@ -641,7 +666,7 @@ pub fn get_tool_definitions_for_active(
     rift_build: RiftBuildAccess,
     dmdoc: bool,
 ) -> Vec<ToolDefinition> {
-    get_tool_definitions_for_runtime(mode, rift_build, dmdoc, false)
+    get_tool_definitions_for_runtime(mode, rift_build, dmdoc, false, false)
 }
 
 pub fn get_tool_definitions_for_runtime(
@@ -649,9 +674,11 @@ pub fn get_tool_definitions_for_runtime(
     rift_build: RiftBuildAccess,
     dmdoc: bool,
     debugger: bool,
+    tracy: bool,
 ) -> Vec<ToolDefinition> {
     let mut tools = get_tool_definitions_for(mode, rift_build);
     tools.retain(|tool| !tool.name.starts_with("dm_debug_"));
+    tools.retain(|tool| !tool.name.starts_with("dm_tracy_"));
     if dmdoc && mode == CapabilityMode::Development {
         if let Some(tool) = get_tool_definitions()
             .into_iter()
@@ -665,6 +692,13 @@ pub fn get_tool_definitions_for_runtime(
             get_tool_definitions()
                 .into_iter()
                 .filter(|tool| tool.name.starts_with("dm_debug_")),
+        );
+    }
+    if tracy && mode == CapabilityMode::Development {
+        tools.extend(
+            get_tool_definitions()
+                .into_iter()
+                .filter(|tool| tool.name.starts_with("dm_tracy_")),
         );
     }
     tools
@@ -701,6 +735,15 @@ pub async fn call_tool(
             "debugger tools require a verified auxtools startup configuration".into(),
             None,
             "Start Meridian-MCP in development mode with MERIDIAN_MCP_DEBUGGER=auxtools.",
+            json!({"tool":name}),
+        ));
+    }
+    if name.starts_with("dm_tracy_") && context.tracy.is_none() {
+        return Ok(policy_error(
+            "tool_not_available",
+            "Tracy tools require a verified startup helper configuration".into(),
+            None,
+            "Start Meridian-MCP in development mode with MERIDIAN_MCP_TRACY=byond.",
             json!({"tool":name}),
         ));
     }
@@ -794,6 +837,15 @@ pub async fn call_tool(
         "dm_stop" => runtime::stop(state, args).await,
         "dm_status" => runtime::status(state, args).await,
         "dm_topic" => runtime::topic(state, args).await,
+        "dm_tracy_prepare" => tracy::prepare(context, args).await,
+        "dm_tracy_launch" => tracy::launch(context, state, args).await,
+        "dm_tracy_capture" => tracy::capture(context, state, args).await,
+        "dm_tracy_status" => tracy::status(state).await,
+        "dm_tracy_stop" => tracy::stop(state).await,
+        "dm_tracy_hotspots" => tracy::hotspots(context, state, args).await,
+        "dm_tracy_zone" => tracy::zone(context, state, args).await,
+        "dm_tracy_frame_stats" => tracy::frame_stats(context, state, args).await,
+        "dm_tracy_compare" => tracy::compare(context, state, args).await,
         _ => Err(anyhow!("Unknown tool: {name}")),
     }
 }
@@ -827,9 +879,19 @@ fn contain_arguments(
             canonical_argument(policy, args, "left_dmm_path", false)?;
             canonical_argument(policy, args, "right_dmm_path", false)?;
         }
-        "dm_run" => canonical_argument(policy, args, "dmb_path", true)?,
+        "dm_run" | "dm_tracy_prepare" | "dm_tracy_launch" => {
+            canonical_argument(policy, args, "dmb_path", true)?
+        }
         "dm_debug_launch" => canonical_argument(policy, args, "dmb_path", true)?,
         "dm_debug_set_breakpoints" => canonical_argument(policy, args, "source_path", false)?,
+        "dm_tracy_hotspots" | "dm_tracy_zone" | "dm_tracy_frame_stats" => {
+            canonical_argument(policy, args, "trace_path", false)?
+        }
+        "dm_tracy_compare" => {
+            canonical_argument(policy, args, "baseline_path", false)?;
+            canonical_argument(policy, args, "current_path", false)?;
+        }
+        "dm_tracy_capture" => {}
         _ => {}
     }
     if name == "dm_compile" {
