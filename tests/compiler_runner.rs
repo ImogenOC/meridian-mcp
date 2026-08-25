@@ -31,7 +31,7 @@ async fn direct_compile_reports_bounded_output_artifacts_and_optional_audit() {
 
     let result = call_tool(
         &context,
-        &mut ServerState::new(),
+        &ServerState::new(),
         "dm_compile",
         json!({
             "dme_path": dme,

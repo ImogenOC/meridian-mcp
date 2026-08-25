@@ -10,6 +10,10 @@ fn message(result: &ToolResult) -> &str {
     }
 }
 
+fn payload(result: &ToolResult) -> serde_json::Value {
+    serde_json::from_str(message(result)).expect("tool policy errors should be structured JSON")
+}
+
 #[tokio::test]
 async fn rift_compile_cannot_broaden_the_startup_network_ceiling() {
     let root =
@@ -23,7 +27,7 @@ async fn rift_compile_cannot_broaden_the_startup_network_ceiling() {
     );
     let result = call_tool(
         &context,
-        &mut ServerState::new(),
+        &ServerState::new(),
         "rift_compile",
         json!({"network_mode": "allow"}),
     )
@@ -50,7 +54,7 @@ async fn rift_compile_rejects_zero_duration_limits() {
     );
     let result = call_tool(
         &context,
-        &mut ServerState::new(),
+        &ServerState::new(),
         "rift_compile",
         json!({"timeout_ms": 0}),
     )
@@ -73,11 +77,34 @@ async fn analysis_mode_rejects_active_tools() {
         CapabilityMode::Analysis,
         PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
     );
-    let result = call_tool(&context, &mut ServerState::new(), "dm_compile", json!({}))
+    let result = call_tool(&context, &ServerState::new(), "dm_compile", json!({}))
         .await
         .unwrap();
     assert_eq!(result.is_error, Some(true));
     assert!(message(&result).contains("tool_not_available"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn analysis_mode_policy_error_uses_the_shared_error_shape() {
+    let root =
+        std::env::temp_dir().join(format!("meridian-mcp-active-shape-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let context = ToolExecutionContext::new(
+        CapabilityMode::Analysis,
+        PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+    );
+
+    let result = call_tool(&context, &ServerState::new(), "dm_compile", json!({}))
+        .await
+        .unwrap();
+    let value = payload(&result);
+
+    assert_eq!(value["code"], "tool_not_available");
+    assert_eq!(value["details"]["tool"], "dm_compile");
+    assert_eq!(value["details"]["mode"], "analysis");
+    assert!(value["recovery"].is_string());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -99,7 +126,7 @@ async fn development_mode_rejects_unlisted_compilers_and_implicit_overwrite() {
     );
     let compiler_result = call_tool(
         &context,
-        &mut ServerState::new(),
+        &ServerState::new(),
         "dm_compile",
         json!({"dme_path": dme, "compiler_path": compiler}),
     )
@@ -108,7 +135,7 @@ async fn development_mode_rejects_unlisted_compilers_and_implicit_overwrite() {
     assert!(message(&compiler_result).contains("executable_not_allowed"));
     let render_result = call_tool(
         &context,
-        &mut ServerState::new(),
+        &ServerState::new(),
         "dm_render_map",
         json!({"dmm_path": dmm, "output_path": png}),
     )

@@ -15,14 +15,23 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Check out exact SpacemanDMM helper source
+        uses: actions/checkout@v7
+        with:
+          repository: SpaceManiac/SpacemanDMM
+          ref: 351ddc0ffb2439876d4565ce5130bb6b027ee605
+          path: integration/SpacemanDMM
       - name: Check out Meridian-Rift
         uses: actions/checkout@v7
         with:
           repository: AphelionDevelopment/Meridian-Rift
           ref: ${{ inputs.meridian_ref }}
           path: integration/Meridian-Rift
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
+      - name: Build exact dmdoc helper
+        shell: pwsh
+        run: ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
       - name: Verify Meridian-Rift BYOND pin
         shell: pwsh
         run: |
@@ -41,7 +50,11 @@ jobs:
             -DestinationPath "$env:RUNNER_TEMP\byond" `
             -ExpectedSha256 E24078F1E6D719681118D6505B2A3F263FB173C1B63465D2F68F3E0EC177126F
       - name: Build release Meridian-MCP
-        run: cargo build --release
+        shell: pwsh
+        run: |
+          $env:MERIDIAN_MCP_HELPER_MANIFEST = "$env:GITHUB_WORKSPACE/integration/helpers-manifest.json"
+          cargo build --locked --release
+          ./scripts/fetch-auxtools.ps1 -DestinationRoot ./target/release
       - name: Run owned fixture and Meridian-Rift compatibility gates
         shell: pwsh
         run: |
@@ -50,6 +63,9 @@ jobs:
             -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" `
             -BinaryPath ./target/release/meridian-mcp.exe `
             -EvidencePath ./integration/evidence/meridian-compatibility.json
+      - name: Run live auxtools debugger gate
+        shell: pwsh
+        run: ./scripts/run-auxtools-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -EvidencePath ./integration/evidence/auxtools-compatibility.json
       - name: Upload compatibility evidence
         if: always()
         uses: actions/upload-artifact@v6

@@ -2,20 +2,105 @@ use anyhow::{anyhow, Result};
 use dmm_tools::{dmm, minimap, render_passes, IconCache};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use tracing::info;
 
-use crate::mcp::ToolResult;
+use crate::atomic_output::{write_atomic, AtomicOutputError};
+use crate::limits::ServerLimits;
+use crate::mcp::{ToolContent, ToolResult};
+use crate::result::{json_success, ToolMetadata};
+use crate::spaceman::dmm::{diff_maps as calculate_diff, profile_map, render_pass_inventory};
 use crate::state::ServerState;
+use crate::tools::ToolExecutionContext;
+
+fn pass_selection(args: &Value) -> Result<(Vec<&str>, Vec<&str>)> {
+    let enabled = args
+        .get("enable_passes")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let disabled = args
+        .get("disable_passes")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let known = render_pass_inventory()
+        .into_iter()
+        .map(|pass| pass.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    for name in enabled.iter().chain(disabled.iter()) {
+        if !known.contains(*name) {
+            return Err(anyhow!("unknown render pass: {name}"));
+        }
+    }
+    if enabled.iter().any(|name| disabled.contains(name)) {
+        return Err(anyhow!("a render pass cannot be both enabled and disabled"));
+    }
+    Ok((enabled, disabled))
+}
+
+fn validated_render_bounds(
+    args: &Value,
+    dimensions: (usize, usize, usize),
+) -> Result<(usize, [usize; 3], [usize; 3])> {
+    let (dim_x, dim_y, dim_z) = dimensions;
+    let z_level = args.get("z_level").and_then(Value::as_u64).unwrap_or(1) as usize;
+    if z_level == 0 || z_level > dim_z {
+        return Err(anyhow!(
+            "Z-level {z_level} is outside the map range 1..={dim_z}"
+        ));
+    }
+    let parse_bound = |key: &str, fallback: [usize; 3]| -> Result<[usize; 3]> {
+        match args.get(key).and_then(Value::as_array) {
+            None => Ok(fallback),
+            Some(values) if values.len() == 3 => Ok([
+                values[0]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("bounds must be positive integers"))?
+                    as usize,
+                values[1]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("bounds must be positive integers"))?
+                    as usize,
+                values[2]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("bounds must be positive integers"))?
+                    as usize,
+            ]),
+            Some(_) => Err(anyhow!("bounds require exactly [x,y,z]")),
+        }
+    };
+    let min = parse_bound("min", [1, 1, z_level])?;
+    let max = parse_bound("max", [dim_x, dim_y, z_level])?;
+    if min.contains(&0)
+        || min[0] > max[0]
+        || min[1] > max[1]
+        || min[2] != max[2]
+        || max[0] > dim_x
+        || max[1] > dim_y
+        || max[2] > dim_z
+    {
+        return Err(anyhow!("render bounds are outside the map"));
+    }
+    let pixel_count = (max[0] - min[0] + 1) as u64 * (max[1] - min[1] + 1) as u64 * 32 * 32;
+    if pixel_count > ServerLimits::default().max_render_pixels {
+        return Err(anyhow!("render exceeds max_render_pixels"));
+    }
+    Ok((z_level, min, max))
+}
 
 /// Render a map to PNG.
-pub async fn render_map(state: &mut ServerState, args: Value) -> Result<ToolResult> {
+pub async fn render_map(
+    execution: &ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
     let dmm_path = args
         .get("dmm_path")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Missing dmm_path argument"))?;
-    let z_level = args.get("z_level").and_then(Value::as_u64).unwrap_or(1) as usize;
     let output_path = args
         .get("output_path")
         .and_then(Value::as_str)
@@ -26,41 +111,32 @@ pub async fn render_map(state: &mut ServerState, args: Value) -> Result<ToolResu
         return Ok(ToolResult::error(format!("File not found: {dmm_path}")));
     }
 
-    let objtree = state
-        .objtree
-        .as_ref()
-        .ok_or_else(|| anyhow!("No environment loaded. Call dm_parse_environment first."))?;
-    let context = state
-        .context
-        .as_ref()
-        .ok_or_else(|| anyhow!("No context available"))?;
-    let environment_root = state
+    let snapshot = state.snapshot().await?;
+    let objtree = &snapshot.objtree;
+    let context = &snapshot.context;
+    let environment_root = snapshot
         .environment_path
-        .as_ref()
-        .and_then(|environment| environment.parent())
+        .parent()
         .ok_or_else(|| anyhow!("Parsed environment has no parent directory"))?;
 
-    info!("Rendering map: {dmm_path} z-level {z_level} to {output_path:?}");
     let map = dmm::Map::from_file(&path)?;
-    let (dim_x, dim_y, dim_z) = map.dim_xyz();
-    if z_level == 0 || z_level > dim_z {
-        return Ok(ToolResult::error(format!(
-            "Z-level {z_level} is outside the map range 1..={dim_z}"
-        )));
-    }
+    let (z_level, min, max) = validated_render_bounds(&args, map.dim_xyz())?;
+    info!("Rendering map: {dmm_path} z-level {z_level} to {output_path:?}");
 
     let mut icon_cache = IconCache::default();
     icon_cache.set_icons_root(environment_root);
-    let render_passes = render_passes::configure(&context.config().map_renderer, "", "");
+    let (enabled, disabled) = pass_selection(&args)?;
+    let render_passes =
+        render_passes::configure_list(&context.config.map_renderer, &enabled, &disabled);
     let errors: RwLock<_> = Default::default();
     let bump = Default::default();
     let image = minimap::generate(
         minimap::Context {
             objtree,
             map: &map,
-            level: map.z_level(z_level - 1),
-            min: (0, 0),
-            max: (dim_x - 1, dim_y - 1),
+            level: map.z_level(min[2] - 1),
+            min: (min[0] - 1, min[1] - 1),
+            max: (max[0] - 1, max[1] - 1),
             render_passes: &render_passes,
             errors: &errors,
             bump: &bump,
@@ -71,17 +147,31 @@ pub async fn render_map(state: &mut ServerState, args: Value) -> Result<ToolResu
     .map_err(|()| anyhow!("SpacemanDMM could not render the requested map"))?;
     let non_transparent_pixels = image.data.iter().filter(|pixel| pixel.a > 0).count();
 
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let mut encoded = Vec::new();
+    image
+        .to_write(&mut encoded)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    if encoded.len() as u64 > ServerLimits::default().max_render_output_bytes {
+        return Err(anyhow!("render exceeds max_render_output_bytes"));
     }
-    image.to_file(&output_path)?;
+    let artifact = write_atomic(
+        execution.policy(),
+        &output_path,
+        args.get("overwrite")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        |file| file.write_all(&encoded).map_err(AtomicOutputError::from),
+    )?;
 
     Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
         "success": true,
         "dmm_path": dmm_path,
         "z_level": z_level,
+        "output": artifact,
         "output_path": output_path.display().to_string(),
-        "dimensions_pixels": {"width": dim_x * 32, "height": dim_y * 32},
+        "dimensions_pixels": {"width": (max[0]-min[0]+1) * 32, "height": (max[1]-min[1]+1) * 32},
+        "bounds": {"min":min,"max":max},
+        "applied_passes": enabled,
         "non_transparent_pixels": non_transparent_pixels,
         "warning": if non_transparent_pixels == 0 {
             Some("The renderer produced a fully transparent image. This can be expected when render passes hide every atom on the selected z-level.")
@@ -135,6 +225,7 @@ pub async fn map_info(args: Value) -> Result<ToolResult> {
     sorted_areas.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     let content = std::fs::read_to_string(&path)?;
 
+    let profile = profile_map(&path, 10_000)?;
     Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
         "file": dmm_path,
         "format": if content.contains("//MAP CONVERTED BY dmm2tgm.py") { "TGM" } else { "DMM" },
@@ -142,8 +233,147 @@ pub async fn map_info(args: Value) -> Result<ToolResult> {
         "unique_tiles": map.dictionary.len(),
         "file_size_bytes": std::fs::metadata(&path)?.len(),
         "top_types": sorted_types.into_iter().take(20).collect::<Vec<_>>(),
-        "top_areas": sorted_areas.into_iter().take(20).collect::<Vec<_>>()
+        "top_areas": sorted_areas.into_iter().take(20).collect::<Vec<_>>(),
+        "bounds": profile.bounds,
+        "dictionary_entries": profile.dictionary_entries,
+        "unique_models": profile.unique_models,
+        "model_use_counts": profile.model_use_counts,
+        "warnings": profile.warnings,
+        "spacemandmm_revision": crate::capabilities::SPACEMANDMM_REVISION
     }))?))
+}
+
+pub async fn diff_maps(args: Value) -> Result<ToolResult> {
+    let left = PathBuf::from(
+        args.get("left_dmm_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Missing left_dmm_path"))?,
+    );
+    let right = PathBuf::from(
+        args.get("right_dmm_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Missing right_dmm_path"))?,
+    );
+    let maximum = ServerLimits::default().max_map_differences;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(maximum as u64) as usize;
+    let difference = calculate_diff(&left, &right, limit.min(maximum))?;
+    let mut metadata = ToolMetadata::complete(None);
+    metadata.truncated = difference.truncated;
+    if difference.truncated {
+        metadata
+            .truncation_reasons
+            .push("map_difference_limit".into())
+    }
+    Ok(json_success(metadata, json!({"difference":difference})))
+}
+
+pub async fn list_render_passes() -> Result<ToolResult> {
+    Ok(json_success(
+        ToolMetadata::complete(None),
+        json!({"passes":render_pass_inventory()}),
+    ))
+}
+
+pub async fn render_maps(
+    execution: &ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
+    let files = args
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("files must be an array"))?;
+    let limits = ServerLimits::default();
+    if files.len() > limits.max_render_files {
+        return Err(anyhow!("batch exceeds max_render_files"));
+    }
+    let overwrite = args
+        .get("overwrite")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let _ = pass_selection(&args)?;
+    let mut requests = Vec::new();
+    for file in files {
+        let dmm = file
+            .get("dmm_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("batch file missing dmm_path"))?;
+        let dmm = execution.policy().read_path(dmm)?;
+        let map = dmm::Map::from_file(&dmm)?;
+        let chunks = file
+            .get("chunks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("batch file chunks must be an array"))?;
+        if requests.len() + chunks.len() > limits.max_render_chunks {
+            return Err(anyhow!("batch exceeds max_render_chunks"));
+        }
+        for chunk in chunks {
+            let output = chunk
+                .get("output_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("render chunk missing output_path"))?;
+            let output = execution.policy().output_path(output, overwrite)?;
+            if output
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_none_or(|extension| !extension.eq_ignore_ascii_case("png"))
+            {
+                return Err(anyhow!("render output extension must be .png"));
+            }
+            let mut request = chunk.clone();
+            request["dmm_path"] = Value::String(dmm.display().to_string());
+            request["output_path"] = Value::String(output.display().to_string());
+            request["overwrite"] = Value::Bool(overwrite);
+            if let Some(value) = args.get("enable_passes") {
+                request["enable_passes"] = value.clone()
+            }
+            if let Some(value) = args.get("disable_passes") {
+                request["disable_passes"] = value.clone()
+            }
+            let _ = validated_render_bounds(&request, map.dim_xyz())?;
+            requests.push(request)
+        }
+    }
+    let mut results = Vec::new();
+    let mut completed = 0;
+    let mut failed = 0;
+    for request in requests {
+        match render_map(execution, state, request.clone()).await {
+            Ok(result) if result.is_error != Some(true) => {
+                completed += 1;
+                results.push(json!({"success":true,"result":tool_result_payload(&result)}));
+            }
+            Ok(result) => {
+                failed += 1;
+                results.push(json!({"success":false,"result":tool_result_payload(&result)}));
+            }
+            Err(error) => {
+                failed += 1;
+                results.push(json!({"success":false,"error":error.to_string(),"request":request}));
+            }
+        }
+    }
+    Ok(json_success(
+        ToolMetadata::complete(
+            state
+                .active_snapshot()
+                .await
+                .map(|snapshot| snapshot.generation),
+        ),
+        json!({"completed":completed,"failed":failed,"files":results}),
+    ))
+}
+
+fn tool_result_payload(result: &ToolResult) -> Value {
+    match result.content.first() {
+        Some(ToolContent::Text { text }) => {
+            serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+        }
+        None => Value::Null,
+    }
 }
 
 /// Find exact type and subtype instances on a map.
@@ -320,15 +550,19 @@ a
         )
         .unwrap();
         let output_path = directory.join("render.png");
-        let mut state = ServerState::new();
-        let parsed =
-            crate::tools::parse::parse_environment(&mut state, json!({"dme_path": dme_path}))
-                .await
-                .unwrap();
+        let state = ServerState::new();
+        let parsed = crate::tools::parse::parse_environment(&state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
         assert_eq!(parsed.is_error, None, "parse result: {parsed:?}");
+        let execution = ToolExecutionContext::new(
+            crate::CapabilityMode::Development,
+            crate::PathPolicy::new(vec![directory.clone()], Vec::new()).unwrap(),
+        );
 
         let result = render_map(
-            &mut state,
+            &execution,
+            &state,
             json!({
                 "dmm_path": map_path,
                 "output_path": output_path,

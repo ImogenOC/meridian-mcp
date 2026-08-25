@@ -14,12 +14,20 @@ pub enum RiftBuildAccess {
     Network,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DebuggerAccess {
+    Disabled,
+    Auxtools,
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     mode: CapabilityMode,
     workspace_roots: Vec<PathBuf>,
     compiler_allowlist: Vec<PathBuf>,
     rift_build_access: RiftBuildAccess,
+    helper_manifest: Option<PathBuf>,
+    debugger_access: DebuggerAccess,
 }
 
 impl ServerConfig {
@@ -30,7 +38,7 @@ impl ServerConfig {
         })?;
         let compilers = std::env::var_os("MERIDIAN_MCP_COMPILERS");
         let rift_build = std::env::var("MERIDIAN_MCP_RIFT_BUILD").ok();
-        Self::from_values_with_rift_build(
+        let mut config = Self::from_values_with_rift_build(
             mode.as_deref(),
             std::env::split_paths(&roots).collect(),
             compilers
@@ -39,7 +47,22 @@ impl ServerConfig {
                 .map(Iterator::collect)
                 .unwrap_or_default(),
             rift_build.as_deref(),
-        )
+        )?;
+        config.helper_manifest =
+            std::env::var_os("MERIDIAN_MCP_HELPER_MANIFEST").map(PathBuf::from);
+        config.debugger_access = match std::env::var("MERIDIAN_MCP_DEBUGGER").ok().as_deref() {
+            None | Some("disabled") => DebuggerAccess::Disabled,
+            Some("auxtools") if config.mode == CapabilityMode::Development => {
+                DebuggerAccess::Auxtools
+            }
+            Some("auxtools") => {
+                return Err(anyhow!(
+                    "MERIDIAN_MCP_DEBUGGER=auxtools requires development mode"
+                ))
+            }
+            Some(value) => return Err(anyhow!("unknown MERIDIAN_MCP_DEBUGGER value: {value}")),
+        };
+        Ok(config)
     }
 
     pub fn from_values(
@@ -77,6 +100,8 @@ impl ServerConfig {
             workspace_roots: canonicalize_all(workspace_roots, "workspace root")?,
             compiler_allowlist: canonicalize_all(compiler_allowlist, "compiler")?,
             rift_build_access,
+            helper_manifest: None,
+            debugger_access: DebuggerAccess::Disabled,
         })
     }
 
@@ -91,6 +116,12 @@ impl ServerConfig {
     }
     pub fn rift_build_access(&self) -> RiftBuildAccess {
         self.rift_build_access
+    }
+    pub fn helper_manifest(&self) -> Option<&std::path::Path> {
+        self.helper_manifest.as_deref()
+    }
+    pub fn debugger_access(&self) -> DebuggerAccess {
+        self.debugger_access
     }
 }
 

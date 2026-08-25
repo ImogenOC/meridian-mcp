@@ -7,6 +7,7 @@ ignore = [
     { id = "RUSTSEC-2024-0425", reason = "Unmaintained get-size is transitive through pinned SpacemanDMM dreammaker; no safe upgrade is available. Review by 2026-11-23 or with the next SpacemanDMM update." },
     { id = "RUSTSEC-2024-0427", reason = "Unmaintained get-size-derive is transitive through pinned SpacemanDMM dreammaker; no safe upgrade is available. Review by 2026-11-23 or with the next SpacemanDMM update." },
     { id = "RUSTSEC-2024-0436", reason = "Unmaintained paste is transitive through image, exr, and pulp; no safe compatible removal is available. Review by 2026-11-23 or with the next image update." },
+    { id = "RUSTSEC-2025-0141", reason = "Unmaintained bincode 1.3.3 is the fixed auxtools v2.3.7 wire codec; alternatives are not protocol-compatible. Review by 2026-11-23 or with the next auxtools protocol update." },
 ]
 
 [licenses]
@@ -29,6 +30,11 @@ license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
 
 [[licenses.clarify]]
 crate = "dmm-tools@0.1.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
+
+[[licenses.clarify]]
+crate = "dmi@0.1.0"
 expression = "GPL-3.0-or-later"
 license-files = [{ path = "../../LICENSE", hash = 0xc5a651aa }]
 

@@ -18,7 +18,9 @@ const OUTPUT_READ_CHUNK_BYTES: usize = 8 * 1024;
 const LOG_FILE_POLL_INTERVAL_MS: u64 = 50;
 
 use crate::mcp::ToolResult;
-use crate::state::{OutputLog, ServerState, OUTPUT_LINE_MAX_BYTES, OUTPUT_TRUNCATED_SUFFIX};
+use crate::state::{
+    OutputLog, RuntimeState, ServerState, OUTPUT_LINE_MAX_BYTES, OUTPUT_TRUNCATED_SUFFIX,
+};
 
 /// Find the DreamDaemon executable
 fn find_dreamdaemon() -> Option<PathBuf> {
@@ -80,7 +82,8 @@ fn readiness_succeeded(readiness: &Value) -> bool {
 }
 
 /// Start DreamDaemon with a .dmb file
-pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
+pub async fn run(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let mut state = state.runtime().await;
     // Check if already running
     if state.is_game_running() {
         return Ok(ToolResult::error(
@@ -224,7 +227,7 @@ pub async fn run(state: &mut ServerState, args: Value) -> Result<ToolResult> {
             .get("startup_timeout_ms")
             .and_then(|value| value.as_u64())
             .unwrap_or(DEFAULT_OUTPUT_WAIT_TIMEOUT_MS);
-        let wait_result = wait_for_output_value(state, pattern, use_regex, timeout_ms).await?;
+        let wait_result = wait_for_output_value(&mut state, pattern, use_regex, timeout_ms).await?;
         result["readiness"] = wait_result;
         if !readiness_succeeded(&result["readiness"]) {
             result["success"] = json!(false);
@@ -344,7 +347,7 @@ fn push_captured_output_line(
 }
 
 async fn wait_for_output_value(
-    state: &mut ServerState,
+    state: &mut RuntimeState,
     pattern: &str,
     use_regex: bool,
     timeout_ms: u64,
@@ -394,7 +397,8 @@ async fn wait_for_output_value(
 }
 
 /// Wait until DreamDaemon output contains a literal or regular-expression marker.
-pub async fn wait_for_output(state: &mut ServerState, args: Value) -> Result<ToolResult> {
+pub async fn wait_for_output(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let mut state = state.runtime().await;
     let running = state.is_game_running();
     let has_runtime_diagnostics =
         state.last_exit_code.is_some() || !state.recent_output(1).is_empty();
@@ -422,7 +426,7 @@ pub async fn wait_for_output(state: &mut ServerState, args: Value) -> Result<Too
         .and_then(|value| value.as_u64())
         .unwrap_or(DEFAULT_OUTPUT_WAIT_TIMEOUT_MS);
 
-    let result = wait_for_output_value(state, pattern, use_regex, timeout_ms).await?;
+    let result = wait_for_output_value(&mut state, pattern, use_regex, timeout_ms).await?;
     Ok(ToolResult::text(result.to_string()))
 }
 
@@ -489,15 +493,18 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_output_can_match_retained_output_after_exit() {
-        let mut state = ServerState::new();
-        state.last_exit_code = Some(1);
-        push_output_line(
-            &state.output_log,
-            "fatal: initialization failed".to_string(),
-        );
+        let state = ServerState::new();
+        {
+            let mut runtime = state.runtime().await;
+            runtime.last_exit_code = Some(1);
+            push_output_line(
+                &runtime.output_log,
+                "fatal: initialization failed".to_string(),
+            );
+        }
 
         let result = wait_for_output(
-            &mut state,
+            &state,
             json!({"pattern": "initialization failed", "timeout_ms": 10}),
         )
         .await
@@ -607,7 +614,8 @@ mod tests {
 }
 
 /// Stop the running DreamDaemon instance
-pub async fn stop(state: &mut ServerState, _args: Value) -> Result<ToolResult> {
+pub async fn stop(state: &ServerState, _args: Value) -> Result<ToolResult> {
+    let mut state = state.runtime().await;
     if !state.is_game_running() {
         return Ok(ToolResult::error("No game instance is currently running."));
     }
@@ -627,7 +635,8 @@ pub async fn stop(state: &mut ServerState, _args: Value) -> Result<ToolResult> {
 }
 
 /// Get status of the running game
-pub async fn status(state: &mut ServerState, _args: Value) -> Result<ToolResult> {
+pub async fn status(state: &ServerState, _args: Value) -> Result<ToolResult> {
+    let mut state = state.runtime().await;
     if !state.is_game_running() {
         return Ok(ToolResult::text(
             json!({
@@ -654,7 +663,8 @@ pub async fn status(state: &mut ServerState, _args: Value) -> Result<ToolResult>
 }
 
 /// Send a Topic() call to the running game server
-pub async fn topic(state: &mut ServerState, args: Value) -> Result<ToolResult> {
+pub async fn topic(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let mut state = state.runtime().await;
     if !state.is_game_running() {
         return Ok(ToolResult::error("No game instance is currently running."));
     }

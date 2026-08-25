@@ -12,45 +12,63 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct MeridianServer {
     config: Arc<ServerConfig>,
     execution: ToolExecutionContext,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<ServerState>,
 }
 
 impl MeridianServer {
     pub fn new(config: ServerConfig) -> Result<Self> {
+        let debugger = (config.debugger_access() == crate::DebuggerAccess::Auxtools)
+            .then(|| crate::spaceman::debugger::validate_installation(config.compiler_allowlist()))
+            .transpose()?;
         let policy = PathPolicy::new(
             config.workspace_roots().to_vec(),
             config.compiler_allowlist().to_vec(),
         )?;
-        let execution = ToolExecutionContext::with_rift_build(
+        let dmdoc_helper = config
+            .helper_manifest()
+            .map(crate::spaceman::docs::verified_dmdoc_helper)
+            .transpose()?;
+        let execution = ToolExecutionContext::with_features(
             config.mode(),
             policy,
             config.rift_build_access(),
+            dmdoc_helper,
+            debugger,
         );
         Ok(Self {
             config: Arc::new(config),
             execution,
-            state: Arc::new(Mutex::new(ServerState::new())),
+            state: Arc::new(ServerState::new()),
         })
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        tools::get_tool_definitions_for(self.config.mode(), self.config.rift_build_access())
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect()
+        tools::get_tool_definitions_for_runtime(
+            self.config.mode(),
+            self.config.rift_build_access(),
+            self.execution.dmdoc_helper().is_some(),
+            self.execution.debugger().is_some(),
+        )
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect()
     }
 
     fn tools(&self) -> Vec<Tool> {
-        tools::get_tool_definitions_for(self.config.mode(), self.config.rift_build_access())
-            .into_iter()
-            .map(|definition| to_sdk_tool(definition, self.config.rift_build_access()))
-            .collect()
+        tools::get_tool_definitions_for_runtime(
+            self.config.mode(),
+            self.config.rift_build_access(),
+            self.execution.dmdoc_helper().is_some(),
+            self.execution.debugger().is_some(),
+        )
+        .into_iter()
+        .map(|definition| to_sdk_tool(definition, self.config.rift_build_access()))
+        .collect()
     }
 }
 
@@ -79,10 +97,14 @@ impl ServerHandler for MeridianServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let arguments = Value::Object(request.arguments.unwrap_or_default());
-        let mut state = self.state.lock().await;
-        let result = tools::call_tool(&self.execution, &mut state, &request.name, arguments)
-            .await
-            .unwrap_or_else(|error| DomainToolResult::error(error.to_string()));
+        let result = tools::call_tool(
+            &self.execution,
+            self.state.as_ref(),
+            &request.name,
+            arguments,
+        )
+        .await
+        .unwrap_or_else(|error| DomainToolResult::error(error.to_string()));
         Ok(CallToolResponse::Complete(to_sdk_result(result)))
     }
 }

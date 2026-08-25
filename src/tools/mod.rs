@@ -1,5 +1,9 @@
 mod analysis;
 mod compile;
+mod debugger;
+mod dmi;
+mod docs;
+mod language;
 mod map;
 mod parse;
 pub mod rift;
@@ -10,6 +14,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::mcp::{ToolDefinition, ToolResult};
+use crate::spaceman::debugger::DebuggerInstallation;
 use crate::state::ServerState;
 use crate::{contracts_for_configuration, CapabilityMode, PathPolicy, RiftBuildAccess};
 
@@ -18,6 +23,8 @@ pub struct ToolExecutionContext {
     mode: CapabilityMode,
     policy: PathPolicy,
     rift_build: RiftBuildAccess,
+    dmdoc_helper: Option<std::path::PathBuf>,
+    debugger: Option<DebuggerInstallation>,
 }
 
 impl ToolExecutionContext {
@@ -34,6 +41,24 @@ impl ToolExecutionContext {
             mode,
             policy,
             rift_build,
+            dmdoc_helper: None,
+            debugger: None,
+        }
+    }
+
+    pub fn with_features(
+        mode: CapabilityMode,
+        policy: PathPolicy,
+        rift_build: RiftBuildAccess,
+        dmdoc_helper: Option<std::path::PathBuf>,
+        debugger: Option<DebuggerInstallation>,
+    ) -> Self {
+        Self {
+            mode,
+            policy,
+            rift_build,
+            dmdoc_helper,
+            debugger,
         }
     }
 
@@ -47,6 +72,12 @@ impl ToolExecutionContext {
 
     pub(crate) fn policy(&self) -> &PathPolicy {
         &self.policy
+    }
+    pub(crate) fn dmdoc_helper(&self) -> Option<&std::path::Path> {
+        self.dmdoc_helper.as_deref()
+    }
+    pub(crate) fn debugger(&self) -> Option<&DebuggerInstallation> {
+        self.debugger.as_ref()
     }
 }
 
@@ -144,7 +175,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
     tools.push(ToolDefinition {
         name: "dm_search_symbols".to_string(),
-        description: "Search for types, procs, or variables by name pattern.".to_string(),
+        description: "Search for types, procs, variables, or macros by name pattern.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -154,7 +185,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["type", "proc", "var", "all"],
+                    "enum": ["type", "proc", "var", "macro", "all"],
                     "description": "Kind of symbol to search for (default: all)"
                 },
                 "limit": {
@@ -245,7 +276,25 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         }),
     });
 
+    tools.push(ToolDefinition {
+		name: "dm_document_symbols".to_string(),
+		description: "List deterministically ordered parsed DreamMaker symbols declared in one contained source file.".to_string(),
+		input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["file_path"]}),
+	});
+    tools.push(ToolDefinition {
+		name: "dm_find_references".to_string(),
+		description: "Find bounded source references for an exact DreamMaker member name without guessing dynamic references.".to_string(),
+		input_schema: json!({"type":"object","properties":{"type_path":{"type":"string"},"member_name":{"type":"string"},"kind":{"type":"string","enum":["call","read","write","type_path","macro_expansion"]},"include_declaration":{"type":"boolean"},"limit":{"type":"integer","minimum":1}},"required":["type_path","member_name"]}),
+	});
+    tools.push(ToolDefinition {
+		name: "dm_find_implementations".to_string(),
+		description: "List type descendants or concrete member implementations in deterministic inheritance order.".to_string(),
+		input_schema: json!({"type":"object","properties":{"type_path":{"type":"string"},"member_name":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["type_path"]}),
+	});
+
     // Compile tool
+    tools.push(ToolDefinition { name:"dm_generate_docs".to_string(), description:"Generate contained DreamMaker HTML documentation with the hash-verified exact-revision dmdoc helper.".to_string(), input_schema:json!({"type":"object","properties":{"output_directory":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["output_directory"]}) });
+
     tools.push(ToolDefinition {
         name: "dm_compile".to_string(),
         description: "Compile the DreamMaker environment using the DM compiler. Returns compiler output and any errors.".to_string(),
@@ -323,6 +372,13 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         }),
     });
 
+    // DMI analysis and mechanical extraction tools
+    tools.push(ToolDefinition { name:"dm_dmi_info".to_string(), description:"Profile DMI metadata, frames, alpha bounds, pixel counts, and content hashes without changing the asset.".to_string(), input_schema:json!({"type":"object","properties":{"dmi_path":{"type":"string"}},"required":["dmi_path"]}) });
+    tools.push(ToolDefinition { name:"dm_compare_dmi_states".to_string(), description:"Compare two complete DMI states for exact, mirrored, rotated, padded, palette, metadata-only, or near-copy changes.".to_string(), input_schema:json!({"type":"object","properties":{"left_dmi_path":{"type":"string"},"left_state":{"type":"string"},"left_duplicate_index":{"type":"integer","minimum":0},"right_dmi_path":{"type":"string"},"right_state":{"type":"string"},"right_duplicate_index":{"type":"integer","minimum":0},"minimum_similarity":{"type":"number","minimum":0.9,"maximum":1.0}},"required":["left_dmi_path","left_state","right_dmi_path","right_state"]}) });
+    tools.push(ToolDefinition { name:"dm_find_dmi_duplicates".to_string(), description:"Scan a contained scope for cross-DMI duplicate states, including common mirrored, padded, palette-swapped, and near-copy changes.".to_string(), input_schema:json!({"type":"object","properties":{"scope_path":{"type":"string"},"include_glob":{"type":"string"},"minimum_similarity":{"type":"number","minimum":0.9,"maximum":1.0},"include_frame_matches":{"type":"boolean"},"max_matches":{"type":"integer","minimum":1}}}) });
+    tools.push(ToolDefinition { name:"dm_audit_icons".to_string(), description:"Correlate parsed icon evidence with bounded DMI duplicate scanning; dynamic references make unused-state evidence best-effort.".to_string(), input_schema:json!({"type":"object","properties":{"scope_path":{"type":"string"},"include_glob":{"type":"string"},"minimum_similarity":{"type":"number","minimum":0.9,"maximum":1.0},"include_unused":{"type":"boolean"},"max_matches":{"type":"integer","minimum":1}}}) });
+    tools.push(ToolDefinition { name:"dm_extract_dmi".to_string(), description:"Mechanically extract one user-selected DMI state, contact sheet, or exact frame without altering the source art.".to_string(), input_schema:json!({"type":"object","properties":{"dmi_path":{"type":"string"},"state":{"type":"string"},"duplicate_index":{"type":"integer","minimum":0},"kind":{"type":"string","enum":["auto","png","gif","contact_sheet","frame"]},"direction":{"type":"string","enum":["north","south","east","west","northeast","northwest","southeast","southwest"]},"frame":{"type":"integer","minimum":0},"output_path":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["dmi_path","state","output_path"]}) });
+
     // Map tools
     tools.push(ToolDefinition {
         name: "dm_render_map".to_string(),
@@ -347,10 +403,52 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "type": "boolean",
                     "description": "Replace an existing output only when explicitly true (default: false)"
                 }
+				,"min":{"type":"array","items":{"type":"integer","minimum":1},"minItems":3,"maxItems":3},
+				"max":{"type":"array","items":{"type":"integer","minimum":1},"minItems":3,"maxItems":3},
+				"enable_passes":{"type":"array","items":{"type":"string"}},
+				"disable_passes":{"type":"array","items":{"type":"string"}}
             },
             "required": ["dmm_path"]
         }),
     });
+    tools.push(ToolDefinition { name:"dm_diff_maps".to_string(), description:"Compare coordinate models between two contained DMM/TGM maps independent of dictionary keys.".to_string(), input_schema:json!({"type":"object","properties":{"left_dmm_path":{"type":"string"},"right_dmm_path":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["left_dmm_path","right_dmm_path"]}) });
+    tools.push(ToolDefinition {
+        name: "dm_list_render_passes".to_string(),
+        description:
+            "List every pinned SpacemanDMM render pass with its description and default state."
+                .to_string(),
+        input_schema: json!({"type":"object","properties":{}}),
+    });
+    tools.push(ToolDefinition {
+		name: "dm_render_maps".to_string(),
+		description: "Render a validated, bounded batch of typed map chunks without exposing raw RenderMany commands.".to_string(),
+		input_schema: json!({
+			"type": "object",
+			"properties": {
+				"files": {"type":"array", "items": {
+					"type":"object",
+					"properties": {
+						"dmm_path":{"type":"string"},
+						"chunks":{"type":"array","items":{
+							"type":"object",
+							"properties":{
+								"output_path":{"type":"string"},
+								"z_level":{"type":"integer","minimum":1},
+								"min":{"type":"array","items":{"type":"integer","minimum":1},"minItems":3,"maxItems":3},
+								"max":{"type":"array","items":{"type":"integer","minimum":1},"minItems":3,"maxItems":3}
+							},
+							"required":["output_path"]
+						}}
+					},
+					"required":["dmm_path","chunks"]
+				}},
+				"enable_passes": {"type":"array", "items":{"type":"string"}},
+				"disable_passes": {"type":"array", "items":{"type":"string"}},
+				"overwrite": {"type":"boolean"}
+			},
+			"required": ["files"]
+		}),
+	});
 
     tools.push(ToolDefinition {
         name: "dm_map_info".to_string(),
@@ -387,6 +485,23 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             "required": ["dmm_path", "type_path"]
         }),
     });
+
+    tools.extend([
+        ToolDefinition { name:"dm_debug_launch".into(), description:"Launch one MCP-owned DreamSeeker session with the fixed, hash-verified auxtools debugger.".into(), input_schema:json!({"type":"object","properties":{"dmb_path":{"type":"string"},"startup_timeout_ms":{"type":"integer","minimum":1,"maximum":60000}},"required":["dmb_path"]}) },
+        ToolDefinition { name:"dm_debug_stop".into(), description:"Disconnect and terminate the active MCP-owned debugger process tree.".into(), input_schema:json!({"type":"object","properties":{}}) },
+        ToolDefinition { name:"dm_debug_set_breakpoints".into(), description:"Replace all source breakpoints for one contained parsed DreamMaker file.".into(), input_schema:debug_source_breakpoint_schema() },
+        ToolDefinition { name:"dm_debug_set_function_breakpoints".into(), description:"Set a bounded complete list of canonical proc breakpoints.".into(), input_schema:debug_breakpoint_schema() },
+        ToolDefinition { name:"dm_debug_set_exception_breakpoints".into(), description:"Enable or disable breaks on DreamMaker runtime exceptions.".into(), input_schema:json!({"type":"object","properties":{"break_on_runtimes":{"type":"boolean"}},"required":["break_on_runtimes"]}) },
+        ToolDefinition { name:"dm_debug_control".into(), description:"Pause, continue, step into, step over, or step out of the active debuggee.".into(), input_schema:json!({"type":"object","properties":{"action":{"type":"string","enum":["pause","continue","step_in","step_over","step_out"]},"thread_id":{"type":"integer","minimum":0}},"required":["action"]}) },
+        ToolDefinition { name:"dm_debug_threads".into(), description:"List the active debuggee's bounded thread/stack inventory.".into(), input_schema:json!({"type":"object","properties":{}}) },
+        ToolDefinition { name:"dm_debug_stack_trace".into(), description:"Read a bounded page of stack frames for a debuggee thread.".into(), input_schema:json!({"type":"object","properties":{"thread_id":{"type":"integer","minimum":0},"start_frame":{"type":"integer","minimum":0},"count":{"type":"integer","minimum":1}},"required":["thread_id"]}) },
+        ToolDefinition { name:"dm_debug_scopes".into(), description:"Read arguments, locals, and globals references for a stack frame.".into(), input_schema:json!({"type":"object","properties":{"frame_id":{"type":"integer","minimum":0}},"required":["frame_id"]}) },
+        ToolDefinition { name:"dm_debug_variables".into(), description:"Read bounded variables for an auxtools variable reference.".into(), input_schema:json!({"type":"object","properties":{"variables_reference":{"type":"integer"}},"required":["variables_reference"]}) },
+        ToolDefinition { name:"dm_debug_evaluate".into(), description:"Execute a bounded DreamMaker expression in the active debuggee.".into(), input_schema:json!({"type":"object","properties":{"expression":{"type":"string","maxLength":16384},"frame_id":{"type":"integer","minimum":0},"context":{"type":"string","enum":["watch","repl","hover"]}},"required":["expression"]}) },
+        ToolDefinition { name:"dm_debug_exception_info".into(), description:"Read the most recent retained runtime exception from the active session.".into(), input_schema:json!({"type":"object","properties":{}}) },
+        ToolDefinition { name:"dm_debug_source".into(), description:"Read the retained auxtools stddef source by issued source reference only.".into(), input_schema:json!({"type":"object","properties":{"source_reference":{"type":"integer","enum":[1]}},"required":["source_reference"]}) },
+        ToolDefinition { name:"dm_debug_wait_for_event".into(), description:"Wait for the next bounded debugger event after an optional sequence.".into(), input_schema:json!({"type":"object","properties":{"kinds":{"type":"array","items":{"type":"string","enum":["breakpoint","step","pause","runtime","output","terminated"]}},"after_sequence":{"type":"integer","minimum":0},"timeout_ms":{"type":"integer","minimum":1,"maximum":300000}}}) },
+    ]);
 
     // Runtime tools
     tools.push(ToolDefinition {
@@ -497,6 +612,14 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     tools
 }
 
+fn debug_breakpoint_schema() -> Value {
+    json!({"type":"object","properties":{"breakpoints":{"type":"array","maxItems":10000,"items":{"type":"object","properties":{"proc_path":{"type":"string"},"override_id":{"type":"integer","minimum":0},"offset":{"type":"integer","minimum":0},"condition":{"type":"string","maxLength":4096}},"required":["proc_path"]}}},"required":["breakpoints"]})
+}
+
+fn debug_source_breakpoint_schema() -> Value {
+    json!({"type":"object","properties":{"source_path":{"type":"string"},"breakpoints":{"type":"array","maxItems":10000,"items":{"type":"object","properties":{"line":{"type":"integer","minimum":1},"condition":{"type":"string","maxLength":4096}},"required":["line"]}}},"required":["source_path","breakpoints"]})
+}
+
 pub fn get_tool_definitions_for(
     mode: CapabilityMode,
     rift_build: RiftBuildAccess,
@@ -507,14 +630,50 @@ pub fn get_tool_definitions_for(
         .collect();
     get_tool_definitions()
         .into_iter()
-        .filter(|definition| active.contains(definition.name.as_str()))
+        .filter(|definition| {
+            definition.name != "dm_generate_docs" && active.contains(definition.name.as_str())
+        })
         .collect()
+}
+
+pub fn get_tool_definitions_for_active(
+    mode: CapabilityMode,
+    rift_build: RiftBuildAccess,
+    dmdoc: bool,
+) -> Vec<ToolDefinition> {
+    get_tool_definitions_for_runtime(mode, rift_build, dmdoc, false)
+}
+
+pub fn get_tool_definitions_for_runtime(
+    mode: CapabilityMode,
+    rift_build: RiftBuildAccess,
+    dmdoc: bool,
+    debugger: bool,
+) -> Vec<ToolDefinition> {
+    let mut tools = get_tool_definitions_for(mode, rift_build);
+    tools.retain(|tool| !tool.name.starts_with("dm_debug_"));
+    if dmdoc && mode == CapabilityMode::Development {
+        if let Some(tool) = get_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == "dm_generate_docs")
+        {
+            tools.push(tool)
+        }
+    }
+    if debugger && mode == CapabilityMode::Development {
+        tools.extend(
+            get_tool_definitions()
+                .into_iter()
+                .filter(|tool| tool.name.starts_with("dm_debug_")),
+        );
+    }
+    tools
 }
 
 /// Call a tool by name with the given arguments
 pub async fn call_tool(
     context: &ToolExecutionContext,
-    state: &mut ServerState,
+    state: &ServerState,
     name: &str,
     mut args: Value,
 ) -> Result<ToolResult> {
@@ -523,6 +682,26 @@ pub async fn call_tool(
             "unsupported_platform",
             "rift_compile is supported only on Windows".to_string(),
             None,
+            "Run rift_compile from an approved Windows Meridian-MCP installation.",
+            json!({ "tool": name, "platform": std::env::consts::OS }),
+        ));
+    }
+    if name == "dm_generate_docs" && context.dmdoc_helper.is_none() {
+        return Ok(policy_error(
+            "tool_not_available",
+            "dm_generate_docs requires a verified startup helper".into(),
+            None,
+            "Set MERIDIAN_MCP_HELPER_MANIFEST to a valid exact-revision helper manifest.",
+            json!({"tool":name}),
+        ));
+    }
+    if name.starts_with("dm_debug_") && context.debugger.is_none() {
+        return Ok(policy_error(
+            "tool_not_available",
+            "debugger tools require a verified auxtools startup configuration".into(),
+            None,
+            "Start Meridian-MCP in development mode with MERIDIAN_MCP_DEBUGGER=auxtools.",
+            json!({"tool":name}),
         ));
     }
     if !contracts_for_configuration(context.mode, context.rift_build)
@@ -533,6 +712,14 @@ pub async fn call_tool(
             "tool_not_available",
             format!("{name} is not available in {:?} mode", context.mode),
             None,
+            "Use a tool advertised by tools/list for the immutable startup configuration.",
+            json!({
+                "tool": name,
+                "mode": match context.mode {
+                    CapabilityMode::Analysis => "analysis",
+                    CapabilityMode::Development => "development",
+                },
+            }),
         ));
     }
     if let Err(error) = contain_arguments(&context.policy, name, &mut args) {
@@ -540,6 +727,11 @@ pub async fn call_tool(
             error.code(),
             error.to_string(),
             Some(error.path()),
+            "Use a contained path and only startup-allowlisted executables.",
+            json!({
+                "path": error.path().display().to_string(),
+                "policy_code": error.code(),
+            }),
         ));
     }
     match name {
@@ -555,15 +747,46 @@ pub async fn call_tool(
         // Analysis tools
         "dm_check_errors" => analysis::check_errors(state, args).await,
         "dm_get_definition" => analysis::get_definition(state, args).await,
+        "dm_generate_docs" => docs::generate(context, state, args).await,
+        "dm_document_symbols" => language::document_symbols(state, args).await,
+        "dm_find_references" => language::find_references(state, args).await,
+        "dm_find_implementations" => language::find_implementations(state, args).await,
+        "dm_dmi_info" => dmi::info(state, args).await,
+        "dm_compare_dmi_states" => dmi::compare(state, args).await,
+        "dm_find_dmi_duplicates" => dmi::find_duplicates(state, args).await,
+        "dm_audit_icons" => dmi::audit_icons(state, args).await,
+        "dm_extract_dmi" => dmi::extract(context, state, args).await,
 
         // Compile tool
         "dm_compile" => compile::compile(args).await,
         "rift_compile" => rift::compile(context, state, args).await,
 
         // Map tools
-        "dm_render_map" => map::render_map(state, args).await,
+        "dm_render_map" => map::render_map(context, state, args).await,
         "dm_map_info" => map::map_info(args).await,
         "dm_find_on_map" => map::find_on_map(args).await,
+        "dm_diff_maps" => map::diff_maps(args).await,
+        "dm_list_render_passes" => map::list_render_passes().await,
+        "dm_render_maps" => map::render_maps(context, state, args).await,
+
+        "dm_debug_launch" => debugger::launch(context, state, args).await,
+        "dm_debug_stop" => debugger::stop(state).await,
+        "dm_debug_set_breakpoints" => debugger::set_breakpoints(state, args).await,
+        "dm_debug_set_function_breakpoints" => {
+            debugger::set_function_breakpoints(state, args).await
+        }
+        "dm_debug_set_exception_breakpoints" => {
+            debugger::set_exception_breakpoints(state, args).await
+        }
+        "dm_debug_control" => debugger::control(state, args).await,
+        "dm_debug_threads" => debugger::threads(state).await,
+        "dm_debug_stack_trace" => debugger::stack_trace(state, args).await,
+        "dm_debug_scopes" => debugger::scopes(state, args).await,
+        "dm_debug_variables" => debugger::variables(state, args).await,
+        "dm_debug_evaluate" => debugger::evaluate(state, args).await,
+        "dm_debug_exception_info" => debugger::exception_info(state).await,
+        "dm_debug_source" => debugger::source(state, args).await,
+        "dm_debug_wait_for_event" => debugger::wait_for_event(state, args).await,
 
         // Runtime tools
         "dm_run" => runtime::run(state, args).await,
@@ -584,10 +807,29 @@ fn contain_arguments(
         "dm_parse_environment" | "dm_compile" => {
             canonical_argument(policy, args, "dme_path", false)?
         }
+        "dm_document_symbols" => canonical_argument(policy, args, "file_path", false)?,
+        "dm_dmi_info" => canonical_argument(policy, args, "dmi_path", false)?,
+        "dm_compare_dmi_states" => {
+            canonical_argument(policy, args, "left_dmi_path", false)?;
+            canonical_argument(policy, args, "right_dmi_path", false)?;
+        }
+        "dm_find_dmi_duplicates" | "dm_audit_icons" if args.get("scope_path").is_some() => {
+            canonical_argument(policy, args, "scope_path", false)?
+        }
+        "dm_extract_dmi" => {
+            canonical_argument(policy, args, "dmi_path", false)?;
+        }
+        "dm_generate_docs" => {}
         "dm_render_map" | "dm_map_info" | "dm_find_on_map" => {
             canonical_argument(policy, args, "dmm_path", false)?
         }
+        "dm_diff_maps" => {
+            canonical_argument(policy, args, "left_dmm_path", false)?;
+            canonical_argument(policy, args, "right_dmm_path", false)?;
+        }
         "dm_run" => canonical_argument(policy, args, "dmb_path", true)?,
+        "dm_debug_launch" => canonical_argument(policy, args, "dmb_path", true)?,
+        "dm_debug_set_breakpoints" => canonical_argument(policy, args, "source_path", false)?,
         _ => {}
     }
     if name == "dm_compile" {
@@ -614,6 +856,26 @@ fn contain_arguments(
             .unwrap_or(false);
         let output = policy.output_path(output, overwrite)?;
         args["output_path"] = Value::String(output.display().to_string());
+    }
+    if name == "dm_extract_dmi" {
+        if let Some(output) = args.get("output_path").and_then(Value::as_str) {
+            let overwrite = args
+                .get("overwrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let output = policy.output_path(output, overwrite)?;
+            args["output_path"] = Value::String(output.display().to_string());
+        }
+    }
+    if name == "dm_generate_docs" {
+        if let Some(output) = args.get("output_directory").and_then(Value::as_str) {
+            let overwrite = args
+                .get("overwrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let output = policy.output_path(output, overwrite)?;
+            args["output_directory"] = Value::String(output.display().to_string());
+        }
     }
     Ok(())
 }
@@ -643,11 +905,19 @@ fn canonical_optional_argument(
     canonical_argument(policy, args, key, false)
 }
 
-fn policy_error(code: &str, message: String, path: Option<&std::path::Path>) -> ToolResult {
+fn policy_error(
+    code: &str,
+    message: String,
+    path: Option<&std::path::Path>,
+    recovery: &str,
+    details: Value,
+) -> ToolResult {
     ToolResult::error(
         json!({
             "code": code,
             "message": message,
+            "recovery": recovery,
+            "details": details,
             "path": path.map(|path| path.display().to_string())
         })
         .to_string(),

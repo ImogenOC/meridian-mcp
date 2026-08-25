@@ -290,17 +290,17 @@ async fn drain_output(
 }
 
 #[cfg(not(windows))]
-struct ProcessContainment;
+pub(crate) struct ProcessContainment;
 
 #[cfg(not(windows))]
 impl ProcessContainment {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         Ok(Self)
     }
-    fn assign(&self, _process_id: u32) -> Result<()> {
+    pub(crate) fn assign(&self, _process_id: u32) -> Result<()> {
         Ok(())
     }
-    fn terminate(&self, _exit_code: u32) -> Result<()> {
+    pub(crate) fn terminate(&self, _exit_code: u32) -> Result<()> {
         Ok(())
     }
     fn cpu_time_100ns(&self) -> Option<u64> {
@@ -312,7 +312,7 @@ impl ProcessContainment {
 }
 
 #[cfg(windows)]
-struct ProcessContainment {
+pub(crate) struct ProcessContainment {
     handle: windows_sys::Win32::Foundation::HANDLE,
 }
 
@@ -323,7 +323,7 @@ unsafe impl Sync for ProcessContainment {}
 
 #[cfg(windows)]
 impl ProcessContainment {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         use std::mem::size_of;
         use std::ptr;
         use windows_sys::Win32::System::JobObjects::{
@@ -353,7 +353,7 @@ impl ProcessContainment {
         }
     }
 
-    fn assign(&self, process_id: u32) -> Result<()> {
+    pub(crate) fn assign(&self, process_id: u32) -> Result<()> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
         use windows_sys::Win32::System::Threading::{
@@ -382,7 +382,7 @@ impl ProcessContainment {
         }
     }
 
-    fn terminate(&self, exit_code: u32) -> Result<()> {
+    pub(crate) fn terminate(&self, exit_code: u32) -> Result<()> {
         let terminated = unsafe {
             windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, exit_code)
         };

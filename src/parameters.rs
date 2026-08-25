@@ -94,6 +94,25 @@ pub struct GetDefinitionParams {
     pub member_name: Option<String>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocumentSymbolsParams {
+    pub file_path: PathBuf,
+    pub limit: Option<usize>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindReferencesParams {
+    pub type_path: String,
+    pub member_name: Option<String>,
+    pub kind: Option<String>,
+    pub include_declaration: Option<bool>,
+    pub limit: Option<usize>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindImplementationsParams {
+    pub type_path: String,
+    pub member_name: Option<String>,
+    pub limit: Option<usize>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CompileParams {
     pub dme_path: PathBuf,
     pub compiler_path: Option<PathBuf>,

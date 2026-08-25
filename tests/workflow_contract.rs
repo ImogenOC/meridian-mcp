@@ -14,7 +14,7 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
         "AphelionDevelopment/Meridian-Rift",
         "path: integration/Meridian-Rift",
         "scripts/install-byond.ps1",
-        "cargo build --release",
+        "cargo build --locked --release",
         "scripts/run-byond-integration.ps1",
         "if: always()",
         "actions/upload-artifact@v6",
@@ -62,11 +62,53 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
 }
 
 #[test]
+fn ubuntu_meridian_analysis_is_real_repository_and_byond_free() {
+    let workflow = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+    for required in [
+        "ubuntu-meridian-analysis:",
+        "runs-on: ubuntu-24.04",
+        "AphelionDevelopment/Meridian-Rift",
+        "SpaceManiac/SpacemanDMM",
+        "scripts/build-spacemandmm-helpers.ps1",
+        "scripts/run-meridian-analysis-compatibility.ps1",
+        "ubuntu-meridian-analysis-evidence",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "Ubuntu analysis workflow is missing {required}"
+        );
+    }
+    let script = fs::read_to_string("scripts/run-meridian-analysis-compatibility.ps1").unwrap();
+    for forbidden in [
+        "dm.exe",
+        "DreamDaemon",
+        "DreamSeeker",
+        "BUILD.cmd",
+        "RIFT_BUILD.cmd",
+        "fetch-auxtools",
+    ] {
+        assert!(
+            !script.contains(forbidden),
+            "Ubuntu analysis script contains forbidden BYOND operation {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn repository_pins_the_ci_rust_toolchain() {
     let toolchain = fs::read_to_string("rust-toolchain.toml")
         .expect("repository Rust toolchain should be pinned");
-    assert!(toolchain.contains("channel = \"1.88.0\""));
+    assert!(toolchain.contains("channel = \"1.95.0\""));
     assert!(toolchain.contains("components = [\"rustfmt\", \"clippy\"]"));
+}
+
+#[test]
+fn portable_ci_audits_the_checked_in_spacemandmm_capability_registry() {
+    let workflow = fs::read_to_string(".github/workflows/ci.yml")
+        .expect("portable CI workflow should be readable");
+
+    assert!(workflow.contains("scripts/audit-spacemandmm-capabilities.ps1"));
+    assert!(workflow.contains("-Check"));
 }
 
 #[test]

@@ -1,4 +1,7 @@
 /target
+/integration/
+/helpers/bin/
+/helpers/auxtools/
 *.log
 *.dmb
 *.dyn.rsc

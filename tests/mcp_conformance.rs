@@ -22,8 +22,31 @@ fn mode_inventories_are_exact_and_exclude_removed_protocol() {
     let development = server("development", RiftBuildAccess::Disabled).tool_names();
     let development_offline = server("development", RiftBuildAccess::Offline).tool_names();
     let development_network = server("development", RiftBuildAccess::Network).tool_names();
-    assert_eq!(analysis.len(), 11);
-    assert_eq!(development.len(), 18);
+    assert_eq!(analysis.len(), 20);
+    assert_eq!(development.len(), 29);
+    for tool in [
+        "dm_document_symbols",
+        "dm_find_references",
+        "dm_find_implementations",
+        "dm_dmi_info",
+        "dm_compare_dmi_states",
+        "dm_find_dmi_duplicates",
+        "dm_audit_icons",
+        "dm_diff_maps",
+        "dm_list_render_passes",
+    ] {
+        assert!(
+            analysis.contains(&tool.to_owned()),
+            "missing analysis tool {tool}"
+        );
+    }
+    for tool in ["dm_extract_dmi", "dm_render_maps"] {
+        assert!(!analysis.contains(&tool.to_owned()));
+        assert!(
+            development.contains(&tool.to_owned()),
+            "missing development tool {tool}"
+        );
+    }
     assert!(analysis.contains(&"dm_parse_environment".to_owned()));
     assert!(!analysis.contains(&"dm_compile".to_owned()));
     assert!(development.contains(&"dm_compile".to_owned()));

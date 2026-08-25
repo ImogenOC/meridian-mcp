@@ -41,7 +41,7 @@ struct ArtifactPair {
 
 pub async fn compile(
     context: &ToolExecutionContext,
-    state: &mut ServerState,
+    state: &ServerState,
     args: Value,
 ) -> Result<ToolResult> {
     let params: RiftCompileParams = match serde_json::from_value(args) {
@@ -74,8 +74,15 @@ pub async fn compile(
         ));
     }
 
-    let generation = state.state_generation();
-    let Some(profile) = state.project_profile().cloned() else {
+    let Ok(snapshot) = state.snapshot().await else {
+        return Ok(ToolResult::structured_error(
+            "project_not_parsed",
+            "No parsed project profile is active.",
+            "Call dm_parse_environment for the contained Meridian-Rift tgstation.dme first.",
+        ));
+    };
+    let generation = snapshot.generation;
+    let Some(profile) = snapshot.project_profile.clone() else {
         return Ok(ToolResult::structured_error(
             "project_not_parsed",
             "No parsed project profile is active.",
@@ -118,7 +125,7 @@ pub async fn compile(
             ));
         }
     };
-    if state.state_generation() != generation {
+    if state.state_generation().await != generation {
         return Ok(ToolResult::structured_error(
             "state_generation_changed",
             "The active parsed project changed during build preparation.",
@@ -189,7 +196,7 @@ pub async fn compile(
             ));
         }
     };
-    if state.state_generation() != generation {
+    if state.state_generation().await != generation {
         return Ok(ToolResult::structured_error(
             "state_generation_changed",
             "The active parsed project changed while the full build was running.",

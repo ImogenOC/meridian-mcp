@@ -16,16 +16,16 @@ async fn owned_language_and_map_fixtures_exercise_real_adapters() {
         CapabilityMode::Analysis,
         PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
     );
-    let mut state = ServerState::new();
+    let state = ServerState::new();
     let parsed = call_tool(
         &context,
-        &mut state,
+        &state,
         "dm_parse_environment",
         json!({"dme_path": root.join("language/fixture.dme")}),
     )
     .await
     .unwrap();
     assert_eq!(payload(parsed)["success"], true);
-    let found = call_tool(&context, &mut state, "dm_find_on_map", json!({"dmm_path": root.join("maps/fixture.dmm"), "type_path": "/obj/item/meridian_fixture"})).await.unwrap();
+    let found = call_tool(&context, &state, "dm_find_on_map", json!({"dmm_path": root.join("maps/fixture.dmm"), "type_path": "/obj/item/meridian_fixture"})).await.unwrap();
     assert_eq!(payload(found)["count"], 2);
 }

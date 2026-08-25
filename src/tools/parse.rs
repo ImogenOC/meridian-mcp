@@ -3,16 +3,21 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use tracing::info;
 
-use dreammaker::Context;
+use dreammaker::{Context, Parser, Preprocessor};
 
+use crate::analysis_snapshot::{
+    collect_diagnostics, configured_diagnostic_rules, AnalysisBuild, AnalysisContext,
+    AnalysisSnapshot,
+};
 use crate::mcp::ToolResult;
+use crate::result::{structured_error, ToolErrorCode};
 use crate::search::SearchIndex;
 use crate::source::extract_source;
 use crate::state::ServerState;
 use crate::{PathPolicy, ProjectProfile};
 
 /// Parse a DreamMaker environment
-pub async fn parse_environment(state: &mut ServerState, args: Value) -> Result<ToolResult> {
+pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolResult> {
     let dme_path = args
         .get("dme_path")
         .and_then(|v| v.as_str())
@@ -25,68 +30,117 @@ pub async fn parse_environment(state: &mut ServerState, args: Value) -> Result<T
 
     info!("Parsing environment: {}", dme_path);
 
-    let context = Context::default();
-    match context.parse_environment(&path) {
-        Ok(objtree) => {
-            let type_count = objtree.iter_types().count();
-            let search_index = SearchIndex::from_object_tree(&objtree, &context, &path);
-            let indexed_document_count = search_index.len();
+    let prior = state.active_snapshot().await;
+    let parse_path = path.clone();
+    let parsed = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut context = Context::default();
+        context.autodetect_config(&parse_path);
+        let mut preprocessor = Preprocessor::new(&context, parse_path.clone())?;
+        let (fatal, objtree) = {
+            let mut parser = Parser::new(&context, &mut preprocessor);
+            parser.enable_procs();
+            parser.parse_object_tree_2()
+        };
+        let defines = preprocessor.finalize();
+        if fatal {
+            let diagnostics = context
+                .errors()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(anyhow!(
+                "DreamMaker parser reported a fatal error:\n{diagnostics}"
+            ));
+        }
 
-            let profile = path.parent().and_then(|root| {
-                PathPolicy::new(vec![root.to_owned()], Vec::new())
-                    .ok()
-                    .and_then(|policy| ProjectProfile::discover(&policy, &path).ok())
-            });
-            state.replace_environment(path, context, objtree, search_index, profile);
+        dreamchecker::run(&context, &objtree);
+        let configured_rules = configured_diagnostic_rules(&parse_path);
+        let diagnostics = collect_diagnostics(&context, &configured_rules);
+        let type_count = objtree.iter_types().count();
+        let search_index = SearchIndex::from_object_tree(&objtree, &context, &parse_path);
+        let indexed_document_count = search_index.len();
+        let profile = parse_path.parent().and_then(|root| {
+            PathPolicy::new(vec![root.to_owned()], Vec::new())
+                .ok()
+                .and_then(|policy| ProjectProfile::discover(&policy, &parse_path).ok())
+        });
+        let build = AnalysisBuild::from_parse(
+            parse_path,
+            &context,
+            objtree,
+            defines,
+            search_index,
+            diagnostics,
+            profile,
+        );
+        Ok((build, type_count, indexed_document_count))
+    })
+    .await;
 
+    match parsed {
+        Ok(Ok((build, type_count, indexed_document_count))) => {
+            let snapshot = state.install_analysis(build).await;
             Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
                 "success": true,
                 "environment": dme_path,
                 "total_types": type_count,
                 "indexed_symbols": indexed_document_count,
-                "state_generation": state.state_generation()
+                "state_generation": snapshot.generation
             }))?))
         }
-        Err(error) => Ok(ToolResult::error(serde_json::to_string_pretty(&json!({
-            "success": false,
-            "error": error.to_string(),
-            "state_preserved": true,
-            "active_environment": state.environment_path.as_ref().map(|path| path.display().to_string()),
-            "state_generation": state.state_generation()
-        }))?)),
+        Ok(Err(error)) => parse_failure(state, prior.as_deref(), error.to_string()).await,
+        Err(error) => {
+            parse_failure(
+                state,
+                prior.as_deref(),
+                format!("parser worker failed: {error}"),
+            )
+            .await
+        }
     }
 }
 
-/// Helper to get file path string from a location
-fn get_file_path(context: &Context, file_id: dreammaker::FileId) -> String {
-    let path_ref = context.file_path(file_id);
-    (*path_ref).display().to_string()
+async fn parse_failure(
+    state: &ServerState,
+    prior: Option<&AnalysisSnapshot>,
+    error: String,
+) -> Result<ToolResult> {
+    Ok(structured_error(
+        ToolErrorCode::InvalidInput,
+        error,
+        Some("Correct the DreamMaker parse errors and run dm_parse_environment again.".to_owned()),
+        json!({
+        "state_preserved": true,
+        "active_environment": prior.map(|snapshot| snapshot.environment_path.display().to_string()),
+        "state_generation": state.state_generation().await
+        }),
+    ))
 }
 
-fn resolve_source_path(state: &ServerState, file_path: &str) -> PathBuf {
+/// Helper to get file path string from a location
+fn get_file_path(context: &AnalysisContext, file_id: dreammaker::FileId) -> String {
+    context.file_path(file_id).display().to_string()
+}
+
+fn resolve_source_path(snapshot: &AnalysisSnapshot, file_path: &str) -> PathBuf {
     let path = PathBuf::from(file_path);
     if path.is_absolute() || path.exists() {
         return path;
     }
 
-    state
+    snapshot
         .environment_path
-        .as_ref()
-        .and_then(|environment| environment.parent())
+        .parent()
         .map(|root| root.join(&path))
         .unwrap_or(path)
 }
 
 /// Get type information
-pub async fn get_type(state: &mut ServerState, args: Value) -> Result<ToolResult> {
-    let objtree = state
-        .objtree
-        .as_ref()
-        .ok_or_else(|| anyhow!("No environment loaded. Call dm_parse_environment first."))?;
-    let context = state
-        .context
-        .as_ref()
-        .ok_or_else(|| anyhow!("No context available"))?;
+pub async fn get_type(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let snapshot = state.snapshot().await?;
+    let objtree = &snapshot.objtree;
+    let context = &snapshot.context;
 
     let type_path = args
         .get("type_path")
@@ -151,15 +205,10 @@ pub async fn get_type(state: &mut ServerState, args: Value) -> Result<ToolResult
 }
 
 /// Get proc information
-pub async fn get_proc(state: &mut ServerState, args: Value) -> Result<ToolResult> {
-    let objtree = state
-        .objtree
-        .as_ref()
-        .ok_or_else(|| anyhow!("No environment loaded. Call dm_parse_environment first."))?;
-    let context = state
-        .context
-        .as_ref()
-        .ok_or_else(|| anyhow!("No context available"))?;
+pub async fn get_proc(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let snapshot = state.snapshot().await?;
+    let objtree = &snapshot.objtree;
+    let context = &snapshot.context;
 
     let type_path = args
         .get("type_path")
@@ -219,7 +268,7 @@ pub async fn get_proc(state: &mut ServerState, args: Value) -> Result<ToolResult
                                 ),
                                 "has_body": v.code.is_some() || v.body_range.is_some(),
                                 "source": extract_source(
-                                    resolve_source_path(state, &file_path).to_string_lossy().as_ref(),
+                                    resolve_source_path(&snapshot, &file_path).to_string_lossy().as_ref(),
                                     v.location.line,
                                 )
                             })
@@ -245,15 +294,10 @@ pub async fn get_proc(state: &mut ServerState, args: Value) -> Result<ToolResult
 }
 
 /// Get variable information
-pub async fn get_var(state: &mut ServerState, args: Value) -> Result<ToolResult> {
-    let objtree = state
-        .objtree
-        .as_ref()
-        .ok_or_else(|| anyhow!("No environment loaded. Call dm_parse_environment first."))?;
-    let context = state
-        .context
-        .as_ref()
-        .ok_or_else(|| anyhow!("No context available"))?;
+pub async fn get_var(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let snapshot = state.snapshot().await?;
+    let objtree = &snapshot.objtree;
+    let context = &snapshot.context;
 
     let type_path = args
         .get("type_path")
@@ -296,11 +340,9 @@ pub async fn get_var(state: &mut ServerState, args: Value) -> Result<ToolResult>
 }
 
 /// List types in the object tree
-pub async fn list_types(state: &mut ServerState, args: Value) -> Result<ToolResult> {
-    let objtree = state
-        .objtree
-        .as_ref()
-        .ok_or_else(|| anyhow!("No environment loaded. Call dm_parse_environment first."))?;
+pub async fn list_types(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let snapshot = state.snapshot().await?;
+    let objtree = &snapshot.objtree;
 
     let prefix = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -337,15 +379,10 @@ pub async fn list_types(state: &mut ServerState, args: Value) -> Result<ToolResu
 }
 
 /// Search for symbols
-pub async fn search_symbols(state: &mut ServerState, args: Value) -> Result<ToolResult> {
-    let objtree = state
-        .objtree
-        .as_ref()
-        .ok_or_else(|| anyhow!("No environment loaded. Call dm_parse_environment first."))?;
-    let context = state
-        .context
-        .as_ref()
-        .ok_or_else(|| anyhow!("No context available"))?;
+pub async fn search_symbols(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let snapshot = state.snapshot().await?;
+    let objtree = &snapshot.objtree;
+    let context = &snapshot.context;
 
     let query = args
         .get("query")
@@ -358,6 +395,17 @@ pub async fn search_symbols(state: &mut ServerState, args: Value) -> Result<Tool
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
     let mut results: Vec<Value> = Vec::new();
+
+    if kind == "all" || kind == "macro" {
+        for symbol in snapshot.language_index.macros() {
+            if results.len() >= limit {
+                break;
+            }
+            if symbol.name.to_lowercase().contains(&query) {
+                results.push(json!({"kind":"macro","name":symbol.name,"location":format!("{}:{}", symbol.file, symbol.line),"file":symbol.file,"line":symbol.line,"column":symbol.column}));
+            }
+        }
+    }
 
     for ty in objtree.iter_types() {
         if results.len() >= limit {
@@ -480,8 +528,8 @@ mod tests {
 
     async fn parsed_fixture() -> (PathBuf, ServerState) {
         let (directory, dme_path) = write_environment_fixture();
-        let mut state = ServerState::new();
-        let result = parse_environment(&mut state, json!({"dme_path": dme_path}))
+        let state = ServerState::new();
+        let result = parse_environment(&state, json!({"dme_path": dme_path}))
             .await
             .unwrap();
         assert_eq!(result.is_error, None, "parse result: {result:?}");
@@ -490,8 +538,8 @@ mod tests {
 
     #[tokio::test]
     async fn type_inspection_returns_docs_and_direct_children() {
-        let (directory, mut state) = parsed_fixture().await;
-        let result = get_type(&mut state, json!({"type_path": "/datum/meridian_fixture"}))
+        let (directory, state) = parsed_fixture().await;
+        let result = get_type(&state, json!({"type_path": "/datum/meridian_fixture"}))
             .await
             .unwrap();
         let payload = result_json(&result);
@@ -510,9 +558,9 @@ mod tests {
 
     #[tokio::test]
     async fn proc_inspection_reports_docs_and_a_parsed_body() {
-        let (directory, mut state) = parsed_fixture().await;
+        let (directory, state) = parsed_fixture().await;
         let result = get_proc(
-            &mut state,
+            &state,
             json!({
                 "type_path": "/datum/meridian_fixture",
                 "proc_name": "do_work"
@@ -533,9 +581,9 @@ mod tests {
 
     #[tokio::test]
     async fn proc_inspection_resolves_inherited_procs() {
-        let (directory, mut state) = parsed_fixture().await;
+        let (directory, state) = parsed_fixture().await;
         let result = get_proc(
-            &mut state,
+            &state,
             json!({
                 "type_path": "/datum/meridian_fixture/child",
                 "proc_name": "do_work"
@@ -555,9 +603,9 @@ mod tests {
 
     #[tokio::test]
     async fn variable_inspection_returns_declared_type_and_docs() {
-        let (directory, mut state) = parsed_fixture().await;
+        let (directory, state) = parsed_fixture().await;
         let result = get_var(
-            &mut state,
+            &state,
             json!({
                 "type_path": "/datum/meridian_fixture",
                 "var_name": "items"
@@ -579,28 +627,36 @@ mod tests {
     #[tokio::test]
     async fn failed_reparse_preserves_the_active_project_profile() {
         let (directory, dme_path) = write_environment_fixture();
-        let mut state = ServerState::new();
-        let first = parse_environment(&mut state, json!({"dme_path": dme_path}))
+        let state = ServerState::new();
+        let first = parse_environment(&state, json!({"dme_path": dme_path}))
             .await
             .unwrap();
         assert_eq!(first.is_error, None);
-        let generation = state.state_generation();
+        let generation = state.state_generation().await;
         let active_dme = state
-            .project_profile()
+            .snapshot()
+            .await
+            .unwrap()
+            .project_profile
+            .as_ref()
             .expect("successful parse should discover a profile")
             .dme_path()
             .to_owned();
 
         let missing_dme = directory.join("missing.dme");
-        let failed = parse_environment(&mut state, json!({"dme_path": missing_dme}))
+        let failed = parse_environment(&state, json!({"dme_path": missing_dme}))
             .await
             .unwrap();
 
         assert_eq!(failed.is_error, Some(true));
-        assert_eq!(state.state_generation(), generation);
+        assert_eq!(state.state_generation().await, generation);
         assert_eq!(
             state
-                .project_profile()
+                .snapshot()
+                .await
+                .unwrap()
+                .project_profile
+                .as_ref()
                 .expect("failed parse should preserve the prior profile")
                 .dme_path(),
             active_dme

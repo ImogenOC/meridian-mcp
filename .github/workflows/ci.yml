@@ -18,12 +18,26 @@ jobs:
             os: ubuntu-24.04
             binary: ./target/release/meridian-mcp
     runs-on: ${{ matrix.os }}
+    env:
+      MERIDIAN_MCP_HELPER_MANIFEST: ${{ github.workspace }}/integration/helpers-manifest.json
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - name: Check out exact SpacemanDMM helper source
+        uses: actions/checkout@v7
+        with:
+          repository: SpaceManiac/SpacemanDMM
+          ref: 351ddc0ffb2439876d4565ce5130bb6b027ee605
+          path: integration/SpacemanDMM
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Build exact dmdoc helper
+        shell: pwsh
+        run: ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
+      - name: Audit SpacemanDMM capability registry
+        shell: pwsh
+        run: ./scripts/audit-spacemandmm-capabilities.ps1 -Check
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
@@ -49,3 +63,36 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  ubuntu-meridian-analysis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: SpaceManiac/SpacemanDMM
+          ref: 351ddc0ffb2439876d4565ce5130bb6b027ee605
+          path: integration/SpacemanDMM
+      - uses: actions/checkout@v7
+        with:
+          repository: AphelionDevelopment/Meridian-Rift
+          path: integration/Meridian-Rift
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build exact dmdoc helper and release MCP
+        shell: pwsh
+        run: |
+          ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
+          $env:MERIDIAN_MCP_HELPER_MANIFEST = "$env:GITHUB_WORKSPACE/integration/helpers-manifest.json"
+          cargo build --locked --release
+      - name: Run real Meridian-Rift analysis compatibility
+        shell: pwsh
+        run: ./scripts/run-meridian-analysis-compatibility.ps1 -MeridianRiftRoot ./integration/Meridian-Rift -BinaryPath ./target/release/meridian-mcp -HelperManifestPath ./integration/helpers-manifest.json -EvidencePath ./integration/evidence/ubuntu-analysis.json
+      - name: Upload Ubuntu analysis evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ubuntu-meridian-analysis-evidence
+          path: integration/evidence/*.json
+          if-no-files-found: warn

@@ -91,13 +91,13 @@ async fn rift_compile_requires_a_parsed_qualified_project() {
     let context = context(&root, vec![compiler], RiftBuildAccess::Offline);
     let mut state = ServerState::new();
 
-    let before_parse = call_tool(&context, &mut state, "rift_compile", json!({}))
+    let before_parse = call_tool(&context, &state, "rift_compile", json!({}))
         .await
         .unwrap();
     assert!(text(&before_parse).contains("project_not_parsed"));
 
     parse_project(&context, &mut state, &dme).await;
-    let unqualified = call_tool(&context, &mut state, "rift_compile", json!({}))
+    let unqualified = call_tool(&context, &state, "rift_compile", json!({}))
         .await
         .unwrap();
     assert!(text(&unqualified).contains("project_not_qualified"));
@@ -112,7 +112,7 @@ async fn rift_compile_requires_exactly_one_startup_compiler() {
     let mut state = ServerState::new();
     let no_compiler = context(&root, Vec::new(), RiftBuildAccess::Offline);
     parse_project(&no_compiler, &mut state, &dme).await;
-    let missing = call_tool(&no_compiler, &mut state, "rift_compile", json!({}))
+    let missing = call_tool(&no_compiler, &state, "rift_compile", json!({}))
         .await
         .unwrap();
     assert!(text(&missing).contains("compiler_not_configured"));
@@ -121,7 +121,7 @@ async fn rift_compile_requires_exactly_one_startup_compiler() {
     let second = root.join("second-compiler.exe");
     std::fs::copy(&first, &second).unwrap();
     let ambiguous = context(&root, vec![first, second], RiftBuildAccess::Offline);
-    let result = call_tool(&ambiguous, &mut state, "rift_compile", json!({}))
+    let result = call_tool(&ambiguous, &state, "rift_compile", json!({}))
         .await
         .unwrap();
     assert!(text(&result).contains("compiler_ambiguous"));
@@ -139,7 +139,7 @@ async fn offline_and_argument_policy_fail_before_unapproved_execution() {
 
     let denied = call_tool(
         &context,
-        &mut state,
+        &state,
         "rift_compile",
         json!({"network_mode": "allow"}),
     )
@@ -150,7 +150,7 @@ async fn offline_and_argument_policy_fail_before_unapproved_execution() {
 
     let unknown = call_tool(
         &context,
-        &mut state,
+        &state,
         "rift_compile",
         json!({"script": "OTHER.cmd", "arguments": ["lint"]}),
     )
@@ -159,7 +159,7 @@ async fn offline_and_argument_policy_fail_before_unapproved_execution() {
     assert!(text(&unknown).contains("invalid_arguments"));
     assert!(!root.join("wrapper.marker").exists());
 
-    let cold = call_tool(&context, &mut state, "rift_compile", json!({}))
+    let cold = call_tool(&context, &state, "rift_compile", json!({}))
         .await
         .unwrap();
     assert!(text(&cold).contains("offline_preflight_failed"));
@@ -179,7 +179,7 @@ async fn fixed_wrapper_produces_fresh_artifact_evidence() {
 
     let result = call_tool(
         &context,
-        &mut state,
+        &state,
         "rift_compile",
         json!({"capture_network": true}),
     )
@@ -213,7 +213,7 @@ async fn force_rebuild_rejects_unchanged_artifacts() {
 
     let result = call_tool(
         &context,
-        &mut state,
+        &state,
         "rift_compile",
         json!({"force_rebuild": true}),
     )
@@ -238,7 +238,7 @@ async fn exact_dm_cache_marker_supports_a_non_forced_cache_hit() {
     let mut state = ServerState::new();
     parse_project(&context, &mut state, &dme).await;
 
-    let result = call_tool(&context, &mut state, "rift_compile", json!({}))
+    let result = call_tool(&context, &state, "rift_compile", json!({}))
         .await
         .unwrap();
     let payload = payload(&result);

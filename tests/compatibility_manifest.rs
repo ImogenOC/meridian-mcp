@@ -10,7 +10,7 @@ fn manifest() -> Value {
 #[test]
 fn manifest_is_versioned_unique_bounded_and_covers_analysis_contract() {
     let manifest = manifest();
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["schema_version"], 2);
 
     let sections = [
         "types",
@@ -20,6 +20,9 @@ fn manifest_is_versioned_unique_bounded_and_covers_analysis_contract() {
         "symbol_searches",
         "context_searches",
         "definitions",
+        "document_symbols",
+        "references",
+        "implementations",
     ];
     for section in sections {
         let cases = manifest[section]
@@ -48,6 +51,23 @@ fn manifest_is_versioned_unique_bounded_and_covers_analysis_contract() {
         );
     }
 
+    for section in [
+        "diagnostics",
+        "dmi_scan",
+        "map_diff",
+        "render",
+        "docs",
+        "debugger",
+    ] {
+        assert!(manifest[section].is_object(), "{section} must be an object");
+    }
+    for section in ["dmis", "maps"] {
+        assert!(
+            !manifest[section].as_array().unwrap().is_empty(),
+            "{section} must not be empty"
+        );
+    }
+
     let covered_tools = [
         "dm_parse_environment",
         "dm_get_type",
@@ -57,6 +77,19 @@ fn manifest_is_versioned_unique_bounded_and_covers_analysis_contract() {
         "dm_search_symbols",
         "dm_search_context",
         "dm_get_definition",
+        "dm_document_symbols",
+        "dm_find_references",
+        "dm_find_implementations",
+        "dm_check_errors",
+        "dm_dmi_info",
+        "dm_find_dmi_duplicates",
+        "dm_audit_icons",
+        "dm_map_info",
+        "dm_diff_maps",
+        "dm_list_render_passes",
+        "dm_render_map",
+        "dm_render_maps",
+        "dm_generate_docs",
     ];
     assert_eq!(
         manifest["covered_tools"],

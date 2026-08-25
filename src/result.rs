@@ -1,4 +1,51 @@
+use crate::capabilities::SPACEMANDMM_REVISION;
 use serde::Serialize;
+use serde_json::{json, Map, Value};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ToolMetadata {
+    pub meridian_mcp_version: &'static str,
+    pub spacemandmm_revision: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_generation: Option<u64>,
+    pub truncated: bool,
+    pub truncation_reasons: Vec<String>,
+}
+
+impl ToolMetadata {
+    pub fn complete(state_generation: Option<u64>) -> Self {
+        Self {
+            meridian_mcp_version: env!("CARGO_PKG_VERSION"),
+            spacemandmm_revision: SPACEMANDMM_REVISION,
+            state_generation,
+            asset_generation: None,
+            truncated: false,
+            truncation_reasons: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorCode {
+    InvalidInput,
+    PathOutsideWorkspace,
+    ParseRequired,
+    StaleGeneration,
+    NotFound,
+    AmbiguousSymbol,
+    UnsupportedUpstream,
+    LimitExceeded,
+    TimedOut,
+    PartialEvidence,
+    HelperFailure,
+    HelperChecksumMismatch,
+    ExternalToolFailure,
+    ToolNotAvailable,
+    Internal,
+}
 
 #[derive(Debug, Serialize)]
 pub struct DomainToolResult {
@@ -36,14 +83,92 @@ impl DomainToolResult {
         message: impl Into<String>,
         recovery: impl Into<String>,
     ) -> Self {
-        Self::error(
-            serde_json::json!({
-                "code": code,
-                "message": message.into(),
-                "recovery": recovery.into(),
-            })
-            .to_string(),
+        structured_error_value(
+            Value::String(code.to_owned()),
+            message.into(),
+            Some(recovery.into()),
+            Map::new(),
         )
+    }
+}
+
+pub fn json_success<T: Serialize>(metadata: ToolMetadata, data: T) -> ToolResult {
+    let value = match serde_json::to_value(data) {
+        Ok(value) => value,
+        Err(error) => {
+            return structured_error(
+                ToolErrorCode::Internal,
+                "could not serialize tool result",
+                None,
+                json!({ "serialization_error": error.to_string() }),
+            );
+        }
+    };
+    let Value::Object(mut payload) = value else {
+        return structured_error(
+            ToolErrorCode::Internal,
+            "tool success payload must be a JSON object",
+            None,
+            json!({ "payload_type": json_type_name(&value) }),
+        );
+    };
+    let Value::Object(metadata) =
+        serde_json::to_value(metadata).expect("ToolMetadata serialization cannot fail")
+    else {
+        unreachable!("ToolMetadata must serialize as an object");
+    };
+    for (key, value) in metadata {
+        payload.insert(key, value);
+    }
+    ToolResult::text(
+        serde_json::to_string_pretty(&Value::Object(payload))
+            .expect("JSON value serialization cannot fail"),
+    )
+}
+
+pub fn structured_error(
+    code: ToolErrorCode,
+    message: impl Into<String>,
+    recovery: Option<String>,
+    details: Value,
+) -> ToolResult {
+    let details = match details {
+        Value::Object(details) => details,
+        value => Map::from_iter([("value".to_owned(), value)]),
+    };
+    structured_error_value(
+        serde_json::to_value(code).expect("ToolErrorCode serialization cannot fail"),
+        message.into(),
+        recovery,
+        details,
+    )
+}
+
+fn structured_error_value(
+    code: Value,
+    message: String,
+    recovery: Option<String>,
+    details: Map<String, Value>,
+) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "code": code,
+            "message": message,
+            "recovery": recovery,
+            "details": details,
+        })
+        .to_string(),
+    )
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 

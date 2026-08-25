@@ -77,6 +77,13 @@ const TOPIC: ToolEffects = ToolEffects {
     network_loopback: true,
     network_external: false,
 };
+const DEBUG: ToolEffects = ToolEffects {
+    reads_files: true,
+    writes_files: false,
+    spawns_process: true,
+    network_loopback: true,
+    network_external: false,
+};
 
 macro_rules! contract {
     ($name:literal, $summary:literal, $mode:ident, $effects:ident, $support:ident, $timeout:expr, $max:expr) => {
@@ -175,11 +182,110 @@ static CONTRACTS: &[ToolContract] = &[
         262_144
     ),
     contract!(
+        "dm_document_symbols",
+        "List declarations in one parsed source file.",
+        Analysis,
+        READ,
+        Provisional,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_find_references",
+        "Find bounded exact member references.",
+        Analysis,
+        READ,
+        Experimental,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_find_implementations",
+        "Find type or member implementations.",
+        Analysis,
+        MEMORY,
+        Provisional,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_dmi_info",
+        "Profile DMI metadata and frame pixels without altering art.",
+        Analysis,
+        READ,
+        Provisional,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_compare_dmi_states",
+        "Compare complete DMI states including common lazy changes.",
+        Analysis,
+        READ,
+        Provisional,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_find_dmi_duplicates",
+        "Find cross-file exact and lazy-change DMI duplicates.",
+        Analysis,
+        READ,
+        Experimental,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_audit_icons",
+        "Audit parsed icon evidence and duplicate DMI states.",
+        Analysis,
+        READ,
+        Experimental,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_extract_dmi",
+        "Mechanically extract a selected DMI state without altering source art.",
+        Development,
+        RENDER,
+        Experimental,
+        None,
+        262_144
+    ),
+    contract!(
         "dm_map_info",
         "Read DMM/TGM dimensions and atom statistics.",
         Analysis,
         READ,
         Provisional,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_diff_maps",
+        "Compare coordinate models across two DMM/TGM maps.",
+        Analysis,
+        READ,
+        Provisional,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_list_render_passes",
+        "List pinned SpacemanDMM render-pass behavior.",
+        Analysis,
+        MEMORY,
+        Provisional,
+        None,
+        262_144
+    ),
+    contract!(
+        "dm_render_maps",
+        "Render a bounded typed batch of map chunks.",
+        Development,
+        RENDER,
+        Experimental,
         None,
         1_048_576
     ),
@@ -199,6 +305,141 @@ static CONTRACTS: &[ToolContract] = &[
         COMPILE,
         Provisional,
         Some(1_800_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_generate_docs",
+        "Generate contained HTML through the verified exact dmdoc helper.",
+        Development,
+        COMPILE,
+        Experimental,
+        Some(300_000),
+        262_144
+    ),
+    contract!(
+        "dm_debug_launch",
+        "Launch one owned DreamSeeker auxtools session.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(60_000),
+        262_144
+    ),
+    contract!(
+        "dm_debug_stop",
+        "Disconnect and terminate the owned debugger session.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        262_144
+    ),
+    contract!(
+        "dm_debug_set_breakpoints",
+        "Replace source-oriented auxtools breakpoints.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_set_function_breakpoints",
+        "Set canonical proc breakpoints.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_set_exception_breakpoints",
+        "Toggle breaks on DreamMaker runtimes.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        262_144
+    ),
+    contract!(
+        "dm_debug_control",
+        "Pause, continue, or step the active debuggee.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        262_144
+    ),
+    contract!(
+        "dm_debug_threads",
+        "List auxtools debuggee stacks.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_stack_trace",
+        "Read bounded debuggee stack frames.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_scopes",
+        "Read variable scopes for a debug frame.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_variables",
+        "Read a bounded variable-reference page.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_evaluate",
+        "Evaluate an expression in the active debuggee.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(30_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_exception_info",
+        "Read the last retained runtime exception.",
+        Development,
+        DEBUG,
+        Experimental,
+        None,
+        262_144
+    ),
+    contract!(
+        "dm_debug_source",
+        "Read the retained auxtools standard-definition source.",
+        Development,
+        DEBUG,
+        Experimental,
+        None,
+        1_048_576
+    ),
+    contract!(
+        "dm_debug_wait_for_event",
+        "Wait for a bounded debugger event.",
+        Development,
+        DEBUG,
+        Experimental,
+        Some(300_000),
         1_048_576
     ),
     contract!(

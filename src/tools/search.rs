@@ -10,7 +10,7 @@ const MAX_RESULT_LIMIT: usize = 50;
 const DEFAULT_SOURCE_LINES: usize = 40;
 const MAX_SOURCE_LINES: usize = 200;
 
-pub(crate) async fn search_context(state: &mut ServerState, args: Value) -> Result<ToolResult> {
+pub(crate) async fn search_context(state: &ServerState, args: Value) -> Result<ToolResult> {
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -18,11 +18,15 @@ pub(crate) async fn search_context(state: &mut ServerState, args: Value) -> Resu
         .filter(|query| !query.is_empty())
         .ok_or_else(|| anyhow!("Missing or empty query argument"))?;
 
-    let Some(index) = state.search_index.as_ref() else {
-        return Ok(ToolResult::error(
-            "No search index loaded. Call dm_parse_environment first.",
-        ));
+    let snapshot = match state.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            return Ok(ToolResult::error(
+                "No search index loaded. Call dm_parse_environment first.",
+            ));
+        }
     };
+    let index = &snapshot.search_index;
 
     let kind = parse_kind(args.get("kind").and_then(Value::as_str).unwrap_or("all"))?;
     let type_prefix = optional_nonempty_string(&args, "type_prefix");
@@ -142,9 +146,9 @@ mod tests {
 
     #[tokio::test]
     async fn context_search_before_parsing_returns_actionable_tool_error() {
-        let mut state = crate::state::ServerState::new();
+        let state = crate::state::ServerState::new();
 
-        let result = search_context(&mut state, serde_json::json!({"query": "air"}))
+        let result = search_context(&state, serde_json::json!({"query": "air"}))
             .await
             .expect("tool call should serialize an expected state error");
         let value = serde_json::to_value(result).expect("tool result should serialize");

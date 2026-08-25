@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "covered_tools": [
     "dm_parse_environment",
     "dm_get_type",
@@ -8,7 +8,20 @@
     "dm_list_types",
     "dm_search_symbols",
     "dm_search_context",
-    "dm_get_definition"
+    "dm_get_definition",
+    "dm_document_symbols",
+    "dm_find_references",
+    "dm_find_implementations",
+    "dm_check_errors",
+    "dm_dmi_info",
+    "dm_find_dmi_duplicates",
+    "dm_audit_icons",
+    "dm_map_info",
+    "dm_diff_maps",
+    "dm_list_render_passes",
+    "dm_render_map",
+    "dm_render_maps",
+    "dm_generate_docs"
   ],
   "types": [
     {
@@ -87,5 +100,16 @@
       "kind": "var",
       "defined_in": "/obj/item"
     }
-  ]
+  ],
+  "document_symbols": [{"file": "code/controllers/subsystem.dm", "contains": "/datum/controller/subsystem"}],
+  "references": [{"symbol": "/datum/controller/subsystem/var/next_fire", "minimum": 1}],
+  "implementations": [{"symbol": "/datum/controller/subsystem/proc/fire", "minimum": 1}],
+  "diagnostics": {"maximum_errors": 0},
+  "dmis": ["icons/mob/vatgrowing.dmi", "icons/ui_icons/minimap/minimap.dmi"],
+  "dmi_scan": {"scope": "icons/ui_icons/minimap", "glob": "**/*.dmi", "maximum_files": 100},
+  "maps": ["_maps/virtual_domains/test_only.dmm", "_maps/virtual_domains/xeno_nest.dmm"],
+  "map_diff": {"left": "_maps/virtual_domains/test_only.dmm", "right": "_maps/virtual_domains/xeno_nest.dmm"},
+  "render": {"maximum_width_tiles": 10, "maximum_height_tiles": 10, "batch_chunks": 2},
+  "docs": {"requires_index": true, "requires_crosslink": true},
+  "debugger": {"fixture_dmb": "tests/fixtures/runtime/runtime.dmb", "required_events": ["breakpoint", "runtime", "terminated"]}
 }
