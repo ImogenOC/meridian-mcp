@@ -242,7 +242,7 @@ function Invoke-NegativeSession {
 }
 
 function Assert-NoSensitiveEvidenceKeys {
-	param([Parameter(Mandatory)]$Value, [string]$Path = '$')
+	param([AllowNull()][Parameter(Mandatory)]$Value, [string]$Path = '$')
 	if ($Value -is [System.Collections.IDictionary]) {
 		foreach ($key in $Value.Keys) {
 			if ([string]$key -match '(?i)(token|secret|password|authorization|cookie)') {
@@ -518,7 +518,7 @@ try {
 	$goodParse = Get-ToolPayload -Responses $preserve.Responses -Id 3 -Stage 'initial parse'
 	$badParse = Get-ToolPayload -Responses $preserve.Responses -Id 4 -Stage 'failed reparse' -AllowToolError
 	$preservedType = Get-ToolPayload -Responses $preserve.Responses -Id 5 -Stage 'lookup after failed reparse'
-	Assert-True ($badParse._tool_error -eq $true -and $badParse.state_preserved -eq $true -and $badParse.state_generation -eq $goodParse.state_generation) 'Failed reparse did not preserve the active generation.'
+	Assert-True ($badParse._tool_error -eq $true -and $badParse.details.state_preserved -eq $true -and $badParse.details.state_generation -eq $goodParse.state_generation) 'Failed reparse did not preserve the active generation.'
 	Assert-True ($preservedType.path -eq '/datum/controller/subsystem') 'Lookup failed after a rejected reparse.'
 	$evidence.negative_sessions += [ordered]@{ name = 'failed_reparse_preserves_state'; passed = $true; state_generation = $goodParse.state_generation }
 

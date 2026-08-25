@@ -199,6 +199,48 @@ async fn fixed_wrapper_produces_fresh_artifact_evidence() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn wrapper_receives_a_non_verbatim_command_processor() {
+    let (root, dme) = fixture("nested-comspec", "tgstation.dme");
+    std::fs::write(root.join("offline.ready"), "ready").unwrap();
+    std::fs::write(
+        root.join("RIFT_BUILD.cmd"),
+        r#"@echo off
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0invoke.ps1"
+exit /b %ERRORLEVEL%
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("invoke.ps1"),
+        r#"$delegate = Join-Path $PSScriptRoot 'delegate.bat'
+& $env:ComSpec /d /s /c ('"{0}"' -f $delegate)
+exit $LASTEXITCODE
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("delegate.bat"),
+        r#"@echo off
+>"%~dp0tgstation.dmb" echo compiled dmb
+>"%~dp0tgstation.rsc" echo compiled rsc
+exit /b 0
+"#,
+    )
+    .unwrap();
+    let compiler = std::env::current_exe().unwrap();
+    let context = context(&root, vec![compiler], RiftBuildAccess::Offline);
+    let mut state = ServerState::new();
+    parse_project(&context, &mut state, &dme).await;
+
+    let result = call_tool(&context, &state, "rift_compile", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, None, "result: {}", text(&result));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn force_rebuild_rejects_unchanged_artifacts() {
     let (root, dme) = fixture("unchanged", "tgstation.dme");
     for name in ["offline.ready", "no-write.ready"] {

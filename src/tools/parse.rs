@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use tracing::info;
 
-use dreammaker::{Context, Parser, Preprocessor};
+use dreammaker::{Context, Parser, Preprocessor, Severity};
 
 use crate::analysis_snapshot::{
     collect_diagnostics, configured_diagnostic_rules, AnalysisBuild, AnalysisContext,
@@ -42,16 +42,22 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             parser.parse_object_tree_2()
         };
         let defines = preprocessor.finalize();
-        if fatal {
-            let diagnostics = context
-                .errors()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(anyhow!(
-                "DreamMaker parser reported a fatal error:\n{diagnostics}"
-            ));
+        let blocking_errors = context
+            .errors()
+            .iter()
+            .filter(|diagnostic| {
+                let description = diagnostic.description();
+                diagnostic.severity() == Severity::Error
+                    && (description.starts_with("failed to find #include")
+                        || description.starts_with("failed to open file: #include")
+                        || description == "i/o error opening file"
+                        || description == "i/o error reading file")
+            })
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if fatal || !blocking_errors.is_empty() {
+            let diagnostics = blocking_errors.join("\n");
+            return Err(anyhow!("DreamMaker parser reported errors:\n{diagnostics}"));
         }
 
         dreamchecker::run(&context, &objtree);
@@ -661,6 +667,31 @@ mod tests {
                 .dme_path(),
             active_dme
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nonfatal_parser_errors_preserve_the_active_snapshot() {
+        let (directory, dme_path) = write_environment_fixture();
+        let state = ServerState::new();
+        let first = parse_environment(&state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        assert_eq!(first.is_error, None);
+        let generation = state.state_generation().await;
+
+        let invalid_dme = directory.join("invalid.dme");
+        std::fs::write(&invalid_dme, "#include \"missing.dm\"\n").unwrap();
+        let failed = parse_environment(&state, json!({"dme_path": invalid_dme}))
+            .await
+            .unwrap();
+
+        assert_eq!(failed.is_error, Some(true), "parse result: {failed:?}");
+        assert_eq!(state.state_generation().await, generation);
+        let preserved = get_type(&state, json!({"type_path": "/datum/meridian_fixture"}))
+            .await
+            .unwrap();
+        assert_eq!(preserved.is_error, None, "lookup result: {preserved:?}");
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -153,6 +153,7 @@ pub async fn compile(
             ));
         }
     };
+    let command_processor = command_path(&command_processor);
     let (environment, mut warnings) = build_environment(
         context,
         &command_processor,
@@ -179,7 +180,7 @@ pub async fn compile(
             "call".into(),
             script_argument,
         ],
-        working_directory: project.root.clone(),
+        working_directory: command_path(&project.root),
         environment,
         stdin: None,
         timeout: Duration::from_millis(timeout_ms),
@@ -315,7 +316,7 @@ fn build_environment(
         }
     }
     environment.push(("ComSpec".into(), command_processor.as_os_str().to_owned()));
-    environment.push(("DM_EXE".into(), compiler.as_os_str().to_owned()));
+    environment.push(("DM_EXE".into(), command_path(compiler).into_os_string()));
     environment.push((
         "MERIDIAN_RIFT_BUILD_NETWORK".into(),
         match network_mode {
@@ -333,7 +334,10 @@ fn build_environment(
     if let Some(cache) = std::env::var_os("TG_BOOTSTRAP_CACHE") {
         match context.policy().read_path(PathBuf::from(&cache)) {
             Ok(cache) if cache.is_dir() => {
-                environment.push(("TG_BOOTSTRAP_CACHE".into(), cache.into_os_string()));
+                environment.push((
+                    "TG_BOOTSTRAP_CACHE".into(),
+                    command_path(&cache).into_os_string(),
+                ));
             }
             _ => warnings.push(
                 "TG_BOOTSTRAP_CACHE was omitted because it is not a contained directory"
@@ -584,5 +588,18 @@ mod tests {
             Some("Skipping 'dm' (up to date)".to_string())
         );
         assert_eq!(dm_cache_marker("Skipping 'tgui' (up to date)"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_paths_drop_the_windows_verbatim_prefix() {
+        assert_eq!(
+            command_path(Path::new(r"\\?\C:\repo\RIFT_BUILD.cmd")),
+            PathBuf::from(r"C:\repo\RIFT_BUILD.cmd")
+        );
+        assert_eq!(
+            command_path(Path::new(r"\\?\UNC\server\share\RIFT_BUILD.cmd")),
+            PathBuf::from(r"\\server\share\RIFT_BUILD.cmd")
+        );
     }
 }

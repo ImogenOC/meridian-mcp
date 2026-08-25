@@ -49,6 +49,9 @@ jobs:
           path: integration/byond-tracy
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
+      - name: Test Meridian compatibility evidence validation
+        shell: pwsh
+        run: ./scripts/test-meridian-evidence-validation.ps1
       - name: Build exact dmdoc helper
         shell: pwsh
         run: ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json

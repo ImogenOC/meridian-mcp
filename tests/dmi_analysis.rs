@@ -189,7 +189,8 @@ async fn icon_audit_reports_missing_static_states_and_dynamic_uncertainty() {
     )
     .await
     .unwrap();
-    assert_eq!(payload(parsed)["success"], true);
+    let parsed = payload(parsed);
+    assert_eq!(parsed["success"], true, "{parsed:#}");
     let result = call_tool(
         &context,
         &state,
