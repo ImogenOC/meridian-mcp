@@ -11,6 +11,7 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+Import-Module -Force (Join-Path $PSScriptRoot 'process-readiness.psm1')
 $compiler = (Resolve-Path -LiteralPath $DreamMakerPath).Path
 $compilerDirectory = Split-Path -Parent $compiler
 $daemonName = if ($IsWindows) { 'DreamDaemon.exe' } else { 'DreamDaemon' }
@@ -28,6 +29,7 @@ $compileStdout = Join-Path $fixtureRoot 'dreammaker.stdout.log'
 $compileStderr = Join-Path $fixtureRoot 'dreammaker.stderr.log'
 $daemonStdout = Join-Path $fixtureRoot 'dreamdaemon.stdout.log'
 $daemonStderr = Join-Path $fixtureRoot 'dreamdaemon.stderr.log'
+$daemonWorldLog = Join-Path $fixtureRoot 'large_prototypes.log'
 $existingDaemonIds = @()
 $ownedDaemonIds = [Collections.Generic.HashSet[int]]::new()
 $compile = $null
@@ -35,7 +37,9 @@ $runtime = $null
 $markerReady = $false
 $failure = $null
 $startedAtUtc = [DateTime]::UtcNow.ToString('O')
-$retainedFixtureId = "byond-516.1687-over64-$PrototypeCount"
+$compilerVersion = [Version](Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
+$byondVersion = "$($compilerVersion.Build).$($compilerVersion.Revision)"
+$retainedFixtureId = "byond-$byondVersion-over64-$PrototypeCount"
 
 function Convert-ExitCodeHex([int]$ExitCode) {
 	$unsigned = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$ExitCode), 0)
@@ -67,7 +71,7 @@ if (-not [string]::IsNullOrWhiteSpace($PrerequisiteEvidencePath)) {
 $evidence = [ordered]@{
 	schema_version = 2
 	overall = 'failed'
-	byond = '516.1687'
+	byond = $byondVersion
 	prototype_count = $PrototypeCount
 	game_port = $GamePort
 	started_at_utc = $startedAtUtc
@@ -88,6 +92,7 @@ $evidence = [ordered]@{
 		timed_out = $false
 		stdout_log = 'large-prototype-logs/dreamdaemon.stdout.log'
 		stderr_log = 'large-prototype-logs/dreamdaemon.stderr.log'
+		world_log = 'large-prototype-logs/dreamdaemon.world.log'
 	}
 	launcher_exit_code_signed = $null
 	launcher_exit_code_hex = $null
@@ -135,33 +140,28 @@ try {
 	}
 	if ($IsWindows) { $runtimeParameters.WindowStyle = 'Hidden' }
 	$runtime = Start-Process @runtimeParameters
-	if (-not $runtime.WaitForExit($RuntimeTimeoutSeconds * 1000)) {
-		$evidence.dreamdaemon.timed_out = $true
-		Stop-Process -Id $runtime.Id -Force -ErrorAction SilentlyContinue
-		throw "The DreamDaemon launcher did not exit within $RuntimeTimeoutSeconds seconds."
-	}
-	$evidence.dreamdaemon.launcher_exit_code_signed = [int32]$runtime.ExitCode
-	$evidence.dreamdaemon.launcher_exit_code_hex = Convert-ExitCodeHex $runtime.ExitCode
-	$evidence.launcher_exit_code_signed = [int32]$runtime.ExitCode
-	$evidence.launcher_exit_code_hex = Convert-ExitCodeHex $runtime.ExitCode
-	if ($IsWindows -and $runtime.ExitCode -gt 0 -and $existingDaemonIds -notcontains $runtime.ExitCode) {
-		[void]$ownedDaemonIds.Add($runtime.ExitCode)
-	}
-
-	$readiness = [Diagnostics.Stopwatch]::StartNew()
-	do {
-		foreach ($process in @(Get-Process -Name 'DreamDaemon' -ErrorAction SilentlyContinue)) {
-			if ($existingDaemonIds -notcontains $process.Id) { [void]$ownedDaemonIds.Add($process.Id) }
+	if ($existingDaemonIds -notcontains $runtime.Id) { [void]$ownedDaemonIds.Add($runtime.Id) }
+	$readiness = Wait-ProcessReadiness -Process $runtime -MarkerPath $marker -ExpectedMarker 'MERIDIAN_LARGE_PROTOTYPE_READY' -TimeoutSeconds $RuntimeTimeoutSeconds
+	$runtime.Refresh()
+	if ($runtime.HasExited) {
+		$evidence.dreamdaemon.launcher_exit_code_signed = [int32]$runtime.ExitCode
+		$evidence.dreamdaemon.launcher_exit_code_hex = Convert-ExitCodeHex $runtime.ExitCode
+		$evidence.launcher_exit_code_signed = [int32]$runtime.ExitCode
+		$evidence.launcher_exit_code_hex = Convert-ExitCodeHex $runtime.ExitCode
+		if ($IsWindows -and $runtime.ExitCode -gt 0 -and $existingDaemonIds -notcontains $runtime.ExitCode) {
+			[void]$ownedDaemonIds.Add($runtime.ExitCode)
 		}
-		if (Test-Path -LiteralPath $marker -PathType Leaf) {
-			$markerReady = (Get-Content -Raw -LiteralPath $marker).TrimEnd() -eq 'MERIDIAN_LARGE_PROTOTYPE_READY'
-			if ($markerReady) { break }
-		}
-		Start-Sleep -Milliseconds 100
-	} while ($readiness.Elapsed.TotalSeconds -lt $RuntimeTimeoutSeconds)
-	$readiness.Stop()
+	}
+	foreach ($process in @(Get-Process -Name 'DreamDaemon' -ErrorAction SilentlyContinue)) {
+		if ($existingDaemonIds -notcontains $process.Id) { [void]$ownedDaemonIds.Add($process.Id) }
+	}
+	$markerReady = $readiness.status -eq 'ready'
 	$evidence.marker_state = if ($markerReady) { 'ready' } else { 'missing' }
 	if (-not $markerReady) {
+		$evidence.dreamdaemon.timed_out = $readiness.status -eq 'timed_out'
+		if ($readiness.status -eq 'process_exited') {
+			throw 'DreamDaemon exited before emitting the over-64K readiness marker.'
+		}
 		throw "DreamDaemon did not emit the over-64K readiness marker within $RuntimeTimeoutSeconds seconds."
 	}
 
@@ -182,6 +182,7 @@ try {
 	[void](Write-OwnedLog $compileStderr 'dreammaker.stderr.log')
 	[void](Write-OwnedLog $daemonStdout 'dreamdaemon.stdout.log')
 	[void](Write-OwnedLog $daemonStderr 'dreamdaemon.stderr.log')
+	[void](Write-OwnedLog $daemonWorldLog 'dreamdaemon.world.log')
 	$evidence.finished_at_utc = [DateTime]::UtcNow.ToString('O')
 	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 10) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 	if ($null -eq $failure -and (Test-Path -LiteralPath $fixtureRoot)) {
