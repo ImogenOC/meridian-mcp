@@ -496,7 +496,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     });
 
     tools.extend([
-        ToolDefinition { name:"dm_debug_launch".into(), description:"Launch one MCP-owned DreamSeeker session with the fixed, hash-verified auxtools debugger.".into(), input_schema:json!({"type":"object","properties":{"dmb_path":{"type":"string"},"startup_timeout_ms":{"type":"integer","minimum":1,"maximum":60000}},"required":["dmb_path"]}) },
+        ToolDefinition { name:"dm_debug_launch".into(), description:"Launch one MCP-owned interactive DreamSeeker or headless DreamDaemon session with the fixed, hash-verified auxtools debugger.".into(), input_schema:json!({"type":"object","properties":{"dmb_path":{"type":"string"},"host_mode":{"type":"string","enum":["interactive","headless"],"default":"interactive"},"startup_timeout_ms":{"type":"integer","minimum":1,"maximum":60000}},"required":["dmb_path"]}) },
         ToolDefinition { name:"dm_debug_stop".into(), description:"Disconnect and terminate the active MCP-owned debugger process tree.".into(), input_schema:json!({"type":"object","properties":{}}) },
         ToolDefinition { name:"dm_debug_set_breakpoints".into(), description:"Replace all source breakpoints for one contained parsed DreamMaker file.".into(), input_schema:debug_source_breakpoint_schema() },
         ToolDefinition { name:"dm_debug_set_function_breakpoints".into(), description:"Set a bounded complete list of canonical proc breakpoints.".into(), input_schema:debug_breakpoint_schema() },
@@ -1054,6 +1054,7 @@ fn policy_error(
 #[cfg(test)]
 mod tests {
     use super::get_tool_definitions;
+    use serde_json::json;
 
     #[test]
     fn tool_definitions_use_supported_name_prefixes() {
@@ -1063,6 +1064,24 @@ mod tests {
         assert!(definitions
             .iter()
             .all(|tool| tool.name.starts_with("dm_") || tool.name == "rift_compile"));
+    }
+
+    #[test]
+    fn debugger_launch_schema_exposes_interactive_and_headless_hosts() {
+        let definitions = get_tool_definitions();
+        let launch = definitions
+            .iter()
+            .find(|tool| tool.name == "dm_debug_launch")
+            .expect("dm_debug_launch should be defined");
+
+        assert_eq!(
+            launch.input_schema["properties"]["host_mode"]["enum"],
+            json!(["interactive", "headless"])
+        );
+        assert_eq!(
+            launch.input_schema["properties"]["host_mode"]["default"],
+            "interactive"
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub const AUXTOOLS_RELEASE_URL: &str =
 #[derive(Clone, Debug)]
 pub struct DebuggerInstallation {
     pub dreamseeker: PathBuf,
+    pub dreamdaemon: PathBuf,
     pub debug_server_dll: PathBuf,
     pub dll_sha256: String,
 }
@@ -28,6 +29,8 @@ pub enum DebuggerPolicyError {
     Compiler,
     #[error("DreamSeeker sibling not found")]
     DreamSeeker,
+    #[error("DreamDaemon sibling not found")]
+    DreamDaemon,
     #[error("debug_server.dll not found at the fixed helper location")]
     Dll,
     #[error("debug_server.dll checksum mismatch")]
@@ -55,6 +58,12 @@ pub fn validate_installation(
         .join("dreamseeker.exe")
         .canonicalize()
         .map_err(|_| DebuggerPolicyError::DreamSeeker)?;
+    let dreamdaemon = compilers[0]
+        .parent()
+        .ok_or(DebuggerPolicyError::DreamDaemon)?
+        .join("dreamdaemon.exe")
+        .canonicalize()
+        .map_err(|_| DebuggerPolicyError::DreamDaemon)?;
     let root = std::env::current_exe()?
         .parent()
         .ok_or(DebuggerPolicyError::Dll)?
@@ -69,6 +78,7 @@ pub fn validate_installation(
     }
     Ok(DebuggerInstallation {
         dreamseeker,
+        dreamdaemon,
         debug_server_dll: dll,
         dll_sha256: hash,
     })

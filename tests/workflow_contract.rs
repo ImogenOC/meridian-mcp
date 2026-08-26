@@ -50,6 +50,13 @@ fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
         !windows.contains("needs:"),
         "Windows product evidence must not depend on a synthetic gate"
     );
+    assert!(windows.contains("id: auxtools_gate"));
+    assert!(windows.contains("id: tracy_gate"));
+    assert!(windows.contains("-HostMode headless"));
+    assert!(windows.contains("AUXTOOLS_OUTCOME: ${{ steps.auxtools_gate.outcome }}"));
+    assert!(windows.contains("TRACY_OUTCOME: ${{ steps.tracy_gate.outcome }}"));
+    assert!(windows.contains("$env:AUXTOOLS_OUTCOME -eq 'failure'"));
+    assert!(windows.contains("$env:TRACY_OUTCOME -eq 'failure'"));
 
     let parser = workflow_job_block(&workflow, "prototype-parser-compatibility");
     assert!(parser.contains("windows-2025"));

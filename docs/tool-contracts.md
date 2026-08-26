@@ -11,7 +11,7 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | `dm_debug_control` | Development | Experimental | read, process, loopback | 30000 | 262144 | Pause, continue, or step the active debuggee. |
 | `dm_debug_evaluate` | Development | Experimental | read, process, loopback | 30000 | 1048576 | Evaluate an expression in the active debuggee. |
 | `dm_debug_exception_info` | Development | Experimental | read, process, loopback | - | 262144 | Read the last retained runtime exception. |
-| `dm_debug_launch` | Development | Experimental | read, process, loopback | 60000 | 262144 | Launch one owned DreamSeeker auxtools session. |
+| `dm_debug_launch` | Development | Experimental | read, process, loopback | 60000 | 262144 | Launch one owned interactive or headless auxtools session. |
 | `dm_debug_scopes` | Development | Experimental | read, process, loopback | 30000 | 1048576 | Read variable scopes for a debug frame. |
 | `dm_debug_set_breakpoints` | Development | Experimental | read, process, loopback | 30000 | 1048576 | Replace source-oriented auxtools breakpoints. |
 | `dm_debug_set_exception_breakpoints` | Development | Experimental | read, process, loopback | 30000 | 262144 | Toggle breaks on DreamMaker runtimes. |

@@ -81,11 +81,11 @@ Analysis mode exposes the read-only tools below. Development mode adds the activ
 
 ### Auxtools debugger
 
-When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, Meridian-MCP exposes a restricted debugger adapter over the pinned auxtools protocol. The Windows debug server is 32-bit and requires the x86 Microsoft Visual C++ runtime even when Meridian-MCP runs as a 64-bit process; CI installs and verifies that prerequisite before launching DreamSeeker.
+When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, Meridian-MCP exposes a restricted debugger adapter over the pinned auxtools protocol. The Windows debug server is 32-bit and requires the x86 Microsoft Visual C++ runtime even when Meridian-MCP runs as a 64-bit process; CI installs and verifies that prerequisite before launching the selected BYOND host.
 
 | Tool | Description |
 | --- | --- |
-| `dm_debug_launch` | Launch one contained DMB through the `dreamseeker.exe` beside the single allowlisted `dm.exe`. Meridian-MCP injects only the fixed hash-verified debugger DLL, opens an ephemeral loopback listener, owns the process tree, retains the debugger-provided `stddef.dm`, and refuses to start while a normal or Tracy DreamDaemon runtime is active. |
+| `dm_debug_launch` | Launch one contained DMB through a BYOND executable beside the single allowlisted `dm.exe`. `host_mode: "interactive"` (the default) uses `dreamseeker.exe` for developer sessions; `host_mode: "headless"` uses `dreamdaemon.exe` for non-desktop environments such as CI. Meridian-MCP injects only the fixed hash-verified debugger DLL, opens an ephemeral loopback listener, owns the process tree, retains the debugger-provided `stddef.dm`, and refuses to start while a normal or Tracy DreamDaemon runtime is active. |
 | `dm_debug_set_breakpoints` | Replace the complete source-breakpoint set with lines from one contained file in the active parsed generation. Each line must resolve inside a parsed procedure; optional bounded conditions are passed to auxtools. Reparse invalidates this source mapping, so stop and relaunch the debugger after source changes. |
 | `dm_debug_set_function_breakpoints` | Replace the complete breakpoint set using canonical DreamMaker procedure paths, with optional override identifiers, instruction offsets, and bounded conditions. Use this when the exact procedure identity is known or source-line mapping is inappropriate. |
 | `dm_debug_set_exception_breakpoints` | Enable or disable breaking when DreamMaker reports a runtime exception. This controls only the active owned debugger session. |
@@ -98,12 +98,12 @@ When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the 
 | `dm_debug_exception_info` | Return the most recently retained runtime-exception message and current event sequence from the active session. It is not a historical exception log. |
 | `dm_debug_source` | Read the retained debugger-provided `stddef.dm` only through source reference `1`, which is issued by the active adapter. It accepts no caller-selected file path or URL. |
 | `dm_debug_wait_for_event` | Wait for the first bounded breakpoint, step, pause, runtime, output, or termination event after an optional sequence number. Calls can filter event kinds and wait for at most 300 seconds; results report queue eviction when older events were dropped. |
-| `dm_debug_stop` | Disconnect the debugger and terminate only the DreamSeeker process tree owned by this Meridian-MCP session. It never detaches and never accepts a PID. |
+| `dm_debug_stop` | Disconnect the debugger and terminate only the selected BYOND host process tree owned by this Meridian-MCP session. It never detaches and never accepts a PID. |
 
 #### Debugger workflow
 
 1. Compile the target DMB and call `dm_parse_environment` for its matching DME before using source-oriented breakpoints.
-2. Call `dm_debug_launch` with the contained DMB. Only one debugger session may exist, and it is mutually exclusive with standard and Tracy runtimes.
+2. Call `dm_debug_launch` with the contained DMB. Keep the default interactive host for normal debugging, or select `host_mode: "headless"` where no desktop session is available. Only one debugger session may exist, and it is mutually exclusive with standard and Tracy runtimes.
 3. Configure source, function, and/or runtime-exception breakpoints. Each breakpoint-setting call replaces the relevant active set; send the complete desired list.
 4. Use `dm_debug_control` to continue or step, then `dm_debug_wait_for_event` with the last observed sequence to avoid replaying an older event.
 5. On a stop event, inspect `dm_debug_threads`, `dm_debug_stack_trace`, `dm_debug_scopes`, and `dm_debug_variables`. Use `dm_debug_exception_info` for the latest runtime and `dm_debug_source` only for an issued standard-definition reference.
