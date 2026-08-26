@@ -75,7 +75,7 @@ try {
 	if ($frames.frame_count -lt 1) { throw 'The trace did not contain ServerTick frame evidence.' }
 	$comparison = (Get-McpResponse -Responses $session.Responses -Id 9).result.content[0].text | ConvertFrom-Json
 	if (@($comparison.items | Where-Object { $_.inclusive_delta_ns -ne 0 -or $_.self_delta_ns -ne 0 -or $_.count_delta -ne 0 }).Count -ne 0) { throw 'A trace compared with itself produced non-zero deltas.' }
-	$evidence = [ordered]@{ schema_version = 1; overall = 'passed'; byond = '516.1685'; tracy_protocol = 82; trace_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $trace).Hash.ToLowerInvariant(); trace_bytes = (Get-Item -LiteralPath $trace).Length; known_proc = $true; frame_count = $frames.frame_count }
+	$evidence = [ordered]@{ schema_version = 1; overall = 'passed'; byond = '516.1687'; tracy_protocol = 82; trace_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $trace).Hash.ToLowerInvariant(); trace_bytes = (Get-Item -LiteralPath $trace).Length; known_proc = $true; frame_count = $frames.frame_count }
 	$evidenceFile = [IO.Path]::GetFullPath($EvidencePath)
 	New-Item -ItemType Directory -Force -Path (Split-Path -Parent $evidenceFile) | Out-Null
 	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 5) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))

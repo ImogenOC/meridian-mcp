@@ -81,7 +81,7 @@ Analysis mode exposes the read-only tools below. Development mode adds the activ
 
 ### Auxtools debugger
 
-When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, Meridian-MCP exposes a restricted debugger adapter over the pinned auxtools protocol.
+When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, Meridian-MCP exposes a restricted debugger adapter over the pinned auxtools protocol. The Windows debug server is 32-bit and requires the x86 Microsoft Visual C++ runtime even when Meridian-MCP runs as a 64-bit process; CI installs and verifies that prerequisite before launching DreamSeeker.
 
 | Tool | Description |
 | --- | --- |
@@ -114,7 +114,7 @@ The adapter does not support attaching to an existing process, selecting another
 
 ### Tracy profiler
 
-When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both native artifacts validate against the helper manifest, the server adds these tools. The current baseline is Tracy protocol 82 and BYOND 516.1685-1687; it remains experimental until the named live gates record green evidence.
+When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both native artifacts validate against the helper manifest, the server adds these tools. The current live baseline is Tracy protocol 82 and BYOND 516.1687; the pinned hook declares support for 516.1685-1687, but it remains experimental until the named live gates record green evidence.
 
 | Tool | Description |
 | --- | --- |
@@ -157,11 +157,14 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 | `scripts/build-spacemandmm-helpers.ps1` | Build dmdoc from the pinned local SpacemanDMM checkout, copy the platform helper, hash it, and write or merge the helper manifest. It does not select an arbitrary revision. |
 | `scripts/build-tracy-helpers.ps1` | Build and test the fixed-command native Tracy helper plus the patched x86 byond-tracy hook from exact local source revisions, copy licenses, hash artifacts, and merge schema-v2 manifest entries. It performs no source download. |
 | `scripts/fetch-auxtools.ps1` | Download auxtools `debug_server.dll` v2.3.7 from the fixed release URL, verify its fixed SHA-256, and atomically install it below a supplied destination root. |
+| `scripts/install-auxtools-runtime.ps1` | Verify the x86 MSVC runtime required by the pinned auxtools DLL and, on Windows CI, install it from the runner's bundled `vc_redist.x86.exe` when missing. It performs no network download. |
 | `scripts/install-byond.ps1` | Install the pinned Windows BYOND archive for CI/integration use through verified download and archive checks. This is test infrastructure, not a project build command. |
 | `scripts/install-byond-linux.ps1` | Install the pinned Linux BYOND archive for the Ubuntu live-integration job after verifying the exact archive hash and compiler artifact. |
 | `scripts/install-meridian-mcp.ps1` | Atomically install a release binary, manifest-selected dmdoc/Tracy helpers, and the verified auxtools DLL into a destination root. `-EnableTracy` requires both native Tracy manifest identities. The script does not edit Codex configuration. |
 | `scripts/configure-codex-meridian-mcp.ps1` | Update one named Meridian-MCP server entry in an existing Codex TOML configuration with the installed binary and helper manifest. `-EnableTracy` writes the explicit Tracy opt-in; existing roots, compiler, mode, and build ceiling remain untouched. |
 | `scripts/run-byond-integration.ps1` | Compile the owned BYOND fixtures used by the runtime integration gate. |
+| `scripts/new-large-prototype-fixture.ps1` | Generate a temporary technical DreamMaker environment containing more than 65,536 unique prototype paths. It creates no game content. |
+| `scripts/run-large-prototype-integration.ps1` | Compile and start the generated over-64K prototype world with the pinned BYOND runtime, require its readiness marker, and write machine-readable compatibility evidence. |
 | `scripts/run-auxtools-integration.ps1` | Compile the technical debugger fixture and drive the installed MCP through auxtools launch, inventory/query, exception-breakpoint configuration, and clean stop, writing machine-readable evidence. |
 | `scripts/run-tracy-integration.ps1` | Compile the technical profiling fixture and drive prepare, launch, capture, hotspot/zone/frame queries, comparison, status, and stop through the installed MCP, writing machine-readable evidence. |
 | `scripts/run-meridian-analysis-compatibility.ps1` | Run the versioned read-only parse, lookup, definition, search, diagnostics, DMI, map, render, and documentation compatibility manifest against a real Meridian-Rift checkout. |

@@ -38,7 +38,7 @@ if ($MeridianRiftRoot) {
     $dependencies = Get-Content -LiteralPath (Join-Path $MeridianRiftRoot 'dependencies.sh')
     $major = ($dependencies | Select-String '^export BYOND_MAJOR=([0-9]+)$').Matches.Groups[1].Value
     $minor = ($dependencies | Select-String '^export BYOND_MINOR=([0-9]+)$').Matches.Groups[1].Value
-    if ("$major.$minor" -ne '516.1685') {
+    if ("$major.$minor" -ne '516.1687') {
         throw "Unsupported Meridian-Rift BYOND pin: $major.$minor"
     }
     $mcpSha = (& git -C $repoRoot rev-parse HEAD).Trim()

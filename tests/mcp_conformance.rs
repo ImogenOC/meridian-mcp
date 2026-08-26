@@ -32,7 +32,7 @@ fn tracy_server() -> MeridianServer {
             "schema_version": 2,
             "helpers": [
                 {"id":"tracy-server-helper","platform":std::env::consts::OS,"target_arch":std::env::consts::ARCH,"path":"helpers/server-helper.exe","sha256":hash(b"server helper"),"source_revision":"099df3de3dc37eca4712c06b8320fb9c53596edd","protocol_version":82},
-                {"id":"byond-tracy","platform":std::env::consts::OS,"target_arch":"x86","path":"helpers/prof.dll","sha256":hash(b"hook"),"source_revision":"d1ec404737b04b1ea73d6df4a1b477deacdb1900","protocol_version":82,"byond_min_version":"516.1685","byond_max_version":"516.1687"}
+                {"id":"byond-tracy","platform":std::env::consts::OS,"target_arch":"x86","path":"helpers/prof.dll","sha256":hash(b"hook"),"source_revision":"d1ec404737b04b1ea73d6df4a1b477deacdb1900","protocol_version":82,"byond_min_version":"516.1687","byond_max_version":"516.1687"}
             ]
         }))
         .unwrap(),

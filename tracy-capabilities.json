@@ -11,7 +11,7 @@
       "disposition": "fixed_helper",
       "targets": ["dm_tracy_prepare", "dm_tracy_launch", "dm_tracy_status", "dm_tracy_stop"],
       "platforms": ["windows", "ubuntu"],
-      "verification": "Exact-revision x86 build, hash manifest, BYOND 516.1685 live capture gate.",
+      "verification": "Exact-revision x86 build, hash manifest, BYOND 516.1687 live capture gate.",
       "evidence": [],
       "rationale": null
     },

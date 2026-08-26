@@ -52,9 +52,11 @@ jobs:
       - name: Test Meridian compatibility evidence validation
         shell: pwsh
         run: ./scripts/test-meridian-evidence-validation.ps1
-      - name: Build exact dmdoc helper
+      - name: Freshly build exact SpacemanDMM dmdoc helper
         shell: pwsh
-        run: ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
+        run: |
+          cargo clean --manifest-path ./integration/SpacemanDMM/Cargo.toml
+          ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
       - name: Build exact Tracy helper and hook
         shell: pwsh
         run: |
@@ -66,23 +68,30 @@ jobs:
           $dependencies = Get-Content ./integration/Meridian-Rift/dependencies.sh
           $major = ($dependencies | Select-String '^export BYOND_MAJOR=([0-9]+)$').Matches.Groups[1].Value
           $minor = ($dependencies | Select-String '^export BYOND_MINOR=([0-9]+)$').Matches.Groups[1].Value
-          if ("$major.$minor" -ne '516.1685') {
+          if ("$major.$minor" -ne '516.1687') {
             throw "Meridian-Rift pins BYOND $major.$minor; review the named compatibility baseline before updating this workflow."
           }
-      - name: Install BYOND 516.1685
+      - name: Install BYOND 516.1687
         shell: pwsh
         run: |
           ./scripts/install-byond.ps1 `
-            -Version 516.1685 `
+            -Version 516.1687 `
             -ArchivePath "$env:RUNNER_TEMP\byond.zip" `
             -DestinationPath "$env:RUNNER_TEMP\byond" `
-            -ExpectedSha256 E24078F1E6D719681118D6505B2A3F263FB173C1B63465D2F68F3E0EC177126F
-      - name: Build release Meridian-MCP
+            -ExpectedSha256 6A69818D8216E089D5C16506659A8883D8CCF06A673A2DD9F7C0777E81BCD9A4
+      - name: Install auxtools x86 runtime
+        shell: pwsh
+        run: ./scripts/install-auxtools-runtime.ps1
+      - name: Freshly build release Meridian-MCP and SpacemanDMM crates
         shell: pwsh
         run: |
           $env:MERIDIAN_MCP_HELPER_MANIFEST = "$env:GITHUB_WORKSPACE/integration/helpers-manifest.json"
+          cargo clean
           cargo build --locked --release
           ./scripts/fetch-auxtools.ps1 -DestinationRoot ./target/release
+      - name: Run over-64K prototype startup gate
+        shell: pwsh
+        run: ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -EvidencePath ./integration/evidence/large-prototype-compatibility.json
       - name: Run owned fixture and Meridian-Rift compatibility gates
         shell: pwsh
         run: |
@@ -127,9 +136,9 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install --yes --no-install-recommends gcc-multilib g++-multilib patch lib32z1 libcurl4t64:i386
-      - name: Install verified Linux BYOND 516.1685
+      - name: Install verified Linux BYOND 516.1687
         shell: pwsh
-        run: ./scripts/install-byond-linux.ps1 -Version 516.1685 -ArchivePath "$env:RUNNER_TEMP/byond-linux.zip" -DestinationPath "$env:RUNNER_TEMP/byond-linux" -ExpectedSha256 041CC8CA22F43D3CE9477FB4251B119F61495D6E59DF1FCACA5B3DFC3B4ADB1B
+        run: ./scripts/install-byond-linux.ps1 -Version 516.1687 -ArchivePath "$env:RUNNER_TEMP/byond-linux.zip" -DestinationPath "$env:RUNNER_TEMP/byond-linux" -ExpectedSha256 8F43564407BB3117827F6727A6192ECAFFA3538AF76742B2FCD083F1CCCF4D8A
       - name: Build Tracy package and release MCP
         shell: pwsh
         run: |

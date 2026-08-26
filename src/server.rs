@@ -40,7 +40,7 @@ impl MeridianServer {
                     config
                         .helper_manifest()
                         .expect("Tracy config requires a manifest"),
-                    "516.1685",
+                    "516.1687",
                 )
             })
             .transpose()?;

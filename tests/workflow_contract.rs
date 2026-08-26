@@ -63,6 +63,30 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
 }
 
 #[test]
+fn byond_workflow_uses_the_516_1687_runtime_baseline() {
+    let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
+        .expect("BYOND integration workflow should be readable");
+
+    for required in [
+        "516.1687",
+        "6A69818D8216E089D5C16506659A8883D8CCF06A673A2DD9F7C0777E81BCD9A4",
+        "8F43564407BB3117827F6727A6192ECAFFA3538AF76742B2FCD083F1CCCF4D8A",
+        "scripts/install-auxtools-runtime.ps1",
+        "scripts/run-large-prototype-integration.ps1",
+        "cargo clean",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "BYOND 516.1687 workflow contract is missing {required}"
+        );
+    }
+    assert!(
+        !workflow.contains("Install BYOND 516.1685"),
+        "the workflow still names the obsolete BYOND baseline"
+    );
+}
+
+#[test]
 fn byond_workflow_defaults_to_a_rift_build_qualified_ref() {
     let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
         .expect("BYOND integration workflow should be readable");

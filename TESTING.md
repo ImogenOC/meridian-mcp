@@ -64,6 +64,17 @@ This compiles the purpose-written runtime fixture with DreamMaker. To exercise t
     -MapDmmPath .\tests\fixtures\maps\fixture.dmm
 ```
 
+The named BYOND 516.1687 workflow also verifies the x86 MSVC runtime required by auxtools and starts a generated world with 65,537 unique prototype paths:
+
+```powershell
+.\scripts\install-auxtools-runtime.ps1
+.\scripts\run-large-prototype-integration.ps1 `
+    -DreamMakerPath 'C:\path\to\BYOND\bin\dm.exe' `
+    -EvidencePath .\integration\evidence\large-prototype-compatibility.json
+```
+
+The large fixture is generated in a temporary directory and removed after the gate. Its successful DreamDaemon readiness marker is the evidence for BYOND's post-64K startup behavior; a successful DreamMaker compile alone is insufficient.
+
 ## Meridian-Rift full corpus
 
 ```powershell
