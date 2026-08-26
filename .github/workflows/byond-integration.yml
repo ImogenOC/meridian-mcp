@@ -223,7 +223,7 @@ jobs:
           }
           $dreamMaker = Join-Path $byondBin $(if ($IsWindows) { 'dm.exe' } else { 'DreamMaker' })
           $prerequisiteEvidence = if ($IsWindows) { "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json" } else { '' }
-          ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath $dreamMaker -PrototypeCount 50000 -RuntimeCase control -PrerequisiteEvidencePath $prerequisiteEvidence -RuntimeTimeoutSeconds 300 -EvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/control/evidence.json"
+          ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath $dreamMaker -PrototypeCount 50000 -RuntimeCase control -ExpectedByondVersion 516.1687 -PrerequisiteEvidencePath $prerequisiteEvidence -RuntimeTimeoutSeconds 300 -EvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/control/evidence.json"
       - name: Run over-64K boundary fixture
         shell: pwsh
         run: |
@@ -234,7 +234,7 @@ jobs:
           }
           $dreamMaker = Join-Path $byondBin $(if ($IsWindows) { 'dm.exe' } else { 'DreamMaker' })
           $prerequisiteEvidence = if ($IsWindows) { "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json" } else { '' }
-          ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath $dreamMaker -PrototypeCount 65537 -RuntimeCase boundary -ControlEvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/control/evidence.json" -PrerequisiteEvidencePath $prerequisiteEvidence -RuntimeTimeoutSeconds 300 -EvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/boundary/evidence.json"
+          ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath $dreamMaker -PrototypeCount 65537 -RuntimeCase boundary -ExpectedByondVersion 516.1687 -ControlEvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/control/evidence.json" -PrerequisiteEvidencePath $prerequisiteEvidence -RuntimeTimeoutSeconds 300 -EvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/boundary/evidence.json"
       - name: Upload runtime compatibility evidence
         if: always()
         uses: actions/upload-artifact@v6

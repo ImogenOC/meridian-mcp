@@ -53,6 +53,11 @@ fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
     assert!(runtime
         .contains("prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json"));
     assert!(runtime.contains("-PrerequisiteEvidencePath $prerequisiteEvidence"));
+    assert_eq!(
+        runtime.matches("-ExpectedByondVersion 516.1687").count(),
+        2,
+        "both runtime cases must declare the verified BYOND version"
+    );
 }
 
 #[test]

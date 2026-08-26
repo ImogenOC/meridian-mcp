@@ -6,6 +6,7 @@ param(
 	[ValidateRange(1, 100000)][int]$PrototypeCount = 65537,
 	[ValidateSet('control', 'boundary')][string]$RuntimeCase = 'boundary',
 	[string]$ControlEvidencePath,
+	[ValidatePattern('^[0-9]+\.[0-9]+$')][string]$ExpectedByondVersion = '516.1687',
 	[ValidateRange(30, 900)][int]$CompileTimeoutSeconds = 300,
 	[ValidateRange(10, 900)][int]$RuntimeTimeoutSeconds = 300
 )
@@ -26,6 +27,10 @@ $logRoot = Join-Path $evidenceRoot 'large-prototype-logs'
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('meridian-large-prototypes-' + [Guid]::NewGuid().ToString('N'))
+$dme = Join-Path $fixtureRoot 'large_prototypes.dme'
+$dmb = Join-Path $fixtureRoot 'large_prototypes.dmb'
+$source = Join-Path $fixtureRoot 'large_prototypes.dm'
+$marker = Join-Path $fixtureRoot 'startup.marker'
 $compileStdout = Join-Path $fixtureRoot 'dreammaker.stdout.log'
 $compileStderr = Join-Path $fixtureRoot 'dreammaker.stderr.log'
 $daemonStdout = Join-Path $fixtureRoot 'dreamdaemon.stdout.log'
@@ -42,9 +47,11 @@ $readiness = $null
 $controlPassed = $false
 $failure = $null
 $startedAtUtc = [DateTime]::UtcNow.ToString('O')
-$compilerVersion = [Version](Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
-$byondVersion = "$($compilerVersion.Build).$($compilerVersion.Revision)"
+$reportedFileVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
+$byondIdentity = Get-ByondVersionIdentity -ExpectedVersion $ExpectedByondVersion -ReportedFileVersion $reportedFileVersion
+$byondVersion = $byondIdentity.version
 $retainedFixtureId = "byond-$byondVersion-$RuntimeCase-$PrototypeCount"
+$daemonArguments = New-PrototypeDreamDaemonArguments -DmbPath $dmb
 
 function Convert-ExitCodeHex([int]$ExitCode) {
 	$unsigned = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$ExitCode), 0)
@@ -128,6 +135,7 @@ $evidence = [ordered]@{
 	overall = 'failed'
 	classification = 'environment_failure'
 	byond = $byondVersion
+	byond_version_verification = $byondIdentity.verification
 	runtime_case = $RuntimeCase
 	fixture = $null
 	game_port = 0
@@ -156,7 +164,7 @@ $evidence = [ordered]@{
 		launcher_exit_code_hex = $null
 		timed_out = $false
 		elapsed_milliseconds = $null
-		arguments = @('<dmb>', '0', '-trusted', '-log', 'dreamdaemon.world.log', '-close', '-verbose')
+		arguments = @('<dmb>') + @($daemonArguments | Select-Object -Skip 1)
 		process_samples = @()
 		last_progress_milliseconds = $null
 		process_exit_code = $null
@@ -177,10 +185,6 @@ $evidence = [ordered]@{
 try {
 	$fixtureMetadata = & (Join-Path $PSScriptRoot 'new-large-prototype-fixture.ps1') -OutputDirectory $fixtureRoot -PrototypeCount $PrototypeCount -Layout bucketed | ConvertFrom-Json -AsHashtable
 	$evidence.fixture = ConvertTo-PublicPrototypeFixtureEvidence $fixtureMetadata
-	$dme = Join-Path $fixtureRoot 'large_prototypes.dme'
-	$dmb = Join-Path $fixtureRoot 'large_prototypes.dmb'
-	$source = Join-Path $fixtureRoot 'large_prototypes.dm'
-	$marker = Join-Path $fixtureRoot 'startup.marker'
 	$evidence.dreammaker.source = Get-FileIdentity $source
 	$compileParameters = @{
 		FilePath = $compiler
@@ -215,7 +219,7 @@ try {
 	$existingDaemonIds = @(Get-Process -Name 'DreamDaemon' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 	$runtimeParameters = @{
 		FilePath = $daemon
-		ArgumentList = @($dmb, '0', '-trusted', '-log', 'dreamdaemon.world.log', '-close', '-verbose')
+		ArgumentList = $daemonArguments
 		WorkingDirectory = $fixtureRoot
 		PassThru = $true
 		RedirectStandardOutput = $daemonStdout

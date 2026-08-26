@@ -147,14 +147,16 @@ fn large_prototype_runtime_gate_exposes_control_and_boundary_modes_without_a_fix
         "[ValidateSet('control', 'boundary')][string]$RuntimeCase = 'boundary'",
         "[string]$ControlEvidencePath",
         "[ValidateRange(10, 900)][int]$RuntimeTimeoutSeconds = 300",
-        "ArgumentList = @($dmb, '0', '-trusted', '-log', 'dreamdaemon.world.log', '-close', '-verbose')",
         "Get-PrototypeRuntimeClassification",
         "classification",
         "process_samples",
         "$retainedFixtureId = \"byond-$byondVersion-$RuntimeCase-$PrototypeCount\"",
         "-Layout bucketed",
     ] {
-        assert!(gate.contains(required), "runtime gate is missing {required}");
+        assert!(
+            gate.contains(required),
+            "runtime gate is missing {required}"
+        );
     }
     assert!(
         !gate.contains("[int]$GamePort"),

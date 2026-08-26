@@ -88,7 +88,7 @@ The parser gate uses a compact flat declaration layout and resolves the first, b
     -EvidencePath .\integration\evidence\prototype-boundary.json
 ```
 
-The fixtures are generated in temporary directories and removed after successful gates. A readiness marker is required; a successful DreamMaker compile or live process alone is insufficient. Evidence classifies `passed`, `compile_failure`, `environment_failure`, `boundary_regression`, or `inconclusive_timeout` and retains bounded process metrics, logs, events, and cleanup state.
+The fixtures are generated in temporary directories and removed after successful gates. DreamDaemon uses an ephemeral port bound to `127.0.0.1`; the synthetic world is never intentionally exposed beyond the runner. A readiness marker is required; a successful DreamMaker compile or live process alone is insufficient. Evidence classifies `passed`, `compile_failure`, `environment_failure`, `boundary_regression`, or `inconclusive_timeout` and retains bounded process metrics, logs, events, version provenance, and cleanup state.
 
 The hosted workflow uses Ubuntu as the required synthetic BYOND engine lane. Windows synthetic startup remains diagnostic until three consecutive scheduled or manual runs pass. The real Windows Meridian-Rift, auxtools, and Tracy job remains required and has no dependency on the synthetic jobs.
 

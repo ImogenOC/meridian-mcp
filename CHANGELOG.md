@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read DreamDaemon `-logself` files so readiness markers and runtime output are available on Windows.
 - Replaced the fixed synthetic DreamDaemon port and ambiguous 60-second missing-marker failure with port-zero launch, a five-minute wall ceiling, bounded process telemetry, explicit classifications, and verified cleanup evidence.
 - Separated the flat parser stress corpus from the bucketed BYOND runtime corpus so the latter crosses 64K total declarations without testing DreamMaker's direct-child ceiling instead.
+- Made synthetic runtime version provenance portable to Linux and bound its temporary DreamDaemon listener explicitly to loopback for headless hosted runners.
 - Correct BYOND Topic request framing and response decoding for string and float responses.
 - Parse DMM/TGM maps with SpacemanDMM for exact dimensions, instance counts, and coordinates.
 - Render actual map PNGs through the SpacemanDMM minimap pipeline.

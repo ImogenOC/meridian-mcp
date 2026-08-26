@@ -1,6 +1,78 @@
 use std::path::Path;
 use std::process::Command;
 
+fn run_module_harness(name: &str, body: &str) -> std::process::Output {
+    let root = std::env::temp_dir().join(format!(
+        "meridian-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/process-readiness.psm1");
+    let harness = root.join("harness.ps1");
+    std::fs::write(
+        &harness,
+        format!(
+            "$ErrorActionPreference = 'Stop'\nImport-Module -Force '{}'\n{}\n",
+            module.display(),
+            body
+        ),
+    )
+    .unwrap();
+    let output = Command::new("pwsh")
+        .args(["-NoLogo", "-NoProfile", "-File"])
+        .arg(&harness)
+        .output()
+        .expect("PowerShell should launch");
+    std::fs::remove_dir_all(root).unwrap();
+    output
+}
+
+#[test]
+fn byond_version_identity_accepts_verified_linux_provenance_without_pe_metadata() {
+    let output = run_module_harness(
+        "byond-version-identity",
+        r#"$linux = Get-ByondVersionIdentity -ExpectedVersion '516.1687' -ReportedFileVersion $null
+if ($linux.version -ne '516.1687') { throw "Unexpected Linux version: $($linux.version)" }
+if ($linux.verification -ne 'expected_input_only') { throw "Unexpected Linux verification: $($linux.verification)" }
+$windows = Get-ByondVersionIdentity -ExpectedVersion '516.1687' -ReportedFileVersion '0.0.516.1687'
+if ($windows.verification -ne 'file_metadata_match') { throw "Unexpected Windows verification: $($windows.verification)" }
+try {
+	Get-ByondVersionIdentity -ExpectedVersion '516.1687' -ReportedFileVersion '0.0.516.1686' | Out-Null
+	throw 'A mismatched file version was accepted.'
+} catch {
+	if ($_.Exception.Message -eq 'A mismatched file version was accepted.') { throw }
+}"#,
+    );
+    assert!(
+        output.status.success(),
+        "BYOND version identity failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn prototype_runtime_arguments_bind_the_synthetic_world_to_loopback() {
+    let output = run_module_harness(
+        "prototype-runtime-arguments",
+        r#"$arguments = New-PrototypeDreamDaemonArguments -DmbPath 'fixture.dmb'
+$expected = @('fixture.dmb', '0', '-ip', '127.0.0.1', '-trusted', '-log', 'dreamdaemon.world.log', '-close', '-verbose')
+if ([string]::Join('|', $arguments) -ne [string]::Join('|', $expected)) {
+	throw "Unexpected DreamDaemon arguments: $($arguments -join '|')"
+}"#,
+    );
+    assert!(
+        output.status.success(),
+        "DreamDaemon argument construction failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn readiness_marker_wins_while_the_launched_process_is_still_running() {
     let root = std::env::temp_dir().join(format!(

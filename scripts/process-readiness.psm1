@@ -108,6 +108,46 @@ function Get-PrototypeRuntimeClassification {
 	return 'environment_failure'
 }
 
+function Get-ByondVersionIdentity {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][ValidatePattern('^[0-9]+\.[0-9]+$')][string]$ExpectedVersion,
+		[AllowNull()][AllowEmptyString()][string]$ReportedFileVersion
+	)
+
+	if ([string]::IsNullOrWhiteSpace($ReportedFileVersion)) {
+		return [ordered]@{
+			version = $ExpectedVersion
+			verification = 'expected_input_only'
+		}
+	}
+
+	try {
+		$parsed = [Version]$ReportedFileVersion
+	} catch {
+		throw "DreamMaker reported an invalid file version: $ReportedFileVersion"
+	}
+	$detectedVersion = if ($parsed.Build -ge 0 -and $parsed.Revision -ge 0) {
+		"$($parsed.Build).$($parsed.Revision)"
+	} else {
+		"$($parsed.Major).$($parsed.Minor)"
+	}
+	if ($detectedVersion -ne $ExpectedVersion) {
+		throw "DreamMaker version $detectedVersion does not match expected BYOND $ExpectedVersion."
+	}
+	return [ordered]@{
+		version = $detectedVersion
+		verification = 'file_metadata_match'
+	}
+}
+
+function New-PrototypeDreamDaemonArguments {
+	[CmdletBinding()]
+	param([Parameter(Mandatory)][string]$DmbPath)
+
+	return @($DmbPath, '0', '-ip', '127.0.0.1', '-trusted', '-log', 'dreamdaemon.world.log', '-close', '-verbose')
+}
+
 function ConvertTo-PublicPrototypeFixtureEvidence {
 	[CmdletBinding()]
 	param([Parameter(Mandatory)][System.Collections.IDictionary]$FixtureMetadata)
@@ -123,4 +163,4 @@ function ConvertTo-PublicPrototypeFixtureEvidence {
 	}
 }
 
-Export-ModuleMember -Function Wait-ProcessReadiness, Get-PrototypeRuntimeClassification, ConvertTo-PublicPrototypeFixtureEvidence
+Export-ModuleMember -Function Wait-ProcessReadiness, Get-PrototypeRuntimeClassification, Get-ByondVersionIdentity, New-PrototypeDreamDaemonArguments, ConvertTo-PublicPrototypeFixtureEvidence
