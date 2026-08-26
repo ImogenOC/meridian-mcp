@@ -12,8 +12,9 @@ on:
     - cron: "17 4 * * 1"
 
 jobs:
-  compatibility:
+  windows-meridian-compatibility:
     runs-on: windows-2025
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - name: Check out exact SpacemanDMM helper source
@@ -100,9 +101,6 @@ jobs:
           cargo clean
           cargo build --locked --release
           ./scripts/fetch-auxtools.ps1 -DestinationRoot ./target/release
-      - name: Run over-64K prototype startup gate
-        shell: pwsh
-        run: ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -PrerequisiteEvidencePath ./integration/evidence/byond-runtime.json -EvidencePath ./integration/evidence/large-prototype-compatibility.json
       - name: Run owned fixture and Meridian-Rift compatibility gates
         shell: pwsh
         run: |
@@ -117,14 +115,132 @@ jobs:
       - name: Run live Tracy profiler gate
         shell: pwsh
         run: ./scripts/run-tracy-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -HelperManifestPath ./integration/helpers-manifest.json -EvidencePath ./integration/evidence/tracy-compatibility.json
-      - name: Upload compatibility evidence
+      - name: Upload Windows Meridian compatibility evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: large-prototype-evidence-and-meridian-compatibility
+          name: windows-meridian-compatibility-evidence
           path: |
             integration/evidence/**
             !**/*.tracy
+            !**/*.dm
+            !**/*.dme
+            !**/*.dmb
+            !**/*.rsc
+          if-no-files-found: warn
+
+  prototype-parser-compatibility:
+    name: Prototype parser (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            label: Windows
+            artifact: windows
+            binary: ./target/release/meridian-mcp.exe
+          - os: ubuntu-24.04
+            label: Ubuntu 24.04
+            artifact: ubuntu
+            binary: ./target/release/meridian-mcp
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out exact SpacemanDMM source
+        uses: actions/checkout@v7
+        with:
+          repository: SpaceManiac/SpacemanDMM
+          ref: 351ddc0ffb2439876d4565ce5130bb6b027ee605
+          path: integration/SpacemanDMM
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Freshly build exact parser and dmdoc helper
+        shell: pwsh
+        run: |
+          cargo clean --manifest-path ./integration/SpacemanDMM/Cargo.toml
+          ./scripts/build-spacemandmm-helpers.ps1 -UpstreamPath ./integration/SpacemanDMM -OutputDirectory ./integration -ManifestPath ./integration/helpers-manifest.json
+          cargo build --locked --release
+      - name: Run over-64K MCP parser gate
+        shell: pwsh
+        run: ./scripts/run-large-prototype-parser-integration.ps1 -BinaryPath "${{ matrix.binary }}" -HelperManifestPath ./integration/helpers-manifest.json -EvidencePath "./integration/evidence/prototype-parser-${{ matrix.artifact }}.json"
+      - name: Upload parser compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: prototype-parser-${{ matrix.artifact }}-evidence
+          path: integration/evidence/*.json
+          if-no-files-found: warn
+
+  prototype-runtime-compatibility:
+    name: Prototype runtime (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    continue-on-error: ${{ !matrix.required }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: Ubuntu 24.04 required
+            artifact: ubuntu
+            required: true
+          - os: windows-2025
+            label: Windows diagnostic
+            artifact: windows
+            required: false
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux x86 runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends lib32z1 libcurl4t64:i386
+      - name: Install verified Linux BYOND 516.1687
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: ./scripts/install-byond-linux.ps1 -Version 516.1687 -ArchivePath "$env:RUNNER_TEMP/byond-linux.zip" -DestinationPath "$env:RUNNER_TEMP/byond-linux" -ExpectedSha256 8F43564407BB3117827F6727A6192ECAFFA3538AF76742B2FCD083F1CCCF4D8A
+      - name: Install verified Windows BYOND 516.1687
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install-byond.ps1 -Version 516.1687 -ArchivePath "$env:RUNNER_TEMP\byond.zip" -DestinationPath "$env:RUNNER_TEMP\byond" -ExpectedSha256 6A69818D8216E089D5C16506659A8883D8CCF06A673A2DD9F7C0777E81BCD9A4
+      - name: Install Windows BYOND runtime prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MERIDIAN_DXSDK_PACKAGE: Microsoft.DXSDK.D3DX
+          MERIDIAN_DXSDK_VERSION: 9.29.952.8
+          MERIDIAN_DXSDK_SHA256: ead0906ae8a26c18a7525da7490127a2110f7c58f18293738283e30e97c6ea4b
+        run: ./scripts/install-byond-runtime.ps1 -ApplicationDirectory "$env:RUNNER_TEMP\byond\byond\bin" -DownloadDirectory "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/prerequisites/package" -EvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json"
+      - name: Run 50K control fixture
+        shell: pwsh
+        run: |
+          $byondBin = if ($IsWindows) { "$env:RUNNER_TEMP\byond\byond\bin" } else { "$env:RUNNER_TEMP/byond-linux/byond/bin" }
+          if ($IsLinux) {
+            $env:PATH = $byondBin + [IO.Path]::PathSeparator + $env:PATH
+            $env:LD_LIBRARY_PATH = $byondBin
+          }
+          $dreamMaker = Join-Path $byondBin $(if ($IsWindows) { 'dm.exe' } else { 'DreamMaker' })
+          $prerequisiteEvidence = if ($IsWindows) { "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json" } else { '' }
+          ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath $dreamMaker -PrototypeCount 50000 -RuntimeCase control -PrerequisiteEvidencePath $prerequisiteEvidence -RuntimeTimeoutSeconds 300 -EvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/control/evidence.json"
+      - name: Run over-64K boundary fixture
+        shell: pwsh
+        run: |
+          $byondBin = if ($IsWindows) { "$env:RUNNER_TEMP\byond\byond\bin" } else { "$env:RUNNER_TEMP/byond-linux/byond/bin" }
+          if ($IsLinux) {
+            $env:PATH = $byondBin + [IO.Path]::PathSeparator + $env:PATH
+            $env:LD_LIBRARY_PATH = $byondBin
+          }
+          $dreamMaker = Join-Path $byondBin $(if ($IsWindows) { 'dm.exe' } else { 'DreamMaker' })
+          $prerequisiteEvidence = if ($IsWindows) { "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json" } else { '' }
+          ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath $dreamMaker -PrototypeCount 65537 -RuntimeCase boundary -ControlEvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/control/evidence.json" -PrerequisiteEvidencePath $prerequisiteEvidence -RuntimeTimeoutSeconds 300 -EvidencePath "./integration/evidence/prototype-runtime/${{ matrix.artifact }}/boundary/evidence.json"
+      - name: Upload runtime compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: prototype-runtime-${{ matrix.artifact }}-evidence
+          path: integration/evidence/prototype-runtime/${{ matrix.artifact }}/**
           if-no-files-found: warn
 
   tracy-linux-live:

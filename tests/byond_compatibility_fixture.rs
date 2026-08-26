@@ -57,21 +57,151 @@ fn generated_runtime_fixture_exceeds_the_64k_prototype_boundary() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let metadata: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "fixture generator did not emit JSON: {error}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(metadata["declared_leaf_count"], 65_537);
+    assert_eq!(metadata["declared_type_count"], 65_538);
+    assert_eq!(metadata["first_path"], "/datum/mlp/p00000");
+    assert_eq!(metadata["boundary_path"], "/datum/mlp/p65535");
+    assert_eq!(metadata["last_path"], "/datum/mlp/p65536");
+
     let source = std::fs::read_to_string(fixture.join("large_prototypes.dm")).unwrap();
     let prototypes = source
         .lines()
-        .filter(|line| line.starts_with("/datum/meridian_large_prototype/b") && line.contains("/p"))
+        .filter(|line| line.starts_with("/datum/mlp/p"))
         .collect::<HashSet<_>>();
     assert_eq!(prototypes.len(), 65_537);
     let parent_buckets = prototypes
         .iter()
         .filter_map(|path| path.rsplit_once('/').map(|(parent, _)| parent))
         .collect::<HashSet<_>>();
-    assert!(parent_buckets.len() > 1);
+    assert_eq!(parent_buckets, HashSet::from(["/datum/mlp"]));
+    assert_eq!(
+        source.lines().filter(|line| *line == "/datum/mlp").count(),
+        1
+    );
+    assert!(!source.contains("/datum/meridian_large_prototype/b"));
     assert!(source.contains("MERIDIAN_LARGE_PROTOTYPE_READY"));
     assert!(source.contains("text2file(\"MERIDIAN_LARGE_PROTOTYPE_READY\", \"startup.marker\")"));
     assert!(fixture.join("large_prototypes.dme").is_file());
     std::fs::remove_dir_all(fixture).unwrap();
+}
+
+#[test]
+fn generated_byond_runtime_fixture_uses_bounded_child_buckets() {
+    let fixture = test_directory("large-prototypes-bucketed");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/new-large-prototype-fixture.ps1");
+    let output = run_pwsh(
+        &script,
+        &[
+            "-OutputDirectory",
+            fixture.to_str().unwrap(),
+            "-PrototypeCount",
+            "65537",
+            "-Layout",
+            "bucketed",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "bucketed fixture generation failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let metadata: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(metadata["layout"], "bucketed");
+    assert_eq!(metadata["declared_leaf_count"], 65_537);
+    assert_eq!(metadata["declared_parent_count"], 258);
+    assert_eq!(metadata["declared_type_count"], 65_795);
+    assert_eq!(metadata["first_path"], "/datum/mlp/b0000/p00000");
+    assert_eq!(metadata["boundary_path"], "/datum/mlp/b0255/p65535");
+    assert_eq!(metadata["last_path"], "/datum/mlp/b0256/p65536");
+
+    let source = std::fs::read_to_string(fixture.join("large_prototypes.dm")).unwrap();
+    assert_eq!(
+        source
+            .lines()
+            .filter(|line| line.starts_with("/datum/mlp/b") && !line.contains("/p"))
+            .count(),
+        257
+    );
+    assert!(source.contains("/datum/mlp/b0256/p65536"));
+    std::fs::remove_dir_all(fixture).unwrap();
+}
+
+#[test]
+fn large_prototype_runtime_gate_exposes_control_and_boundary_modes_without_a_fixed_port() {
+    let gate = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run-large-prototype-integration.ps1"),
+    )
+    .unwrap();
+    for required in [
+        "[ValidateRange(1, 100000)][int]$PrototypeCount = 65537",
+        "[ValidateSet('control', 'boundary')][string]$RuntimeCase = 'boundary'",
+        "[string]$ControlEvidencePath",
+        "[ValidateRange(10, 900)][int]$RuntimeTimeoutSeconds = 300",
+        "ArgumentList = @($dmb, '0', '-trusted', '-log', 'dreamdaemon.world.log', '-close', '-verbose')",
+        "Get-PrototypeRuntimeClassification",
+        "classification",
+        "process_samples",
+        "$retainedFixtureId = \"byond-$byondVersion-$RuntimeCase-$PrototypeCount\"",
+        "-Layout bucketed",
+    ] {
+        assert!(gate.contains(required), "runtime gate is missing {required}");
+    }
+    assert!(
+        !gate.contains("[int]$GamePort"),
+        "runtime gate must not reserve a fixed port"
+    );
+}
+
+#[test]
+fn parser_integration_resolves_generated_first_and_last_types_through_mcp() {
+    let root = test_directory("large-prototype-parser");
+    let evidence = root.join("parser-evidence.json");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/run-large-prototype-parser-integration.ps1");
+    let binary = Path::new(env!("CARGO_BIN_EXE_meridian-mcp"));
+    let output = run_pwsh(
+        &script,
+        &[
+            "-BinaryPath",
+            binary.to_str().unwrap(),
+            "-EvidencePath",
+            evidence.to_str().unwrap(),
+            "-PrototypeCount",
+            "16",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "parser integration failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let result: Value = serde_json::from_slice(&std::fs::read(&evidence).unwrap()).unwrap();
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["overall"], "passed");
+    assert_eq!(result["fixture"]["declared_leaf_count"], 16);
+    assert_eq!(result["fixture"]["declared_type_count"], 17);
+    assert!(result["parse"]["total_types"].as_u64().unwrap() >= 17);
+    assert!(result["parse"]["indexed_symbols"].as_u64().unwrap() > 0);
+    assert_eq!(result["lookups"][0]["path"], "/datum/mlp/p00000");
+    assert_eq!(result["lookups"][1]["path"], "/datum/mlp/p00015");
+    assert!(result["binary"]["sha256"].as_str().is_some());
+    assert_eq!(
+        result["spacemandmm"]["source_revision"],
+        "351ddc0ffb2439876d4565ce5130bb6b027ee605"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

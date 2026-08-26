@@ -2,6 +2,59 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
+fn workflow_job_block<'a>(workflow: &'a str, job_name: &str) -> &'a str {
+    let header = format!("  {job_name}:\n");
+    let start = workflow
+        .find(&header)
+        .unwrap_or_else(|| panic!("workflow is missing job {job_name}"));
+    let body_start = start + header.len();
+    let mut cursor = body_start;
+    for line in workflow[body_start..].split_inclusive('\n') {
+        if line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':') {
+            return &workflow[start..cursor];
+        }
+        cursor += line.len();
+    }
+    &workflow[start..]
+}
+
+#[test]
+fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
+    let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
+        .expect("BYOND integration workflow should be readable");
+
+    let windows = workflow_job_block(&workflow, "windows-meridian-compatibility");
+    for required in [
+        "scripts/run-byond-integration.ps1",
+        "scripts/run-auxtools-integration.ps1",
+        "scripts/run-tracy-integration.ps1",
+    ] {
+        assert!(
+            windows.contains(required),
+            "Windows product job is missing {required}"
+        );
+    }
+    assert!(
+        !windows.contains("needs:"),
+        "Windows product evidence must not depend on a synthetic gate"
+    );
+
+    let parser = workflow_job_block(&workflow, "prototype-parser-compatibility");
+    assert!(parser.contains("windows-2025"));
+    assert!(parser.contains("ubuntu-24.04"));
+    assert!(parser.contains("scripts/run-large-prototype-parser-integration.ps1"));
+
+    let runtime = workflow_job_block(&workflow, "prototype-runtime-compatibility");
+    assert!(runtime.contains("os: ubuntu-24.04"));
+    assert!(runtime.contains("required: true"));
+    assert!(runtime.contains("os: windows-2025"));
+    assert!(runtime.contains("required: false"));
+    assert!(runtime.contains("continue-on-error: ${{ !matrix.required }}"));
+    assert!(runtime
+        .contains("prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json"));
+    assert!(runtime.contains("-PrerequisiteEvidencePath $prerequisiteEvidence"));
+}
+
 #[test]
 fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
     let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
@@ -205,8 +258,8 @@ fn byond_runtime_and_large_prototype_failures_retain_diagnostics() {
         .expect("BYOND integration workflow should be readable");
     for required in [
         "if: always()",
-        "large-prototype-evidence",
-        "integration/evidence/**",
+        "prototype-runtime-${{ matrix.artifact }}-evidence",
+        "integration/evidence/prototype-runtime/${{ matrix.artifact }}/**",
     ] {
         assert!(
             workflow.contains(required),

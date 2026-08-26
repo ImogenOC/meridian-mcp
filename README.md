@@ -20,7 +20,7 @@ The default capability mode is read-only analysis. Development mode must be enab
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Parse, lookup, definitions, and search | Provisional | Unit-tested with purpose-written fixtures; full-corpus evidence is recorded separately. |
+| Parse, lookup, definitions, and search | Provisional | Unit-tested with purpose-written fixtures; the named matrix separately verifies freshly built MCP/SpacemanDMM parsing above 64K declared leaves on Windows and Ubuntu. |
 | DreamChecker diagnostics | Provisional | SpacemanDMM analysis, not DreamMaker acceptance. |
 | DMI profiling, extraction, duplicate detection, and icon audit | Experimental | Pixel/metadata analysis is bounded and non-mutating; hotspot parsing remains incomplete upstream. |
 | DMM/TGM information, differences, search, and rendering | Provisional | Parser-backed dimensions, models, coordinates, render passes, bounds, and typed batches. |
@@ -168,8 +168,9 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 | `scripts/install-meridian-mcp.ps1` | Atomically install a release binary, manifest-selected dmdoc/Tracy helpers, and the verified auxtools DLL into a destination root. `-EnableTracy` requires both native Tracy manifest identities. The script does not edit Codex configuration. |
 | `scripts/configure-codex-meridian-mcp.ps1` | Update one named Meridian-MCP server entry in an existing Codex TOML configuration with the installed binary and helper manifest. `-EnableTracy` writes the explicit Tracy opt-in; existing roots, compiler, mode, and build ceiling remain untouched. |
 | `scripts/run-byond-integration.ps1` | Compile the owned BYOND fixtures used by the runtime integration gate. |
-| `scripts/new-large-prototype-fixture.ps1` | Generate a temporary technical DreamMaker environment containing more than 65,536 unique prototype paths. It creates no game content. |
-| `scripts/run-large-prototype-integration.ps1` | Compile and start the generated over-64K prototype world with the pinned BYOND runtime, require its readiness marker, and write machine-readable compatibility evidence. |
+| `scripts/new-large-prototype-fixture.ps1` | Generate a temporary technical DreamMaker environment containing a requested number of unique prototype paths. Flat layout stresses the MCP parser; bucketed layout keeps each parent below DreamMaker's direct-child ceiling for BYOND runtime testing. It creates no game content. |
+| `scripts/run-large-prototype-parser-integration.ps1` | Generate a bounded technical type corpus, parse it through the selected Meridian-MCP binary, resolve its first, boundary, and last declared type paths, and write parser/provenance evidence. It does not start BYOND. |
+| `scripts/run-large-prototype-integration.ps1` | Compile and start a generated control or over-64K world with pinned BYOND, require its readiness marker, sample bounded process progress, classify failures, verify cleanup, and write machine-readable runtime evidence. |
 | `scripts/run-auxtools-integration.ps1` | Drive a supplied, already-compiled debug-capable DMB through auxtools launch, inventory/query, exception-breakpoint configuration, and clean stop, writing machine-readable evidence. The BYOND CI passes Meridian-Rift's `tgstation.dmb`; the tiny owned compile fixture is intentionally not treated as a DreamSeeker-hosted world. |
 | `scripts/run-tracy-integration.ps1` | Compile the technical profiling fixture and drive prepare, launch, capture, hotspot/zone/frame queries, comparison, status, and stop through the installed MCP, writing machine-readable evidence. |
 | `scripts/run-meridian-analysis-compatibility.ps1` | Run the versioned read-only parse, lookup, definition, search, diagnostics, DMI, map, render, and documentation compatibility manifest against a real Meridian-Rift checkout. |
@@ -244,7 +245,7 @@ Active operations are available only in development mode. `dm_compile` invokes D
 | Platform | Status |
 | --- | --- |
 | Windows | Verified only for evidence listed in [compatibility](docs/compatibility.md) |
-| Linux | Provisional Ubuntu 24.04 CI gate for Rust, the release binary, stdio MCP, and owned-fixture parse/search; no BYOND claim |
+| Linux | Provisional Ubuntu 24.04 gates for Rust, release stdio MCP, over-64K parser compatibility, required synthetic BYOND startup, and independent live Tracy evidence |
 | macOS | Unsupported and untested |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md) for development and verification guidance.

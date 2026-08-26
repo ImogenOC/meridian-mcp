@@ -64,16 +64,35 @@ This compiles the purpose-written runtime fixture with DreamMaker. To exercise t
     -MapDmmPath .\tests\fixtures\maps\fixture.dmm
 ```
 
-The named BYOND 516.1687 workflow also verifies the x86 MSVC runtime required by auxtools and starts a generated world with 65,537 unique prototype paths:
+The named BYOND 516.1687 workflow separates parser, synthetic runtime, and real Windows product evidence. Verify the parser boundary independently through the release MCP:
+
+```powershell
+.\scripts\run-large-prototype-parser-integration.ps1 `
+    -BinaryPath .\target\release\meridian-mcp.exe `
+    -EvidencePath .\integration\evidence\large-prototype-parser.json
+```
+
+The parser gate uses a compact flat declaration layout and resolves the first, boundary, and last declared paths. It does not start DreamMaker or DreamDaemon. The synthetic runtime uses 256-child buckets so it exceeds 64K total declarations without hitting DreamMaker's separate direct-child limit. Run a bucketed control before the boundary fixture:
 
 ```powershell
 .\scripts\install-auxtools-runtime.ps1
 .\scripts\run-large-prototype-integration.ps1 `
     -DreamMakerPath 'C:\path\to\BYOND\bin\dm.exe' `
-    -EvidencePath .\integration\evidence\large-prototype-compatibility.json
+    -PrototypeCount 50000 -RuntimeCase control `
+    -EvidencePath .\integration\evidence\prototype-control.json
+
+.\scripts\run-large-prototype-integration.ps1 `
+    -DreamMakerPath 'C:\path\to\BYOND\bin\dm.exe' `
+    -PrototypeCount 65537 -RuntimeCase boundary `
+    -ControlEvidencePath .\integration\evidence\prototype-control.json `
+    -EvidencePath .\integration\evidence\prototype-boundary.json
 ```
 
-The large fixture is generated in a temporary directory and removed after the gate. Its successful DreamDaemon readiness marker is the evidence for BYOND's post-64K startup behavior; a successful DreamMaker compile alone is insufficient.
+The fixtures are generated in temporary directories and removed after successful gates. A readiness marker is required; a successful DreamMaker compile or live process alone is insufficient. Evidence classifies `passed`, `compile_failure`, `environment_failure`, `boundary_regression`, or `inconclusive_timeout` and retains bounded process metrics, logs, events, and cleanup state.
+
+The hosted workflow uses Ubuntu as the required synthetic BYOND engine lane. Windows synthetic startup remains diagnostic until three consecutive scheduled or manual runs pass. The real Windows Meridian-Rift, auxtools, and Tracy job remains required and has no dependency on the synthetic jobs.
+
+To run the hosted check without opening a pull request, open the repository's **Actions** tab, select **BYOND integration**, choose **Run workflow**, supply the intended Meridian-Rift ref, and start the run. The artifacts are `windows-meridian-compatibility-evidence`, `prototype-parser-windows-evidence`, `prototype-parser-ubuntu-evidence`, `prototype-runtime-windows-evidence`, `prototype-runtime-ubuntu-evidence`, and `tracy-linux-compatibility-evidence`. This environment does not provide the GitHub CLI, so no `gh workflow run` command is asserted here.
 
 ## Meridian-Rift full corpus
 
