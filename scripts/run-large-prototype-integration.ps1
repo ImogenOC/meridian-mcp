@@ -56,18 +56,20 @@ try {
 		[void]$ownedDaemonIds.Add($runtime.ExitCode)
 	}
 	$readiness = [Diagnostics.Stopwatch]::StartNew()
+	$markerReady = $false
 	do {
 		foreach ($process in @(Get-Process -Name 'DreamDaemon' -ErrorAction SilentlyContinue)) {
 			if ($existingDaemonIds -notcontains $process.Id) { [void]$ownedDaemonIds.Add($process.Id) }
 		}
-		if ((Test-Path -LiteralPath $marker -PathType Leaf) -and (Get-Content -Raw -LiteralPath $marker) -eq 'MERIDIAN_LARGE_PROTOTYPE_READY') {
-			break
+		if (Test-Path -LiteralPath $marker -PathType Leaf) {
+			$markerReady = (Get-Content -Raw -LiteralPath $marker).TrimEnd() -eq 'MERIDIAN_LARGE_PROTOTYPE_READY'
+			if ($markerReady) { break }
 		}
 		Start-Sleep -Milliseconds 100
 	} while ($readiness.Elapsed.TotalSeconds -lt $RuntimeTimeoutSeconds)
 	$readiness.Stop()
 	$runtimeOutput = ((Get-Content -Raw -LiteralPath $stdout -ErrorAction SilentlyContinue) + (Get-Content -Raw -LiteralPath $stderr -ErrorAction SilentlyContinue))
-	if (-not (Test-Path -LiteralPath $marker -PathType Leaf) -or (Get-Content -Raw -LiteralPath $marker) -ne 'MERIDIAN_LARGE_PROTOTYPE_READY') {
+	if (-not $markerReady) {
 		throw "DreamDaemon did not emit the over-64K readiness marker within $RuntimeTimeoutSeconds seconds; launcher exit code $($runtime.ExitCode): $runtimeOutput"
 	}
 

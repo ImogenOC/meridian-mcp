@@ -27,8 +27,8 @@ fn run_pwsh(script: &Path, arguments: &[&str]) -> std::process::Output {
 #[test]
 fn generated_runtime_fixture_exceeds_the_64k_prototype_boundary() {
     let fixture = test_directory("large-prototypes");
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts/new-large-prototype-fixture.ps1");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/new-large-prototype-fixture.ps1");
     let output_directory = fixture.to_str().unwrap();
     let output = run_pwsh(
         &script,
@@ -49,9 +49,7 @@ fn generated_runtime_fixture_exceeds_the_64k_prototype_boundary() {
     let source = std::fs::read_to_string(fixture.join("large_prototypes.dm")).unwrap();
     let prototypes = source
         .lines()
-        .filter(|line| {
-            line.starts_with("/datum/meridian_large_prototype/b") && line.contains("/p")
-        })
+        .filter(|line| line.starts_with("/datum/meridian_large_prototype/b") && line.contains("/p"))
         .collect::<HashSet<_>>();
     assert_eq!(prototypes.len(), 65_537);
     let parent_buckets = prototypes
@@ -71,8 +69,7 @@ fn auxtools_runtime_check_reports_missing_x86_crt_files() {
     for name in ["MSVCP140.dll", "VCRUNTIME140.dll"] {
         std::fs::write(runtime.join(name), b"technical fixture").unwrap();
     }
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts/install-auxtools-runtime.ps1");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/install-auxtools-runtime.ps1");
     let runtime_directory = runtime.to_str().unwrap();
     let valid = run_pwsh(&script, &["-RuntimeDirectory", runtime_directory]);
     assert!(

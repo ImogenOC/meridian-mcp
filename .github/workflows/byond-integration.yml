@@ -102,7 +102,7 @@ jobs:
             -EvidencePath ./integration/evidence/meridian-compatibility.json
       - name: Run live auxtools debugger gate
         shell: pwsh
-        run: ./scripts/run-auxtools-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -EvidencePath ./integration/evidence/auxtools-compatibility.json
+        run: ./scripts/run-auxtools-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -EvidencePath ./integration/evidence/auxtools-compatibility.json -DmbPath ./integration/Meridian-Rift/tgstation.dmb
       - name: Run live Tracy profiler gate
         shell: pwsh
         run: ./scripts/run-tracy-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -HelperManifestPath ./integration/helpers-manifest.json -EvidencePath ./integration/evidence/tracy-compatibility.json

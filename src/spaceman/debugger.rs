@@ -246,12 +246,7 @@ impl AuxConnection {
         }
     }
     pub async fn request(&mut self, request: AuxRequest) -> Result<AuxResponse, AuxProtocolError> {
-        let payload = bincode::serialize(&request)?;
-        if payload.is_empty() || payload.len() > self.max_message_bytes {
-            return Err(AuxProtocolError::Length(payload.len() as u32));
-        }
-        self.stream.write_u32_le(payload.len() as u32).await?;
-        self.stream.write_all(&payload).await?;
+        self.send(request).await?;
         loop {
             let response = tokio::time::timeout(self.response_timeout, self.read_response())
                 .await
@@ -264,6 +259,15 @@ impl AuxConnection {
                 response => return Ok(response),
             }
         }
+    }
+    pub async fn send(&mut self, request: AuxRequest) -> Result<(), AuxProtocolError> {
+        let payload = bincode::serialize(&request)?;
+        if payload.is_empty() || payload.len() > self.max_message_bytes {
+            return Err(AuxProtocolError::Length(payload.len() as u32));
+        }
+        self.stream.write_u32_le(payload.len() as u32).await?;
+        self.stream.write_all(&payload).await?;
+        Ok(())
     }
     async fn read_response(&mut self) -> Result<AuxResponse, AuxProtocolError> {
         let len = self.stream.read_u32_le().await?;
@@ -395,5 +399,28 @@ mod tests {
             connection.request(AuxRequest::Stacks).await,
             Err(AuxProtocolError::Length(1025))
         ));
+    }
+
+    #[tokio::test]
+    async fn send_only_request_does_not_wait_for_a_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let len = stream.read_u32_le().await.unwrap();
+            let mut request = vec![0; len as usize];
+            stream.read_exact(&mut request).await.unwrap();
+            assert!(matches!(
+                bincode::deserialize::<AuxRequest>(&request).unwrap(),
+                AuxRequest::CatchRuntimes { should_catch: true }
+            ));
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut connection = AuxConnection::new(stream, 1024, Duration::from_millis(10));
+        connection
+            .send(AuxRequest::CatchRuntimes { should_catch: true })
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 }

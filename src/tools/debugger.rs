@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -52,20 +53,24 @@ pub async fn launch(
     }
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let port = listener.local_addr()?.port();
-    let mut command = Command::new(&installation.dreamseeker);
+    let dreamseeker = normalize_spawn_path(&installation.dreamseeker);
+    let dmb_spawn_path = normalize_spawn_path(&dmb_path);
+    let working_directory = normalize_spawn_path(
+        dmb_path
+            .parent()
+            .ok_or_else(|| anyhow!("DMB path has no parent"))?,
+    );
+    let debugger_dll = normalize_spawn_path(&installation.debug_server_dll);
+    let mut command = Command::new(dreamseeker);
     command
-        .arg(&dmb_path)
+        .arg(dmb_spawn_path)
         .arg("-trusted")
-        .current_dir(
-            dmb_path
-                .parent()
-                .ok_or_else(|| anyhow!("DMB path has no parent"))?,
-        )
+        .current_dir(working_directory)
         .env_clear()
         .envs(dreamseeker_environment())
         .env("AUXTOOLS_DEBUG_MODE", "LAUNCHED")
         .env("AUXTOOLS_DEBUG_PORT", port.to_string())
-        .env("AUXTOOLS_DEBUG_DLL", &installation.debug_server_dll)
+        .env("AUXTOOLS_DEBUG_DLL", debugger_dll)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -144,6 +149,21 @@ pub async fn launch(
         ToolMetadata::complete(Some(generation)),
         json!({"lifecycle":"running","port":port,"dmb_path":dmb_path,"dll_sha256":installation.dll_sha256}),
     ))
+}
+
+fn normalize_spawn_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path_text = path.to_string_lossy();
+        if let Some(unc_path) = path_text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc_path}"));
+        }
+        if let Some(dos_path) = path_text.strip_prefix(r"\\?\") {
+            return PathBuf::from(dos_path);
+        }
+    }
+
+    path.to_path_buf()
 }
 
 fn dreamseeker_environment() -> Vec<(String, OsString)> {
@@ -322,16 +342,17 @@ pub async fn set_exception_breakpoints(state: &ServerState, args: Value) -> Resu
         .get("break_on_runtimes")
         .and_then(Value::as_bool)
         .ok_or_else(|| anyhow!("Missing break_on_runtimes"))?;
-    let (generation, response) = request(
-        state,
-        AuxRequest::CatchRuntimes {
+    let mut slot = state.debugger().await;
+    let session = slot
+        .as_mut()
+        .ok_or_else(|| anyhow!("no debugger session is active"))?;
+    let generation = session.state_generation;
+    session
+        .connection
+        .send(AuxRequest::CatchRuntimes {
             should_catch: enabled,
-        },
-    )
-    .await?;
-    if !matches!(response, AuxResponse::Ack) {
-        return Err(anyhow!("runtime breakpoint request was not acknowledged"));
-    }
+        })
+        .await?;
     Ok(json_success(
         ToolMetadata::complete(Some(generation)),
         json!({"break_on_runtimes":enabled}),
@@ -706,6 +727,20 @@ mod tests {
             assert!(!name.contains("password"));
             assert!(!name.contains("authorization"));
             assert!(!name.contains("cookie"));
+        }
+    }
+
+    #[test]
+    fn debugger_normalizes_windows_extended_paths_for_byond() {
+        if cfg!(windows) {
+            assert_eq!(
+                normalize_spawn_path(Path::new(r"\\?\C:\byond\debug_server.dll")),
+                PathBuf::from(r"C:\byond\debug_server.dll")
+            );
+            assert_eq!(
+                normalize_spawn_path(Path::new(r"\\?\UNC\server\share\world.dmb")),
+                PathBuf::from(r"\\server\share\world.dmb")
+            );
         }
     }
 }

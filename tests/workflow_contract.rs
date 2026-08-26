@@ -73,6 +73,8 @@ fn byond_workflow_uses_the_516_1687_runtime_baseline() {
         "8F43564407BB3117827F6727A6192ECAFFA3538AF76742B2FCD083F1CCCF4D8A",
         "scripts/install-auxtools-runtime.ps1",
         "scripts/run-large-prototype-integration.ps1",
+        "scripts/run-auxtools-integration.ps1",
+        "-DmbPath ./integration/Meridian-Rift/tgstation.dmb",
         "cargo clean",
     ] {
         assert!(
