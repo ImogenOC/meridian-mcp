@@ -1,3 +1,4 @@
+use crate::process_metrics::ProcessIdentity;
 use serde::Serialize;
 #[cfg(windows)]
 use std::collections::HashMap;
@@ -29,6 +30,77 @@ pub struct NetworkAuditReport {
     pub truncated: bool,
     pub observations: Vec<EndpointObservation>,
     pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct OwnedEndpointObservation {
+    pub owner: ProcessIdentity,
+    pub protocol: EndpointProtocol,
+    pub local_endpoint: String,
+    pub remote_endpoint: Option<String>,
+    pub first_seen_ms: u128,
+    pub last_seen_ms: u128,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct NetworkEvidence {
+    pub mode: String,
+    pub network_isolation_confirmed: bool,
+    pub capture_complete: bool,
+    pub listener_verified: bool,
+    pub collector_connection_verified: bool,
+    pub owned_loopback_endpoints: Vec<OwnedEndpointObservation>,
+    pub observation_failures: Vec<String>,
+}
+
+pub fn tracy_network_evidence(
+    report: NetworkAuditReport,
+    profiler_port: u16,
+    identities: &[ProcessIdentity],
+    listener_verified: bool,
+    collector_connection_verified: bool,
+) -> NetworkEvidence {
+    let mut observation_failures = report.warning.into_iter().collect::<Vec<_>>();
+    if report.truncated {
+        observation_failures.push("network_observations_truncated".into());
+    }
+    let owned_loopback_endpoints = report
+        .observations
+        .into_iter()
+        .filter_map(|observation| {
+            let owner = identities
+                .iter()
+                .find(|identity| identity.pid == observation.process_id)?
+                .clone();
+            let relevant = endpoint_is_loopback_port(&observation.local_endpoint, profiler_port)
+                || observation
+                    .remote_endpoint
+                    .as_deref()
+                    .is_some_and(|endpoint| endpoint_is_loopback_port(endpoint, profiler_port));
+            relevant.then_some(OwnedEndpointObservation {
+                owner,
+                protocol: observation.protocol,
+                local_endpoint: observation.local_endpoint,
+                remote_endpoint: observation.remote_endpoint,
+                first_seen_ms: observation.first_seen_ms,
+                last_seen_ms: observation.last_seen_ms,
+            })
+        })
+        .collect();
+    NetworkEvidence {
+        mode: "best_effort_owned_loopback".into(),
+        network_isolation_confirmed: false,
+        capture_complete: false,
+        listener_verified,
+        collector_connection_verified,
+        owned_loopback_endpoints,
+        observation_failures,
+    }
+}
+
+fn endpoint_is_loopback_port(endpoint: &str, port: u16) -> bool {
+    let port = format!(":{port}");
+    endpoint.ends_with(&port) && (endpoint.starts_with("127.") || endpoint.starts_with("[::1]"))
 }
 
 #[cfg(windows)]

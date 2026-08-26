@@ -1,15 +1,23 @@
 use super::ToolExecutionContext;
-use crate::atomic_output::{reserve_external_atomic, write_atomic, OutputArtifact};
+use crate::atomic_output::{write_atomic, OutputArtifact};
 use crate::mcp::ToolResult;
 use crate::result::{json_success, ToolMetadata};
+use crate::tracy_artifact::reserve_trace_set;
+use crate::tracy_collector::{TracyCollector, TracyCollectorSpec, TracySessionPhase};
+use crate::tracy_experiment::{
+    bind_workload, canonical_sha256, experiment_identity, finalize_executable,
+    verify_locked_workload, ExecutableIdentity, ExperimentLaunchManifest, ExperimentState,
+    HelperIdentity, NativeModuleIdentity, WorkloadInput,
+};
 use crate::tracy_protocol::{invoke_helper, TracyCommand, TracyInvocationSpec};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
+use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
 
 pub async fn prepare(context: &ToolExecutionContext, args: Value) -> Result<ToolResult> {
     let installation = context
@@ -85,6 +93,120 @@ pub async fn launch(
             "the verified byond-tracy hook is not prepared beside the DMB; call dm_tracy_prepare"
         ));
     }
+    {
+        let mut runtime = state.runtime().await;
+        if runtime.is_game_running() {
+            return Err(anyhow!("an MCP-owned runtime is already active"));
+        }
+    }
+    let canonical_dmb = dmb_path.canonicalize()?;
+    let integrity_root = git_workspace_root(
+        canonical_dmb
+            .parent()
+            .ok_or_else(|| anyhow!("dmb_path has no parent"))?,
+    )?;
+    let integrity = crate::workspace_integrity::IntegrityBaseline::capture(&integrity_root)?;
+    let workload_draft = workload_from_args(&args)?;
+    let experiment_name = optional_string(&args, "experiment_name")?;
+    if let Some(name) = &experiment_name {
+        crate::tracy_experiment::validate_workload(WorkloadInput {
+            external_run_id: Some(name.clone()),
+            ..Default::default()
+        })?;
+    }
+    let dreamdaemon = super::runtime::find_dreamdaemon()
+        .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?
+        .canonicalize()?;
+    let launch_parameters_sha256 = canonical_sha256(&json!({
+        "game_port": args.get("game_port").and_then(Value::as_u64).unwrap_or(1337),
+        "startup_timeout_ms": args.get("startup_timeout_ms").and_then(Value::as_u64),
+        "profiler_transport": "loopback_ephemeral",
+    }))?;
+    let rsc_path = canonical_dmb.with_extension("rsc");
+    let executable = finalize_executable(ExecutableIdentity {
+        schema: 1,
+        executable_id: String::new(),
+        repository_revision: git_revision(&integrity_root),
+        repository_dirty_digest: integrity.digest.clone(),
+        dmb_sha256: hash_file(&canonical_dmb)?,
+        rsc_sha256: rsc_path
+            .is_file()
+            .then(|| hash_file(&rsc_path))
+            .transpose()?,
+        byond_version: installation
+            .hook
+            .byond_max_version
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned()),
+        byond_executable_sha256: hash_file(&dreamdaemon)?,
+        native_modules: vec![NativeModuleIdentity {
+            name: hook_name.to_string_lossy().into_owned(),
+            sha256: installation.hook.sha256.clone(),
+        }],
+        helper_identity: HelperIdentity {
+            source_revision: installation.helper.source_revision.clone(),
+            sha256: installation.helper.sha256.clone(),
+            patch_sha256: installation.helper.patch_sha256.clone(),
+        },
+        hook_identity: HelperIdentity {
+            source_revision: installation.hook.source_revision.clone(),
+            sha256: installation.hook.sha256.clone(),
+            patch_sha256: Some(canonical_sha256(&installation.hook.patches)?),
+        },
+        startup_mode: "tracy".to_owned(),
+        launch_parameters_sha256,
+    })?;
+    let launch_manifest = ExperimentLaunchManifest {
+        schema: 1,
+        experiment_name,
+        executable: executable.clone(),
+        workload_draft: workload_draft.clone(),
+    };
+    let experiment_directory = if let Some(path) = optional_string(&args, "experiment_directory")? {
+        let path = context.policy().read_path(path)?;
+        if !path.is_dir() {
+            return Err(anyhow!(
+                "experiment_directory must be an existing contained directory"
+            ));
+        }
+        path
+    } else {
+        canonical_dmb
+            .parent()
+            .ok_or_else(|| anyhow!("dmb_path has no parent"))?
+            .to_owned()
+    };
+    let launch_manifest_path = experiment_directory.join("experiment-launch.meridian.json");
+    let launch_manifest_bytes = serde_json::to_vec_pretty(&launch_manifest)?;
+    let launch_artifact = write_atomic(context.policy(), &launch_manifest_path, false, |output| {
+        std::io::Write::write_all(output, &launch_manifest_bytes)?;
+        std::io::Write::write_all(output, b"\n")?;
+        Ok(())
+    })?;
+    let identity_manifest_path =
+        launch_manifest_path.with_file_name("experiment-identity.meridian.json");
+    let final_manifest_path =
+        launch_manifest_path.with_file_name("experiment-complete.meridian.json");
+    {
+        let mut capture = state.tracy_capture().await;
+        capture.integrity = Some(integrity);
+        capture.integrity_owned_paths = vec![
+            canonical_dmb.with_extension("log"),
+            launch_artifact.path.clone(),
+        ];
+        capture.experiment = Some(ExperimentState {
+            launch_manifest_sha256: launch_artifact.sha256.clone(),
+            launch_manifest_path: launch_artifact.path,
+            identity_manifest_path,
+            final_manifest_path,
+            executable,
+            workload_draft,
+            locked_identity: None,
+        });
+        capture.used_phases.clear();
+        capture.capture_records.clear();
+        capture.network_records.clear();
+    }
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let profiler_port = listener.local_addr()?.port();
     drop(listener);
@@ -92,12 +214,89 @@ pub async fn launch(
         .get("game_port")
         .and_then(Value::as_u64)
         .unwrap_or(1337) as u16;
-    super::runtime::run_profiled(
+    let runtime_result = super::runtime::run_profiled(
         state,
         json!({"dmb_path":dmb_path,"port":game_port}),
         profiler_port,
     )
+    .await?;
+    if runtime_result.is_error == Some(true) {
+        return Ok(runtime_result);
+    }
+    let collector = match TracyCollector::spawn(TracyCollectorSpec {
+        helper: installation.helper.path.clone(),
+        working_directory: dmb_path
+            .parent()
+            .ok_or_else(|| anyhow!("dmb_path has no parent"))?
+            .to_owned(),
+        environment: crate::process_environment::minimal_runtime_environment()
+            .into_iter()
+            .map(|(name, value)| (name.into(), value))
+            .collect(),
+        request_timeout: Duration::from_secs(330),
+    })
     .await
+    {
+        Ok(collector) => Arc::new(collector),
+        Err(error) => {
+            let mut runtime = state.runtime().await;
+            let _ = runtime.stop_game_process().await;
+            return Err(error.into());
+        }
+    };
+    let readiness = match collector.session_start("127.0.0.1", profiler_port).await {
+        Ok(readiness) => readiness,
+        Err(error) => {
+            let stderr_tail = collector.stderr_tail().await;
+            let mut runtime = state.runtime().await;
+            let _ = runtime.stop_game_process().await;
+            return Err(anyhow!(
+                "Tracy collector readiness failed: {error}; stderr tail: {stderr_tail:?}"
+            ));
+        }
+    };
+    {
+        let mut capture = state.tracy_capture().await;
+        capture.collector = Some(collector);
+        capture.phase = Some(TracySessionPhase::HealthyIdle);
+        capture.last_status = Some(readiness);
+    }
+    let process_identities = owned_process_identities(state).await;
+    let experiment_started_at = tokio::time::Instant::now();
+    let (memory_series, memory_stop, memory_task) =
+        start_memory_sampler(&process_identities, experiment_started_at);
+    {
+        let mut capture = state.tracy_capture().await;
+        capture.memory_series = Some(memory_series);
+        capture.memory_stop = Some(memory_stop);
+        capture.memory_task = Some(memory_task);
+        capture.experiment_started_at = Some(experiment_started_at);
+        let mut audit = crate::network_audit::NetworkAuditCollector::new(true);
+        let process_ids = process_identities
+            .iter()
+            .map(|identity| identity.pid)
+            .collect::<Vec<_>>();
+        audit.sample(&process_ids, 0);
+        capture.network_records.push(json!({
+            "lifecycle": "launch",
+            "evidence": crate::network_audit::tracy_network_evidence(
+                audit.finish(),
+                profiler_port,
+                &process_identities,
+                true,
+                true,
+            ),
+        }));
+    }
+    Ok(json_success(
+        ToolMetadata::complete(None),
+        json!({
+            "lifecycle":"ready",
+            "profiler_port":profiler_port,
+            "collector":state.tracy_capture().await.last_status,
+            "executable_identity":state.tracy_capture().await.experiment.as_ref().map(|experiment| &experiment.executable),
+        }),
+    ))
 }
 
 pub async fn capture(
@@ -108,14 +307,18 @@ pub async fn capture(
     let installation = context
         .tracy()
         .ok_or_else(|| anyhow!("Tracy installation unavailable"))?;
-    let profiler_port = {
+    let collector = {
         let mut runtime = state.runtime().await;
         if !runtime.is_game_running() || runtime.kind != Some(crate::state::RuntimeKind::Tracy) {
             return Err(anyhow!("no MCP-owned Tracy runtime is active"));
         }
-        runtime
-            .profiler_port
-            .ok_or_else(|| anyhow!("active Tracy runtime has no profiler endpoint"))?
+        drop(runtime);
+        state
+            .tracy_capture()
+            .await
+            .collector
+            .clone()
+            .ok_or_else(|| anyhow!("active Tracy runtime has no collector"))?
     };
     let duration_ms = args
         .get("duration_ms")
@@ -130,68 +333,243 @@ pub async fn capture(
             "capture duration or memory limit is outside the permitted range"
         ));
     }
+    let phase = required_string(&args, "phase")?.to_owned();
+    if !valid_phase(&phase) {
+        return Err(anyhow!(
+            "phase must contain 1-64 lowercase ASCII letters, digits, underscore, or hyphen"
+        ));
+    }
+    let phase_iteration = args
+        .get("phase_iteration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("phase_iteration is required"))?;
+    let phase_iteration = u32::try_from(phase_iteration)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| anyhow!("phase_iteration must be between 1 and 4294967295"))?;
+    let supplied_workload = workload_from_args(&args)?;
+    let capture_annotations = args
+        .get("capture_annotations")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    let capture_annotations = crate::tracy_experiment::validate_workload(WorkloadInput {
+        annotations: capture_annotations,
+        ..Default::default()
+    })?
+    .annotations;
     let output_path = Path::new(required_string(&args, "output_path")?);
     let overwrite = args
         .get("overwrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let reserved = reserve_external_atomic(context.policy(), output_path, overwrite)?;
-    let temporary_path = reserved.temporary_path().to_owned();
-    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    let reserved = reserve_trace_set(context.policy(), output_path, overwrite)?;
+    let temporary_path = reserved.temporary_trace_path().to_owned();
+    let capture_network = args
+        .get("capture_network")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut network_audit = crate::network_audit::NetworkAuditCollector::new(capture_network);
+    let process_identities = owned_process_identities(state).await;
+    let profiler_port = {
+        let runtime = state.runtime().await;
+        runtime.profiler_port
+    };
+    let owned_process_ids = process_identities
+        .iter()
+        .map(|identity| identity.pid)
+        .collect::<Vec<_>>();
+    network_audit.sample(&owned_process_ids, 0);
+    let (experiment, launch_manifest_sha256, experiment_manifest_sha256) = {
+        let mut capture = state.tracy_capture().await;
+        let (result, new_owned_path) = {
+            let experiment = capture
+                .experiment
+                .as_mut()
+                .ok_or_else(|| anyhow!("active Tracy runtime has no experiment identity"))?;
+            let mut new_owned_path = None;
+            if let Some(locked) = &experiment.locked_identity {
+                verify_locked_workload(&locked.workload, &supplied_workload)?;
+            } else {
+                let workload = bind_workload(&experiment.workload_draft, &supplied_workload)?;
+                let identity = experiment_identity(experiment.executable.clone(), workload)?;
+                let identity_bytes = serde_json::to_vec_pretty(&identity)?;
+                let artifact = write_atomic(
+                    context.policy(),
+                    &experiment.identity_manifest_path,
+                    false,
+                    |output| {
+                        std::io::Write::write_all(output, &identity_bytes)?;
+                        std::io::Write::write_all(output, b"\n")?;
+                        Ok(())
+                    },
+                )?;
+                new_owned_path = Some(artifact.path);
+                experiment.locked_identity = Some(identity);
+            }
+            let identity = experiment
+                .locked_identity
+                .clone()
+                .expect("identity was locked");
+            let manifest_sha256 = hash_file(&experiment.identity_manifest_path)?;
+            (
+                (
+                    identity,
+                    experiment.launch_manifest_sha256.clone(),
+                    manifest_sha256,
+                ),
+                new_owned_path,
+            )
+        };
+        if let Some(path) = new_owned_path {
+            capture.integrity_owned_paths.push(path);
+        }
+        result
+    };
     {
         let mut capture = state.tracy_capture().await;
         if capture.active {
             return Err(anyhow!("a Tracy capture is already active"));
         }
+        if !capture.used_phases.insert((phase.clone(), phase_iteration)) {
+            return Err(anyhow!(
+                "phase and phase_iteration must be unique within one experiment"
+            ));
+        }
         capture.active = true;
-        capture.cancellation = Some(cancel_sender);
         capture.output_path = Some(output_path.to_owned());
         capture.last_error = None;
+        capture.phase = Some(TracySessionPhase::CaptureActive);
     }
-    let capture_network = args
-        .get("capture_network")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let invocation = invoke_helper(TracyInvocationSpec {
-        helper: &installation.helper.path,
-        working_directory: output_path
-            .parent()
-            .ok_or_else(|| anyhow!("output_path has no parent"))?,
-        id: 1,
-        command: TracyCommand::Capture,
-        params: json!({
-            "port":profiler_port,
-            "duration_ms":duration_ms,
-            "memory_limit_mb":memory_limit_mb,
-            "output_path":temporary_path,
-        }),
-        timeout: Duration::from_millis(duration_ms.saturating_add(30_000)),
-        capture_network,
-        environment: crate::process_environment::minimal_runtime_environment()
-            .into_iter()
-            .map(|(name, value)| (name.into(), value))
-            .collect(),
-        cancellation: Some(cancel_receiver),
-    })
-    .await;
+    let capture_begin_ms = state
+        .tracy_capture()
+        .await
+        .experiment_started_at
+        .map(|started| started.elapsed().as_millis() as u64)
+        .unwrap_or(0);
+    let invocation = collector
+        .capture_window(
+            duration_ms,
+            memory_limit_mb,
+            &temporary_path,
+            &phase,
+            phase_iteration,
+        )
+        .await;
+    let capture_end_ms = state
+        .tracy_capture()
+        .await
+        .experiment_started_at
+        .map(|started| started.elapsed().as_millis() as u64)
+        .unwrap_or(capture_begin_ms.saturating_add(duration_ms));
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    let mut memory_series = if let Some(series) = state.tracy_capture().await.memory_series.clone()
+    {
+        capture_memory_window(&series.lock().await, capture_begin_ms, capture_end_ms)
+    } else {
+        Vec::new()
+    };
+    network_audit.sample(&owned_process_ids, duration_ms as u128);
+    let network_audit = crate::network_audit::tracy_network_evidence(
+        network_audit.finish(),
+        profiler_port.ok_or_else(|| anyhow!("profiled runtime omitted its listener port"))?,
+        &process_identities,
+        true,
+        true,
+    );
     {
         let mut capture = state.tracy_capture().await;
         capture.active = false;
-        capture.cancellation = None;
+        capture.phase = Some(TracySessionPhase::HealthyIdle);
         if let Err(error) = &invocation {
-            capture.last_error = Some(error.to_string());
+            let stderr_tail = collector.stderr_tail().await;
+            capture.last_error = Some(if stderr_tail.is_empty() {
+                error.to_string()
+            } else {
+                format!("{error}; collector stderr tail: {stderr_tail:?}")
+            });
         }
     }
     let invocation = invocation?;
-    let artifact = reserved.commit()?;
+    if let (Some(raw_begin), Some(raw_end)) = (
+        invocation["validation"]["raw_begin"].as_u64(),
+        invocation["validation"]["raw_end"].as_u64(),
+    ) {
+        let monotonic_span = capture_end_ms.saturating_sub(capture_begin_ms).max(1);
+        let raw_span = raw_end.saturating_sub(raw_begin);
+        for series in &mut memory_series {
+            for sample in &mut series.samples {
+                if (capture_begin_ms..=capture_end_ms).contains(&sample.monotonic_offset_ms) {
+                    let relative = sample.monotonic_offset_ms.saturating_sub(capture_begin_ms);
+                    sample.aligned_tracy_offset = Some(
+                        raw_begin
+                            .saturating_add(raw_span.saturating_mul(relative) / monotonic_span),
+                    );
+                }
+            }
+        }
+    }
+    let trace_sha256 = hash_file(&temporary_path)?;
+    let trace_bytes = std::fs::metadata(&temporary_path)?.len();
+    let sidecar = json!({
+        "schema":2,
+        "created_at_unix_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
+        "requested_duration_ms":duration_ms,
+        "trace_sha256":trace_sha256,
+        "trace_bytes":trace_bytes,
+        "helper_identity":{"source_revision":installation.helper.source_revision,"sha256":installation.helper.sha256,"patch_sha256":installation.helper.patch_sha256},
+        "hook_identity":{"source_revision":installation.hook.source_revision,"sha256":installation.hook.sha256,"patches":installation.hook.patches},
+        "tracy_protocol":installation.helper.protocol_version,
+        "capture":invocation,
+        "owned_process_ids":owned_process_ids,
+        "process_identities":process_identities,
+        "memory_series":memory_series,
+        "memory_summary":crate::process_metrics::summarize_memory(&memory_series),
+        "network_evidence":network_audit,
+        "integrity_status":"baseline_recorded",
+        "phase":phase,
+        "phase_iteration":phase_iteration,
+        "capture_annotations":capture_annotations,
+        "experiment_identity":experiment,
+        "launch_manifest_sha256":launch_manifest_sha256,
+        "experiment_manifest_sha256":experiment_manifest_sha256,
+    });
+    let artifacts = reserved.promote(&sidecar)?;
+    let integrity_checkpoint = {
+        let mut capture = state.tracy_capture().await;
+        capture
+            .integrity_owned_paths
+            .extend([artifacts.trace.path.clone(), artifacts.sidecar.path.clone()]);
+        capture.capture_records.push(json!({
+            "trace_path": artifacts.trace.path,
+            "trace_sha256": artifacts.trace.sha256,
+            "sidecar_path": artifacts.sidecar.path,
+            "sidecar_sha256": artifacts.sidecar.sha256,
+            "phase": phase,
+            "phase_iteration": phase_iteration,
+        }));
+        capture.network_records.push(json!({
+            "lifecycle": "capture",
+            "phase": phase,
+            "phase_iteration": phase_iteration,
+            "evidence": sidecar["network_evidence"],
+        }));
+        capture
+            .integrity
+            .as_ref()
+            .map(|baseline| baseline.checkpoint("capture", &capture.integrity_owned_paths))
+            .transpose()?
+    };
     Ok(json_success(
         ToolMetadata::complete(None),
         json!({
-            "artifact":artifact,
-            "capture":invocation.result,
-            "network_audit":invocation.process.network_audit,
+            "artifact":artifacts.trace,
+            "sidecar":artifacts.sidecar,
+            "capture":sidecar["capture"],
+            "network_audit":sidecar["network_evidence"],
             "helper_revision":installation.helper.source_revision,
             "protocol_version":installation.helper.protocol_version,
+            "integrity_checkpoint":integrity_checkpoint,
         }),
     ))
 }
@@ -213,7 +591,20 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
             runtime.recent_output(50),
         )
     };
-    let capture = state.tracy_capture().await;
+    let mut capture = state.tracy_capture().await;
+    let mut collector_stderr_tail = Vec::new();
+    let mut collector_exit_code = None;
+    if let Some(collector) = capture.collector.clone() {
+        if collector.is_running().await {
+            if let Ok(helper_status) = collector.status().await {
+                capture.last_status = Some(helper_status);
+            }
+        } else {
+            capture.phase = Some(TracySessionPhase::Stopped);
+            collector_stderr_tail = collector.stderr_tail().await;
+            collector_exit_code = collector.exit_code().await;
+        }
+    }
     Ok(json_success(
         ToolMetadata::complete(None),
         json!({
@@ -227,26 +618,109 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
             "capture_active":capture.active,
             "capture_output_path":capture.output_path,
             "last_capture_error":capture.last_error,
+            "collector_phase":capture.phase,
+            "collector_status":capture.last_status,
+            "collector_stderr_tail":collector_stderr_tail,
+            "collector_exit_code":collector_exit_code,
         }),
     ))
 }
 
-pub async fn stop(state: &crate::state::ServerState) -> Result<ToolResult> {
-    if let Some(sender) = state.tracy_capture().await.cancellation.clone() {
-        let _ = sender.send(true);
+pub async fn stop(
+    context: &ToolExecutionContext,
+    state: &crate::state::ServerState,
+) -> Result<ToolResult> {
+    let stop_identities = owned_process_identities(state).await;
+    let stop_profiler_port = state.runtime().await.profiler_port;
+    let mut stop_network_audit = crate::network_audit::NetworkAuditCollector::new(true);
+    stop_network_audit.sample(
+        &stop_identities
+            .iter()
+            .map(|identity| identity.pid)
+            .collect::<Vec<_>>(),
+        0,
+    );
+    let collector = state.tracy_capture().await.collector.clone();
+    if let Some(collector) = collector {
+        let _ = collector.cancel().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while state.tracy_capture().await.active && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+    if let Some(collector) = state.tracy_capture().await.collector.take() {
+        let _ = collector.stop(Duration::from_secs(10)).await;
+    }
     let mut runtime = state.runtime().await;
-    if !runtime.is_game_running() || runtime.kind != Some(crate::state::RuntimeKind::Tracy) {
+    let runtime_was_running = runtime.is_game_running();
+    let runtime_was_profiled = runtime.kind == Some(crate::state::RuntimeKind::Tracy);
+    if runtime_was_running && runtime_was_profiled {
+        runtime.stop_game_process().await?;
+    }
+    drop(runtime);
+    let (memory_series, memory_task, experiment, capture_records, mut network_records) = {
+        let mut capture = state.tracy_capture().await;
+        if let Some(stop) = capture.memory_stop.take() {
+            let _ = stop.send(true);
+        }
+        (
+            capture.memory_series.take(),
+            capture.memory_task.take(),
+            capture.experiment.take(),
+            std::mem::take(&mut capture.capture_records),
+            std::mem::take(&mut capture.network_records),
+        )
+    };
+    if let Some(port) = stop_profiler_port {
+        network_records.push(json!({
+            "lifecycle": "stop",
+            "evidence": crate::network_audit::tracy_network_evidence(
+                stop_network_audit.finish(),
+                port,
+                &stop_identities,
+                true,
+                true,
+            ),
+        }));
+    }
+    if let Some(task) = memory_task {
+        let _ = task.await;
+    }
+    let complete_memory = if let Some(series) = memory_series {
+        series.lock().await.clone()
+    } else {
+        Vec::new()
+    };
+    if experiment.is_none() && !runtime_was_profiled {
         return Err(anyhow!("no MCP-owned Tracy runtime is active"));
     }
-    runtime.stop_game_process().await?;
+    let experiment_manifest = if let Some(experiment) = experiment {
+        let document = json!({
+            "schema": 2,
+            "experiment_identity": experiment.locked_identity,
+            "launch_manifest_sha256": experiment.launch_manifest_sha256,
+            "captures": capture_records,
+            "network_evidence": network_records,
+            "memory_series": complete_memory,
+            "memory_summary": crate::process_metrics::summarize_memory(&complete_memory),
+        });
+        let bytes = serde_json::to_vec_pretty(&document)?;
+        Some(write_atomic(
+            context.policy(),
+            &experiment.final_manifest_path,
+            false,
+            |output| {
+                std::io::Write::write_all(output, &bytes)?;
+                std::io::Write::write_all(output, b"\n")?;
+                Ok(())
+            },
+        )?)
+    } else {
+        None
+    };
     Ok(json_success(
         ToolMetadata::complete(None),
-        json!({"lifecycle":"stopped"}),
+        json!({"lifecycle":"stopped","runtime_was_running":runtime_was_running,"experiment_manifest":experiment_manifest}),
     ))
 }
 
@@ -265,6 +739,7 @@ pub async fn hotspots(
         }),
         Duration::from_secs(120),
         state,
+        None,
     )
     .await
 }
@@ -284,6 +759,7 @@ pub async fn zone(
         }),
         Duration::from_secs(120),
         state,
+        None,
     )
     .await
 }
@@ -299,6 +775,7 @@ pub async fn frame_stats(
         json!({"trace_path":required_string(&args, "trace_path")?}),
         Duration::from_secs(120),
         state,
+        None,
     )
     .await
 }
@@ -308,27 +785,295 @@ pub async fn compare(
     state: &crate::state::ServerState,
     args: Value,
 ) -> Result<ToolResult> {
+    let baseline_path = Path::new(required_string(&args, "baseline_path")?);
+    let current_path = Path::new(required_string(&args, "current_path")?);
+    let mode = match args
+        .get("comparison_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("same_experiment_same_phase")
+    {
+        "same_experiment_same_phase" => {
+            crate::tracy_artifact::ComparisonMode::SameExperimentSamePhase
+        }
+        "cross_experiment" => crate::tracy_artifact::ComparisonMode::CrossExperiment,
+        _ => return Err(anyhow!("comparison_mode is not supported")),
+    };
+    let baseline_metadata = crate::tracy_artifact::read_trace_metadata(baseline_path)?;
+    let current_metadata = crate::tracy_artifact::read_trace_metadata(current_path)?;
+    let compatibility = match (&baseline_metadata, &current_metadata) {
+        (Some(baseline), Some(current)) => {
+            crate::tracy_artifact::compare_metadata(baseline, current, mode)
+        }
+        (None, None) if baseline_path == current_path => {
+            crate::tracy_artifact::ComparisonCompatibility {
+                compatible: true,
+                mode,
+                checked_fields: Vec::new(),
+                mismatches: Vec::new(),
+                warnings: vec!["identity_verification_unavailable".into()],
+            }
+        }
+        _ => {
+            return Err(anyhow!(
+                "cross-trace comparison requires valid Meridian sidecars"
+            ))
+        }
+    };
+    if !compatibility.compatible {
+        return Err(anyhow!(
+            "trace identities are incompatible: {}",
+            serde_json::to_string(&compatibility)?
+        ));
+    }
+    let mut compare_params = json!({
+        "baseline_path": required_string(&args, "baseline_path")?,
+        "current_path": required_string(&args, "current_path")?,
+        "minimum_delta_ns": args.get("minimum_delta_ns").and_then(Value::as_u64).unwrap_or(0),
+        "limit": args.get("limit").and_then(Value::as_u64).unwrap_or(100),
+    });
+    if let (Some(baseline), Some(current), Some(object)) = (
+        baseline_metadata.as_ref(),
+        current_metadata.as_ref(),
+        compare_params.as_object_mut(),
+    ) {
+        object.extend(serde_json::Map::from_iter([
+            (
+                "baseline_range_begin_ns".into(),
+                json!(baseline.trace_range_ns.raw_begin),
+            ),
+            (
+                "baseline_range_end_ns".into(),
+                json!(baseline.trace_range_ns.raw_end),
+            ),
+            (
+                "current_range_begin_ns".into(),
+                json!(current.trace_range_ns.raw_begin),
+            ),
+            (
+                "current_range_end_ns".into(),
+                json!(current.trace_range_ns.raw_end),
+            ),
+        ]));
+    }
     invoke_analysis(
         context,
         TracyCommand::Compare,
-        json!({
-            "baseline_path": required_string(&args, "baseline_path")?,
-            "current_path": required_string(&args, "current_path")?,
-            "minimum_delta_ns": args.get("minimum_delta_ns").and_then(Value::as_u64).unwrap_or(0),
-            "limit": args.get("limit").and_then(Value::as_u64).unwrap_or(100),
-        }),
+        compare_params,
         Duration::from_secs(180),
         state,
+        Some(json!({"compatibility":compatibility})),
     )
     .await
+}
+
+pub async fn control_stats(
+    context: &ToolExecutionContext,
+    _state: &crate::state::ServerState,
+    args: Value,
+) -> Result<ToolResult> {
+    let installation = context
+        .tracy()
+        .ok_or_else(|| anyhow!("Tracy installation unavailable"))?;
+    let requested = args
+        .get("trace_paths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("trace_paths is required"))?;
+    if !(3..=20).contains(&requested.len()) {
+        return Err(anyhow!("trace_paths must contain 3-20 controls"));
+    }
+    let mut trace_paths = Vec::new();
+    let mut unique = std::collections::BTreeSet::new();
+    for value in requested {
+        let path = context.policy().read_path(
+            value
+                .as_str()
+                .ok_or_else(|| anyhow!("trace_paths must contain strings"))?,
+        )?;
+        if !unique.insert(path.clone()) {
+            return Err(anyhow!("trace_paths contains a duplicate path"));
+        }
+        trace_paths.push(path);
+    }
+    let percentile = args
+        .get("frame_percentile")
+        .and_then(Value::as_str)
+        .unwrap_or("p95");
+    let percentile_key = match percentile {
+        "p50" => "p50_ns",
+        "p95" => "p95_ns",
+        "p99" => "p99_ns",
+        _ => return Err(anyhow!("frame_percentile is not supported")),
+    };
+    let zone_keys = args
+        .get("zone_keys")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow!("zone_keys must contain strings"))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if zone_keys.len() > 32 {
+        return Err(anyhow!("zone_keys exceeds the fixed entry limit"));
+    }
+    let metadata = trace_paths
+        .iter()
+        .map(|path| crate::tracy_artifact::read_trace_metadata(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if metadata.iter().any(Option::is_none) {
+        return Err(anyhow!(
+            "control statistics require schema-2 Meridian sidecars"
+        ));
+    }
+    let metadata = metadata.into_iter().flatten().collect::<Vec<_>>();
+    let comparison_mode = match args
+        .get("comparison_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("same_experiment_same_phase")
+    {
+        "same_experiment_same_phase" => {
+            crate::tracy_artifact::ComparisonMode::SameExperimentSamePhase
+        }
+        "cross_experiment" => crate::tracy_artifact::ComparisonMode::CrossExperiment,
+        _ => return Err(anyhow!("comparison_mode is not supported")),
+    };
+    let incomplete_count = metadata
+        .iter()
+        .filter(|item| !item.capture_valid || item.queue_saturated || item.complete_frames < 3)
+        .count();
+    let mut compatibility = crate::tracy_artifact::ComparisonCompatibility {
+        compatible: true,
+        mode: comparison_mode,
+        checked_fields: Vec::new(),
+        mismatches: Vec::new(),
+        warnings: Vec::new(),
+    };
+    for current in metadata.iter().skip(1) {
+        let result =
+            crate::tracy_artifact::compare_metadata(&metadata[0], current, comparison_mode);
+        compatibility.checked_fields.extend(result.checked_fields);
+        compatibility.mismatches.extend(result.mismatches);
+    }
+    compatibility.checked_fields.sort();
+    compatibility.checked_fields.dedup();
+    compatibility.compatible = compatibility.mismatches.is_empty();
+    if !compatibility.compatible {
+        return Err(anyhow!(
+            "control identities are incompatible: {}",
+            serde_json::to_string(&compatibility)?
+        ));
+    }
+    let working_directory = context
+        .policy()
+        .workspace_roots()
+        .first()
+        .ok_or_else(|| anyhow!("workspace root unavailable"))?;
+    let mut values = Vec::new();
+    for (index, path) in trace_paths.iter().enumerate() {
+        let invocation = invoke_helper(TracyInvocationSpec {
+            helper: &installation.helper.path,
+            working_directory,
+            id: index as u64 + 1,
+            command: TracyCommand::FrameStats,
+            params: json!({"trace_path":path,"range_begin_ns":metadata[index].trace_range_ns.raw_begin,"range_end_ns":metadata[index].trace_range_ns.raw_end}),
+            timeout: Duration::from_secs(120),
+            capture_network: false,
+            environment: Vec::new(),
+            cancellation: None,
+        })
+        .await?;
+        values.push(
+            invocation.result[percentile_key]
+                .as_u64()
+                .ok_or_else(|| anyhow!("frame statistics omitted {percentile_key}"))?,
+        );
+    }
+    let (frame_time, noise) = crate::tracy_statistics::summarize_controls(&values)
+        .ok_or_else(|| anyhow!("insufficient_complete_samples"))?;
+    let mut zones = serde_json::Map::new();
+    let mut request_id = trace_paths.len() as u64 + 1;
+    for key in zone_keys {
+        let parts = key.split('|').collect::<Vec<_>>();
+        if parts.len() != 5 {
+            return Err(anyhow!(
+                "zone key must be file|line|name|inclusive_or_self|p50_p95_or_p99"
+            ));
+        }
+        let line = parts[1]
+            .parse::<u64>()
+            .map_err(|_| anyhow!("zone key line is invalid"))?;
+        let metric = match (parts[3], parts[4]) {
+            ("inclusive", "p50") => "p50_ns",
+            ("inclusive", "p95") => "p95_ns",
+            ("inclusive", "p99") => "p99_ns",
+            ("self", "p50") => "self_p50_ns",
+            ("self", "p95") => "self_p95_ns",
+            ("self", "p99") => "self_p99_ns",
+            _ => return Err(anyhow!("zone key metric is invalid")),
+        };
+        let mut zone_values = Vec::new();
+        for (index, path) in trace_paths.iter().enumerate() {
+            let invocation = invoke_helper(TracyInvocationSpec {
+                helper: &installation.helper.path,
+                working_directory,
+                id: request_id,
+                command: TracyCommand::Zone,
+                params: json!({"trace_path":path,"name":parts[2],"limit":1000,"range_begin_ns":metadata[index].trace_range_ns.raw_begin,"range_end_ns":metadata[index].trace_range_ns.raw_end}),
+                timeout: Duration::from_secs(120),
+                capture_network: false,
+                environment: Vec::new(),
+                cancellation: None,
+            })
+            .await?;
+            request_id += 1;
+            let item = invocation.result["items"]
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item["file"] == parts[0] && item["line"] == line)
+                })
+                .ok_or_else(|| anyhow!("requested exact zone was absent: {key}"))?;
+            zone_values.push(
+                item[metric]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("zone result omitted {metric}"))?,
+            );
+        }
+        let (summary, zone_noise) = crate::tracy_statistics::summarize_controls(&zone_values)
+            .ok_or_else(|| anyhow!("insufficient_complete_samples"))?;
+        zones.insert(key, json!({"distribution":summary,"noise":zone_noise}));
+    }
+    Ok(json_success(
+        ToolMetadata::complete(None),
+        json!({
+            "schema":2,
+            "input_count":trace_paths.len(),
+            "valid_count":trace_paths.len() - incomplete_count,
+            "incomplete_count":incomplete_count,
+            "establishes_control_baseline":incomplete_count == 0 && !noise.noisy && zones.values().all(|value| !value["noise"]["noisy"].as_bool().unwrap_or(true)),
+            "compatibility":compatibility,
+            "frame_percentile":percentile,
+            "frame_time":frame_time,
+            "zones":zones,
+            "noise":noise,
+        }),
+    ))
 }
 
 async fn invoke_analysis(
     context: &ToolExecutionContext,
     command: TracyCommand,
-    params: Value,
+    mut params: Value,
     timeout: Duration,
     state: &crate::state::ServerState,
+    context_fields: Option<Value>,
 ) -> Result<ToolResult> {
     let installation = context
         .tracy()
@@ -338,6 +1083,22 @@ async fn invoke_analysis(
         .workspace_roots()
         .first()
         .ok_or_else(|| anyhow!("workspace root unavailable"))?;
+    let metadata = params
+        .get("trace_path")
+        .and_then(Value::as_str)
+        .map(|path| crate::tracy_artifact::read_trace_metadata(Path::new(path)))
+        .transpose()?
+        .flatten();
+    if let (Some(metadata), Some(object)) = (&metadata, params.as_object_mut()) {
+        object.insert(
+            "range_begin_ns".into(),
+            json!(metadata.trace_range_ns.raw_begin),
+        );
+        object.insert(
+            "range_end_ns".into(),
+            json!(metadata.trace_range_ns.raw_end),
+        );
+    }
     let invocation = invoke_helper(TracyInvocationSpec {
         helper: &installation.helper.path,
         working_directory,
@@ -351,6 +1112,7 @@ async fn invoke_analysis(
     })
     .await?;
     let mut result = invocation.result;
+    let statistics = result.clone();
     let object = result
         .as_object_mut()
         .ok_or_else(|| anyhow!("Tracy helper result must be an object"))?;
@@ -358,6 +1120,40 @@ async fn invoke_analysis(
         "helper_revision".into(),
         Value::String(installation.helper.source_revision.clone()),
     );
+    if let Some(Value::Object(fields)) = context_fields {
+        object.extend(fields);
+    }
+    match metadata {
+        Some(metadata) => {
+            let native_counts = object.get("counts").cloned().unwrap_or_else(|| json!({}));
+            object.extend(serde_json::Map::from_iter([
+                ("schema".into(), json!(2)),
+                (
+                    "experiment_id".into(),
+                    json!(metadata.experiment_identity.experiment_id),
+                ),
+                ("capture_id".into(), json!(metadata.trace_sha256)),
+                ("phase".into(), json!(metadata.phase)),
+                ("phase_iteration".into(), json!(metadata.phase_iteration)),
+                ("range".into(), json!(metadata.range)),
+                ("counts".into(), native_counts),
+                ("statistics".into(), statistics),
+                ("warnings".into(), json!([])),
+                ("identity_verification".into(), json!("verified")),
+                ("window_source".into(), json!("meridian_sidecar")),
+            ]));
+        }
+        None => {
+            object.insert("schema".into(), json!(2));
+            object.insert("statistics".into(), statistics);
+            object.insert(
+                "warnings".into(),
+                json!(["identity_verification_unavailable"]),
+            );
+            object.insert("identity_verification".into(), json!("unavailable"));
+            object.insert("window_source".into(), json!("full_trace_legacy"));
+        }
+    }
     object.insert(
         "protocol_version".into(),
         json!(installation.helper.protocol_version),
@@ -428,4 +1224,199 @@ fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn workload_from_args(args: &Value) -> Result<WorkloadInput> {
+    let feature_set = args
+        .get("feature_set")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow!("feature_set must contain strings"))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let annotations = args
+        .get("annotations")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(crate::tracy_experiment::validate_workload(WorkloadInput {
+        map: optional_string(args, "map")?,
+        seed: optional_string(args, "seed")?,
+        configuration_profile: optional_string(args, "configuration_profile")?,
+        feature_set,
+        scenario: optional_string(args, "scenario")?,
+        external_run_id: optional_string(args, "external_run_id")?,
+        annotations,
+    })?)
+}
+
+fn optional_string(args: &Value, name: &str) -> Result<Option<String>> {
+    args.get(name)
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("{name} must be a string"))
+        })
+        .transpose()
+}
+
+fn git_revision(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn valid_phase(phase: &str) -> bool {
+    !phase.is_empty()
+        && phase.len() <= 64
+        && phase.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
+}
+
+async fn owned_process_identities(
+    state: &crate::state::ServerState,
+) -> Vec<crate::process_metrics::ProcessIdentity> {
+    let collector = state.tracy_capture().await.collector.clone();
+    let collector_pid = match collector {
+        Some(collector) => collector.process_id().await,
+        None => None,
+    };
+    let game_pid = state
+        .runtime()
+        .await
+        .game_process
+        .as_ref()
+        .and_then(|process| process.id());
+    [
+        (game_pid, crate::process_metrics::ProcessRole::DreamDaemon),
+        (
+            collector_pid,
+            crate::process_metrics::ProcessRole::Collector,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(pid, role)| {
+        pid.and_then(|pid| crate::process_metrics::process_identity(pid, role).ok())
+    })
+    .collect()
+}
+
+fn capture_memory_window(
+    all_series: &[crate::process_metrics::RoleMemorySeries],
+    begin_ms: u64,
+    end_ms: u64,
+) -> Vec<crate::process_metrics::RoleMemorySeries> {
+    all_series
+        .iter()
+        .map(|series| {
+            let previous = series
+                .samples
+                .iter()
+                .filter(|sample| sample.monotonic_offset_ms < begin_ms)
+                .map(|sample| sample.monotonic_offset_ms)
+                .max();
+            let next = series
+                .samples
+                .iter()
+                .filter(|sample| sample.monotonic_offset_ms > end_ms)
+                .map(|sample| sample.monotonic_offset_ms)
+                .min();
+            let mut selected = series.clone();
+            selected.samples.retain(|sample| {
+                (begin_ms..=end_ms).contains(&sample.monotonic_offset_ms)
+                    || previous == Some(sample.monotonic_offset_ms)
+                    || next == Some(sample.monotonic_offset_ms)
+            });
+            selected
+        })
+        .collect()
+}
+
+fn start_memory_sampler(
+    identities: &[crate::process_metrics::ProcessIdentity],
+    started: tokio::time::Instant,
+) -> (
+    Arc<tokio::sync::Mutex<Vec<crate::process_metrics::RoleMemorySeries>>>,
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    let series = Arc::new(tokio::sync::Mutex::new(
+        identities
+            .iter()
+            .cloned()
+            .map(|identity| crate::process_metrics::RoleMemorySeries {
+                identity,
+                operating_system: std::env::consts::OS.to_owned(),
+                sampling_interval_ms: 500,
+                samples: Vec::new(),
+                missed_samples: 0,
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let (stop, mut stop_rx) = tokio::sync::watch::channel(false);
+    let task_series = Arc::clone(&series);
+    let role_count = identities.len();
+    let task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        let mut active_roles = vec![true; role_count];
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let offset = started.elapsed().as_millis() as u64;
+                    let mut all_series = task_series.lock().await;
+                    for (index, series) in all_series.iter_mut().enumerate() {
+                        if !active_roles[index] {
+                            continue;
+                        }
+                        match crate::process_metrics::sample_process(&series.identity, offset) {
+                            Ok(samples) if series.samples.len().saturating_add(samples.len()) <= 20_000 => series.samples.extend(samples),
+                            _ => {
+                                series.missed_samples = series.missed_samples.saturating_add(1);
+                                active_roles[index] = false;
+                            }
+                        }
+                    }
+                }
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() { break; }
+                }
+            }
+        }
+    });
+    (series, stop, task)
+}
+
+fn git_workspace_root(path: &Path) -> Result<std::path::PathBuf> {
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            &path.to_string_lossy(),
+            "rev-parse",
+            "--show-toplevel",
+        ])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let root = String::from_utf8(output.stdout)?.trim().to_owned();
+            if !root.is_empty() {
+                return Ok(std::path::PathBuf::from(root).canonicalize()?);
+            }
+        }
+    }
+    Ok(path.canonicalize()?)
 }

@@ -539,7 +539,7 @@ static CONTRACTS: &[ToolContract] = &[
     ),
     contract!(
         "dm_tracy_capture",
-        "Capture a bounded trace through the fixed Tracy helper.",
+        "Rotate the persistent collector for one validated window and publish an atomic `.tracy` plus schema-2 sidecar pair.",
         Development,
         RUNTIME,
         Experimental,
@@ -598,6 +598,15 @@ static CONTRACTS: &[ToolContract] = &[
         TRACY_PROCESS,
         Experimental,
         Some(180_000),
+        1_048_576
+    ),
+    contract!(
+        "dm_tracy_control_stats",
+        "Validate 3-20 repeated Tracy controls and calculate fixed noise statistics.",
+        Development,
+        TRACY_PROCESS,
+        Experimental,
+        Some(2_400_000),
         1_048_576
     ),
 ];

@@ -16,7 +16,21 @@ fn tracy_builder_is_pinned_dual_arch_and_offline_with_owned_native_tests() {
         "libprof.so",
         "-R '^meridian_'",
         "byond-tracy-empty-queue.patch",
-        "git apply",
+        "byond-tracy-health.patch",
+        "tracy-clock-access.patch",
+        "git apply --check",
+        "patch_sha256",
+        "queue_capacity",
+        "queue_depth",
+        "queue_high_water",
+        "queue_saturation_count",
+        "queue_dropped_events",
+        "produced_events",
+        "consumed_events",
+        "last_producer_progress",
+        "prologue_validated",
+        "module_relative_offset",
+        "offset_table_identity",
     ] {
         assert!(
             script.contains(required),
@@ -27,6 +41,59 @@ fn tracy_builder_is_pinned_dual_arch_and_offline_with_owned_native_tests() {
         assert!(
             !script.contains(forbidden),
             "builder must not fetch sources: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn byond_tracy_health_uses_the_protocol_82_plot_event_id() {
+    let patch_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("helpers/tracy/byond-tracy-health.patch");
+    let patch = std::fs::read_to_string(patch_path).expect("byond-tracy health patch should exist");
+
+    assert!(
+        patch.contains("plot_data_int = 55"),
+        "Tracy protocol 82 PlotDataInt packets must use queue event id 55"
+    );
+    assert!(
+        patch.contains("utracy.protocol.version != UTRACY_PROTOCOL_0_14_0"),
+        "Meridian health plots must be gated to the protocol whose event id is verified"
+    );
+    assert!(
+        patch.contains(".type = utracy.protocol.plot_data_int"),
+        "health packets must use the negotiated protocol event id"
+    );
+    assert!(
+        patch.contains("query_plot_name = 4"),
+        "Tracy plot-name queries must be explicitly negotiated"
+    );
+    assert!(
+        patch.contains("response_plot_name = 121"),
+        "Tracy protocol 82 plot names must use the PlotName response event"
+    );
+    assert!(
+        patch.contains("req.type == utracy.protocol.query_plot_name"),
+        "byond-tracy must answer Tracy's dedicated plot-name query"
+    );
+    assert!(
+        patch.contains("utracy.protocol.response_plot_name"),
+        "plot-name queries must not be answered as generic strings"
+    );
+    assert!(
+        patch.contains("evt.plot_data.timestamp - utracy.data.cur_thread.timestamp"),
+        "plot timestamps must use Tracy's per-thread delta encoding"
+    );
+    for required in [
+        "zone_begin32 = 20",
+        "zone_begin16 = 21",
+        "zone_end32 = 26",
+        "zone_end16 = 27",
+        "UTRACY_PROTOCOL_OFFSET_16BIT",
+        "UTRACY_PROTOCOL_OFFSET_32BIT",
+    ] {
+        assert!(
+            patch.contains(required),
+            "protocol 82 zones must use Tracy's compact delta encoding: {required}"
         );
     }
 }

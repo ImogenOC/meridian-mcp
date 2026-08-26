@@ -1,0 +1,12 @@
+diff --git a/server/TracyWorker.hpp b/server/TracyWorker.hpp
+--- a/server/TracyWorker.hpp
++++ b/server/TracyWorker.hpp
+@@ -508,6 +508,8 @@ public:
+     bool AreFramesUsed() const;
+     int64_t GetFirstTime() const;
+     int64_t GetLastTime() const { return m_data.lastTime; }
++    double GetTimerMultiplier() const { return m_timerMul; }
++    uint64_t GetBaseTime() const { return m_data.baseTime; }
+     uint64_t GetZoneCount() const { return m_data.zonesCnt; }
+     uint64_t GetZoneExtraCount() const { return m_data.zoneExtra.size() - 1; }
+     uint64_t GetGpuZoneCount() const { return m_data.gpuCnt; }

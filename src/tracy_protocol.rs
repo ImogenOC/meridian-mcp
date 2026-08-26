@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::watch;
 
-pub const TRACY_HELPER_SCHEMA_VERSION: u32 = 1;
+pub const TRACY_HELPER_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +36,12 @@ pub enum TracyProtocolError {
     InvalidParams,
     #[error("helper request serialization failed: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("helper request exceeds the fixed byte limit")]
+    RequestTooLarge,
+    #[error("helper request {id} timed out")]
+    Timeout { id: u64 },
+    #[error("helper transport failed: {0}")]
+    Transport(String),
     #[error("helper produced multiple response lines")]
     MultipleResponses,
     #[error("helper produced an empty response")]
@@ -46,8 +52,12 @@ pub enum TracyProtocolError {
     ResponseId { expected: u64, actual: u64 },
     #[error("helper response is missing a result")]
     MissingResult,
-    #[error("helper failed with {code}: {message}")]
-    Helper { code: String, message: String },
+    #[error("helper failed with {code}: {message}; details: {details}")]
+    Helper {
+        code: String,
+        message: String,
+        details: Value,
+    },
     #[error("helper process did not exit successfully: {0:?}")]
     Process(TerminationReason),
     #[error(transparent)]
@@ -130,6 +140,10 @@ pub fn parse_response(id: u64, bytes: &[u8]) -> Result<Value, TracyProtocolError
                 .as_str()
                 .unwrap_or("helper failed")
                 .to_owned(),
+            details: document["error"]
+                .get("details")
+                .cloned()
+                .unwrap_or(Value::Null),
         });
     }
     document

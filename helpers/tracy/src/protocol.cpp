@@ -1,6 +1,7 @@
 #include "protocol.hpp"
 
 #include <unordered_map>
+#include <unordered_set>
 
 namespace meridian::tracy
 {
@@ -36,6 +37,14 @@ Request parse_request(const std::string_view input)
 	{
 		throw ProtocolError("invalid_request", "Request must be a JSON object.");
 	}
+	static const std::unordered_set<std::string> TopLevelFields {"schema_version", "id", "command", "params"};
+	for(const auto& [name, _] : document.items())
+	{
+		if(!TopLevelFields.contains(name))
+		{
+			throw ProtocolError("unknown_field", "Request contains an unknown top-level field.");
+		}
+	}
 	if(!document.contains("schema_version") || !document["schema_version"].is_number_unsigned() || document["schema_version"] != ProtocolSchemaVersion)
 	{
 		throw ProtocolError("unsupported_schema", "Request schema is not supported.");
@@ -55,6 +64,11 @@ Request parse_request(const std::string_view input)
 
 	static const std::unordered_map<std::string, Command> Commands {
 		{"capture", Command::Capture},
+		{"session_start", Command::SessionStart},
+		{"capture_window", Command::CaptureWindow},
+		{"session_status", Command::SessionStatus},
+		{"session_stop", Command::SessionStop},
+		{"cancel", Command::Cancel},
 		{"hotspots", Command::Hotspots},
 		{"zone", Command::Zone},
 		{"frame_stats", Command::FrameStats},
@@ -65,6 +79,28 @@ Request parse_request(const std::string_view input)
 	if(command == Commands.end())
 	{
 		throw ProtocolError("unsupported_command", "Request command is not supported.");
+	}
+	const auto validate_params = [&](const std::unordered_set<std::string>& allowed) {
+		for(const auto& [name, _] : document["params"].items())
+		{
+			if(!allowed.contains(name))
+			{
+				throw ProtocolError("unknown_param", "Request contains an unknown command parameter.");
+			}
+		}
+	};
+	switch(command->second)
+	{
+	case Command::Capture: validate_params({"port", "duration_ms", "memory_limit_mb", "output_path"}); break;
+	case Command::SessionStart: validate_params({"host", "port", "connect_timeout_ms", "progress_timeout_ms"}); break;
+	case Command::CaptureWindow: validate_params({"duration_ms", "memory_limit_mb", "output_path", "phase", "phase_iteration"}); break;
+	case Command::SessionStatus:
+	case Command::SessionStop:
+	case Command::Cancel: validate_params({}); break;
+	case Command::Hotspots: validate_params({"trace_path", "limit", "sort", "range_begin_ns", "range_end_ns"}); break;
+	case Command::Zone: validate_params({"trace_path", "name", "limit", "range_begin_ns", "range_end_ns"}); break;
+	case Command::FrameStats: validate_params({"trace_path", "range_begin_ns", "range_end_ns"}); break;
+	case Command::Compare: validate_params({"baseline_path", "current_path", "minimum_delta_ns", "limit", "baseline_range_begin_ns", "baseline_range_end_ns", "current_range_begin_ns", "current_range_end_ns"}); break;
 	}
 
 	return Request {

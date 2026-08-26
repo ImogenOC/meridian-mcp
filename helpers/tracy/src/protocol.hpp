@@ -10,12 +10,23 @@
 namespace meridian::tracy
 {
 
-inline constexpr std::uint32_t ProtocolSchemaVersion = 1;
+inline constexpr std::uint32_t ProtocolSchemaVersion = 2;
 inline constexpr std::size_t MaximumRequestBytes = 1024 * 1024;
+inline constexpr std::size_t MaximumResponseBytes = 4 * 1024 * 1024;
+inline constexpr std::uint64_t MaximumSessionSeconds = 30 * 60;
+inline constexpr std::uint64_t MaximumResidentMemoryMb = 4096;
+inline constexpr std::uint64_t MaximumTraceBytes = 2ULL * 1024 * 1024 * 1024;
+inline constexpr std::uint64_t MaximumCaptureDurationMs = 300'000;
+inline constexpr std::uint64_t MaximumCaptureCount = 64;
 
 enum class Command
 {
 	Capture,
+	SessionStart,
+	CaptureWindow,
+	SessionStatus,
+	SessionStop,
+	Cancel,
 	Hotspots,
 	Zone,
 	FrameStats,

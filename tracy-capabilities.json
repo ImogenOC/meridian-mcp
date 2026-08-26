@@ -11,7 +11,7 @@
       "disposition": "fixed_helper",
       "targets": ["dm_tracy_prepare", "dm_tracy_launch", "dm_tracy_status", "dm_tracy_stop"],
       "platforms": ["windows", "ubuntu"],
-      "verification": "Exact-revision x86 build, hash manifest, BYOND 516.1687 live capture gate.",
+      "verification": "Exact-revision x86 build with ordered owned patches, hash manifest, queue_capacity, queue_depth, queue_high_water, queue_saturation_count, queue_dropped_events, produced_events, consumed_events, last_producer_progress, per-hook installed/prologue_validated/module_relative_offset, BYOND build, offset_table_identity, and BYOND 516.1687 live capture gate.",
       "evidence": [],
       "rationale": null
     },
@@ -22,7 +22,7 @@
       "disposition": "fixed_helper",
       "targets": ["dm_tracy_capture"],
       "platforms": ["windows", "ubuntu"],
-      "verification": "One-shot helper protocol tests and live bounded capture gate.",
+      "verification": "Persistent schema-2 collector rotation tests and live bounded capture gate.",
       "evidence": [],
       "rationale": null
     },
@@ -31,7 +31,7 @@
       "category": "analysis",
       "upstream_component": "TracyServer Worker trace queries",
       "disposition": "fixed_helper",
-      "targets": ["dm_tracy_hotspots", "dm_tracy_zone", "dm_tracy_frame_stats", "dm_tracy_compare"],
+      "targets": ["dm_tracy_hotspots", "dm_tracy_zone", "dm_tracy_frame_stats", "dm_tracy_compare", "dm_tracy_control_stats"],
       "platforms": ["windows", "ubuntu"],
       "verification": "Fixture-backed deterministic query tests and live trace source-location gate.",
       "evidence": [],

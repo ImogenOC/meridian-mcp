@@ -100,7 +100,7 @@ jobs:
         run: Add-Content -LiteralPath $env:GITHUB_PATH -Value 'C:\Program Files\Git\usr\bin'
       - name: Build, test, and package pinned Tracy artifacts
         shell: pwsh
-        run: ./scripts/build-tracy-helpers.ps1 -TracyPath ./integration/tracy -ByondTracyPath ./integration/byond-tracy -OutputDirectory ./integration/tracy-package -ManifestPath ./integration/tracy-package/helpers/manifest.json
+        run: ./scripts/run-tracy-native-tests.ps1 -TracyPath ./integration/tracy -ByondTracyPath ./integration/byond-tracy -BuildRoot '${{ runner.temp }}/meridian-tracy-native' -CpmSourceCache '${{ runner.temp }}/meridian-tracy-cpm' -OutputDirectory ./integration/tracy-package -ManifestPath ./integration/tracy-package/helpers/manifest.json
       - name: Upload Tracy package evidence
         uses: actions/upload-artifact@v6
         with:
@@ -108,6 +108,7 @@ jobs:
           path: |
             integration/tracy-package/helpers/manifest.json
             integration/tracy-package/helpers/licenses/*
+            !**/*.tracy
           if-no-files-found: error
 
   ubuntu-meridian-analysis:

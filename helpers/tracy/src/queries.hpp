@@ -26,6 +26,12 @@ struct ZoneStatistics
 	std::int64_t self;
 	std::int64_t minimum;
 	std::int64_t maximum;
+	std::int64_t p50 = 0;
+	std::int64_t p95 = 0;
+	std::int64_t p99 = 0;
+	std::int64_t self_p50 = 0;
+	std::int64_t self_p95 = 0;
+	std::int64_t self_p99 = 0;
 };
 
 enum class HotspotSort

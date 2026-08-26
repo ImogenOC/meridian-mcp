@@ -52,6 +52,7 @@ pub const APPROVED_TOOL_NAMES: &[&str] = &[
     "dm_topic",
     "dm_tracy_capture",
     "dm_tracy_compare",
+    "dm_tracy_control_stats",
     "dm_tracy_frame_stats",
     "dm_tracy_hotspots",
     "dm_tracy_launch",

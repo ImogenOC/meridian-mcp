@@ -1,0 +1,488 @@
+diff --git a/prof.c b/prof.c
+index cdf495e..7543660 100644
+--- a/prof.c
++++ b/prof.c
+@@ -119,6 +119,7 @@ char *getenv(char const *);
+ 
+ #include <stddef.h>
+ #include <assert.h>
++#include <stdio.h>
+ 
+ #if (__STDC_HOSTED__ == 1)
+ #	include <stdlib.h>
+@@ -1226,11 +1227,25 @@ void LZ4_resetStream_fast(LZ4_stream_t *ctx) {
+ #	define atomic_load_acquire(a) *(a)
+ #	define atomic_store_seqcst(a, b) *(a) = (b)
+ #	define atomic_store_release(a, b) *(a) = (b)
++#	define atomic_fetch_add_relaxed(a, b) (*(a) += (b), *(a) - (b))
+ #else
+ #	define atomic_load_relaxed(a) atomic_load_explicit((a), memory_order_relaxed)
+ #	define atomic_load_acquire(a) atomic_load_explicit((a), memory_order_acquire)
+ #	define atomic_store_seqcst(a, b) atomic_store_explicit((a), (b), memory_order_seq_cst)
+ #	define atomic_store_release(a, b) atomic_store_explicit((a), (b), memory_order_release)
++#	define atomic_fetch_add_relaxed(a, b) atomic_fetch_add_explicit((a), (b), memory_order_relaxed)
++#endif
++
++#if defined(UTRACY_WINDOWS)
++	typedef volatile LONG64 meridian_atomic_u64;
++#	define meridian_atomic_load(a) ((long long unsigned) InterlockedCompareExchange64((a), 0, 0))
++#	define meridian_atomic_store(a, b) ((void) InterlockedExchange64((a), (LONG64) (b)))
++#	define meridian_atomic_fetch_add(a, b) ((long long unsigned) InterlockedExchangeAdd64((a), (LONG64) (b)))
++#else
++	typedef long long unsigned meridian_atomic_u64;
++#	define meridian_atomic_load(a) __atomic_load_n((a), __ATOMIC_RELAXED)
++#	define meridian_atomic_store(a, b) __atomic_store_n((a), (b), __ATOMIC_RELEASE)
++#	define meridian_atomic_fetch_add(a, b) __atomic_fetch_add((a), (b), __ATOMIC_RELAXED)
+ #endif
+ 
+ #define CpuArchUnknown (0)
+@@ -1260,6 +1275,12 @@ struct event_frame_mark {
+ 	long long timestamp;
+ };
+ 
++struct event_plot_data {
++	void *name;
++	long long timestamp;
++	long long value;
++};
++
+ struct event {
+ 	char unsigned type;
+ 	union {
+@@ -1267,9 +1288,33 @@ struct event {
+ 		struct event_zone_end zone_end;
+ 		struct event_zone_color zone_color;
+ 		struct event_frame_mark frame_mark;
++		struct event_plot_data plot_data;
+ 	};
+ };
+ 
++struct MeridianHookHealth {
++	int unsigned installed;
++	int unsigned prologue_validated;
++	long long unsigned module_relative_offset;
++};
++
++struct MeridianQueueHealth {
++	int unsigned schema;
++	long long unsigned capacity;
++	_Alignas(8) meridian_atomic_u64 depth;
++	_Alignas(8) meridian_atomic_u64 high_water;
++	_Alignas(8) meridian_atomic_u64 saturation_count;
++	_Alignas(8) meridian_atomic_u64 dropped_events;
++	_Alignas(8) meridian_atomic_u64 produced_events;
++	_Alignas(8) meridian_atomic_u64 consumed_events;
++	_Alignas(8) meridian_atomic_u64 last_producer_progress_raw;
++	struct MeridianHookHealth proc_execution;
++	struct MeridianHookHealth server_tick;
++	struct MeridianHookHealth map_send;
++	char byond_build[32];
++	char offset_table_identity[65];
++};
++
+ struct trampoline_storage {
+ 	char exec_proc[32];
+ 	char server_tick[32];
+@@ -1319,21 +1364,28 @@ static struct {
+ 
+ 		// https://github.com/wolfpld/tracy/blame/master/public/common/TracyQueue.hpp#L10
+ 		char unsigned zone_begin;
++		char unsigned zone_begin32;
++		char unsigned zone_begin16;
+ 		char unsigned zone_end;
++		char unsigned zone_end32;
++		char unsigned zone_end16;
+ 		char unsigned zone_color;
+ 		char unsigned thread_context;
+ 		char unsigned framemark;
++		char unsigned plot_data_int;
+ 
+ 		char unsigned response_source_location;
+ 		char unsigned response_server_query_noop;
+ 		char unsigned response_source_code_unavail;
+ 		char unsigned response_symbol_code_unavail;
+ 		char unsigned response_string_data;
++		char unsigned response_plot_name;
+ 		char unsigned response_thread_name;
+ 
+ 		// https://github.com/wolfpld/tracy/blob/master/public/common/TracyProtocol.hpp#L40
+ 		char unsigned query_terminate;
+ 		char unsigned query_string;
++		char unsigned query_plot_name;
+ 		char unsigned query_thread_string;
+ 		char unsigned query_source_location;
+ 		char unsigned query_disconnect;
+@@ -1386,15 +1438,21 @@ static struct {
+ 		_Alignas(UTRACY_L1_LINE_SIZE) int padding;
+ #endif
+ 	} queue;
++
++	struct MeridianQueueHealth health;
+ } utracy;
+ 
+ /* queue api */
++UTRACY_INTERNAL UTRACY_INLINE long long utracy_tsc(void);
++
+ UTRACY_INTERNAL UTRACY_INLINE
+ int event_queue_init(void) {
+ 	utracy.queue.producer_tail_cache = 0;
+ 	utracy.queue.consumer_head_cache = 0;
+ 	atomic_store_seqcst(&utracy.queue.head, 0);
+ 	atomic_store_seqcst(&utracy.queue.tail, 0);
++	utracy.health.schema = 1;
++	utracy.health.capacity = EVENT_QUEUE_CAPACITY;
+ 	return 0;
+ }
+ 
+@@ -1407,13 +1465,22 @@ void event_queue_push(struct event const *const event) {
+ 		next_store = 0;
+ 	}
+ 
++	int saturated = 0;
+ 	while(unlikely(next_store == utracy.queue.producer_tail_cache)) {
++		if(!saturated) {
++			(void) meridian_atomic_fetch_add(&utracy.health.saturation_count, 1);
++			saturated = 1;
++		}
+ 		utracy.queue.producer_tail_cache = atomic_load_acquire(&utracy.queue.tail);
+ 	}
+ 
+ 	utracy.queue.events[store] = *event;
+ 
+ 	atomic_store_release(&utracy.queue.head, next_store);
++	(void) meridian_atomic_fetch_add(&utracy.health.produced_events, 1);
++	meridian_atomic_store(&utracy.health.last_producer_progress_raw, (long long unsigned) utracy_tsc());
++	long long unsigned depth = meridian_atomic_fetch_add(&utracy.health.depth, 1) + 1;
++	if(depth > meridian_atomic_load(&utracy.health.high_water)) meridian_atomic_store(&utracy.health.high_water, depth);
+ }
+ 
+ UTRACY_INTERNAL UTRACY_INLINE
+@@ -1435,6 +1502,8 @@ int event_queue_pop(struct event *const event) {
+ 	}
+ 
+ 	atomic_store_release(&utracy.queue.tail, next_load);
++	(void) meridian_atomic_fetch_add(&utracy.health.consumed_events, 1);
++	(void) meridian_atomic_fetch_add(&utracy.health.depth, (long long unsigned) -1);
+ 	return 0;
+ }
+ 
+@@ -1665,6 +1734,8 @@ void get_cpu_info(char *manufacturer, int unsigned *cpu_id) {
+ #define UTRACY_PROTOCOL_0_12_0 (74) // Also covers 0.12.1 and 0.12.2
+ #define UTRACY_PROTOCOL_0_13_0 (76)
+ #define UTRACY_PROTOCOL_0_14_0 (82)
++#define UTRACY_PROTOCOL_OFFSET_16BIT (1ll << 16)
++#define UTRACY_PROTOCOL_OFFSET_32BIT (UTRACY_PROTOCOL_OFFSET_16BIT + (1ll << 32))
+ 
+ #define UTRACY_EVT_ZONEBEGIN (15)
+ #define UTRACY_EVT_ZONEEND (17)
+@@ -1720,6 +1791,53 @@ void utracy_emit_frame_mark(char *const name) {
+ 	});
+ }
+ 
++UTRACY_INTERNAL UTRACY_INLINE
++void utracy_emit_plot(char const *const name, long long const value) {
++	event_queue_push(&(struct event) {
++		.type = UTRACY_EVT_PLOTDATA,
++		.plot_data.name = (void *) name,
++		.plot_data.timestamp = utracy_tsc(),
++		.plot_data.value = value
++	});
++}
++
++UTRACY_INTERNAL
++void meridian_emit_health(void) {
++	if(utracy.protocol.version != UTRACY_PROTOCOL_0_14_0) return;
++	static char const queue_capacity[] = "meridian.queue.capacity";
++	static char const queue_depth[] = "meridian.queue.depth";
++	static char const queue_high_water[] = "meridian.queue.high_water";
++	static char const queue_saturation_count[] = "meridian.queue.saturation_count";
++	static char const queue_dropped_events[] = "meridian.queue.dropped_events";
++	static char const produced_events[] = "meridian.queue.produced_events";
++	static char const consumed_events[] = "meridian.queue.consumed_events";
++	static char const last_producer_progress[] = "meridian.producer.last_progress_raw";
++	static char const proc_installed[] = "meridian.hook.proc_execution.installed";
++	static char const proc_prologue[] = "meridian.hook.proc_execution.prologue_validated";
++	static char const tick_installed[] = "meridian.hook.server_tick.installed";
++	static char const tick_prologue[] = "meridian.hook.server_tick.prologue_validated";
++	static char const map_installed[] = "meridian.hook.map_send.installed";
++	static char const map_prologue[] = "meridian.hook.map_send.prologue_validated";
++	static char const byond_build[] = "meridian.byond.build";
++	static char const offset_identity[] = "meridian.offset_table.identity";
++	utracy_emit_plot(queue_capacity, (long long) utracy.health.capacity);
++	utracy_emit_plot(queue_depth, (long long) meridian_atomic_load(&utracy.health.depth));
++	utracy_emit_plot(queue_high_water, (long long) meridian_atomic_load(&utracy.health.high_water));
++	utracy_emit_plot(queue_saturation_count, (long long) meridian_atomic_load(&utracy.health.saturation_count));
++	utracy_emit_plot(queue_dropped_events, (long long) meridian_atomic_load(&utracy.health.dropped_events));
++	utracy_emit_plot(produced_events, (long long) meridian_atomic_load(&utracy.health.produced_events));
++	utracy_emit_plot(consumed_events, (long long) meridian_atomic_load(&utracy.health.consumed_events));
++	utracy_emit_plot(last_producer_progress, (long long) meridian_atomic_load(&utracy.health.last_producer_progress_raw));
++	utracy_emit_plot(proc_installed, utracy.health.proc_execution.installed);
++	utracy_emit_plot(proc_prologue, utracy.health.proc_execution.prologue_validated);
++	utracy_emit_plot(tick_installed, utracy.health.server_tick.installed);
++	utracy_emit_plot(tick_prologue, utracy.health.server_tick.prologue_validated);
++	utracy_emit_plot(map_installed, utracy.health.map_send.installed);
++	utracy_emit_plot(map_prologue, utracy.health.map_send.prologue_validated);
++	utracy_emit_plot(byond_build, atoll(utracy.health.byond_build));
++	utracy_emit_plot(offset_identity, (long long) strtoull(utracy.health.offset_table_identity, NULL, 16));
++}
++
+ /* removed in 0.13 */
+ UTRACY_INTERNAL
+ long long calibrate_delay(void) {
+@@ -1865,6 +1983,7 @@ retry:
+ UTRACY_INTERNAL
+ int utracy_protocol_init(int unsigned version) {
+ 	utracy.protocol.version = version;
++	utracy.protocol.query_plot_name = 4;
+ 
+ 	switch(version) {
+ 		case UTRACY_PROTOCOL_0_8_1:
+@@ -2047,16 +2166,22 @@ int utracy_protocol_init(int unsigned version) {
+ 
+ 		case UTRACY_PROTOCOL_0_14_0:
+ 			utracy.protocol.zone_begin = 19;
++			utracy.protocol.zone_begin32 = 20;
++			utracy.protocol.zone_begin16 = 21;
+ 			utracy.protocol.zone_end = 25;
++			utracy.protocol.zone_end32 = 26;
++			utracy.protocol.zone_end16 = 27;
+ 			utracy.protocol.zone_color = 81;
+ 			utracy.protocol.thread_context = 75;
+ 			utracy.protocol.framemark = 83;
++			utracy.protocol.plot_data_int = 55;
+ 
+ 			utracy.protocol.response_source_location = 87;
+ 			utracy.protocol.response_server_query_noop = 108;
+ 			utracy.protocol.response_source_code_unavail = 109;
+ 			utracy.protocol.response_symbol_code_unavail = 110;
+ 			utracy.protocol.response_string_data = 119;
++			utracy.protocol.response_plot_name = 121;
+ 			utracy.protocol.response_thread_name = 120;
+ 
+ 			utracy.protocol.query_terminate = 0;
+@@ -2254,10 +2379,41 @@ int utracy_write_zone_begin(struct event evt) {
+ 		long long unsigned srcloc;
+ 	};
+ 	_Static_assert(17 == sizeof(struct network_zone_begin), "incorrect size");
++	struct network_zone_begin32 {
++		char unsigned type;
++		int unsigned timestamp;
++		long long unsigned srcloc;
++	};
++	_Static_assert(13 == sizeof(struct network_zone_begin32), "incorrect size");
++	struct network_zone_begin16 {
++		char unsigned type;
++		short unsigned timestamp;
++		long long unsigned srcloc;
++	};
++	_Static_assert(11 == sizeof(struct network_zone_begin16), "incorrect size");
+ #pragma pack(pop)
+ 
+ 	long long timestamp = evt.zone_begin.timestamp - utracy.data.cur_thread.timestamp;
+ 	utracy.data.cur_thread.timestamp = evt.zone_begin.timestamp;
++	if(utracy.protocol.version == UTRACY_PROTOCOL_0_14_0 && timestamp >= 0) {
++		if(timestamp < UTRACY_PROTOCOL_OFFSET_16BIT) {
++			struct network_zone_begin16 msg = {
++				.type = utracy.protocol.zone_begin16,
++				.timestamp = (short unsigned) timestamp,
++				.srcloc = (uintptr_t) evt.zone_begin.srcloc
++			};
++			return utracy_write_packet(&msg, sizeof(msg));
++		}
++		if(timestamp < UTRACY_PROTOCOL_OFFSET_32BIT) {
++			struct network_zone_begin32 msg = {
++				.type = utracy.protocol.zone_begin32,
++				.timestamp = (int unsigned) (timestamp - UTRACY_PROTOCOL_OFFSET_16BIT),
++				.srcloc = (uintptr_t) evt.zone_begin.srcloc
++			};
++			return utracy_write_packet(&msg, sizeof(msg));
++		}
++		timestamp -= UTRACY_PROTOCOL_OFFSET_32BIT;
++	}
+ 
+ 	struct network_zone_begin msg = {
+ 		.type = utracy.protocol.zone_begin,
+@@ -2281,10 +2437,37 @@ int utracy_write_zone_end(struct event evt) {
+ 		long long timestamp;
+ 	};
+ 	_Static_assert(9 == sizeof(struct network_zone_end), "incorrect size");
++	struct network_zone_end32 {
++		char unsigned type;
++		int unsigned timestamp;
++	};
++	_Static_assert(5 == sizeof(struct network_zone_end32), "incorrect size");
++	struct network_zone_end16 {
++		char unsigned type;
++		short unsigned timestamp;
++	};
++	_Static_assert(3 == sizeof(struct network_zone_end16), "incorrect size");
+ #pragma pack(pop)
+ 
+ 	long long timestamp = evt.zone_end.timestamp - utracy.data.cur_thread.timestamp;
+ 	utracy.data.cur_thread.timestamp = evt.zone_end.timestamp;
++	if(utracy.protocol.version == UTRACY_PROTOCOL_0_14_0 && timestamp >= 0) {
++		if(timestamp < UTRACY_PROTOCOL_OFFSET_16BIT) {
++			struct network_zone_end16 msg = {
++				.type = utracy.protocol.zone_end16,
++				.timestamp = (short unsigned) timestamp
++			};
++			return utracy_write_packet(&msg, sizeof(msg));
++		}
++		if(timestamp < UTRACY_PROTOCOL_OFFSET_32BIT) {
++			struct network_zone_end32 msg = {
++				.type = utracy.protocol.zone_end32,
++				.timestamp = (int unsigned) (timestamp - UTRACY_PROTOCOL_OFFSET_16BIT)
++			};
++			return utracy_write_packet(&msg, sizeof(msg));
++		}
++		timestamp -= UTRACY_PROTOCOL_OFFSET_32BIT;
++	}
+ 
+ 	struct network_zone_end msg = {
+ 		.type = utracy.protocol.zone_end,
+@@ -2351,6 +2534,35 @@ int utracy_write_frame_mark(struct event evt) {
+ 	return 0;
+ }
+ 
++UTRACY_INTERNAL UTRACY_INLINE
++int utracy_write_plot_data(struct event evt) {
++#pragma pack(push, 1)
++	struct network_plot_data {
++		char unsigned type;
++		long long unsigned name;
++		long long timestamp;
++		long long value;
++	};
++	_Static_assert(25 == sizeof(struct network_plot_data), "incorrect size");
++#pragma pack(pop)
++
++	long long timestamp = evt.plot_data.timestamp - utracy.data.cur_thread.timestamp;
++	utracy.data.cur_thread.timestamp = evt.plot_data.timestamp;
++
++	struct network_plot_data msg = {
++		.type = utracy.protocol.plot_data_int,
++		.name = (uintptr_t) evt.plot_data.name,
++		.timestamp = timestamp,
++		.value = evt.plot_data.value
++	};
++
++	if(0 != utracy_write_packet(&msg, sizeof(msg))) {
++		LOG_DEBUG_ERROR;
++		return -1;
++	}
++	return 0;
++}
++
+ UTRACY_INTERNAL UTRACY_INLINE
+ int utracy_write_srcloc(struct utracy_source_location const *const srcloc) {
+ #pragma pack(push, 1)
+@@ -2505,6 +2717,11 @@ int utracy_consume_request(void) {
+ 			LOG_DEBUG_ERROR;
+ 			return -1;
+ 		}
++	} else if(req.type == utracy.protocol.query_plot_name) {
++		if(0 != utracy_write_stringdata(utracy.protocol.response_plot_name, (char *) (uintptr_t) req.ptr, req.ptr)) {
++			LOG_DEBUG_ERROR;
++			return -1;
++		}
+ 
+ 	} else if(req.type == utracy.protocol.query_thread_string) {
+ 		if(0 != utracy_write_stringdata(utracy.protocol.response_thread_name, "main", req.ptr)) {
+@@ -2620,6 +2837,13 @@ int utracy_consume_queue(void) {
+ 				}
+ 				break;
+ 
++			case UTRACY_EVT_PLOTDATA:
++				if(0 != utracy_write_plot_data(evt)) {
++					LOG_DEBUG_ERROR;
++					return -1;
++				}
++				break;
++
+ 			default:
+ 				LOG_DEBUG_ERROR;
+ 				return -1;
+@@ -2981,6 +3205,7 @@ int UTRACY_WINDOWS_STDCALL UTRACY_LINUX_CDECL server_tick(void) {
+ 
+ 	/* server tick is the end of a frame and the beginning of the next frame */
+ 	utracy_emit_frame_mark(NULL);
++	meridian_emit_health();
+ 
+ 	utracy_emit_zone_begin(&srcloc);
+ 
+@@ -3009,6 +3234,16 @@ void UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL send_maps(void) {
+ }
+ 
+ /* hooking */
++UTRACY_INTERNAL
++int meridian_validate_prologue(void const *const address, char unsigned const size) {
++	if(address == NULL || size < 5 || size > sizeof(byond.trampoline.exec_proc) - 5) return 0;
++	char unsigned const *const bytes = address;
++	if(bytes[0] == 0xE9 || bytes[0] == 0xCC) return 0;
++	int nonzero = 0;
++	for(char unsigned i=0; i<size; i++) nonzero |= bytes[i] != 0;
++	return nonzero;
++}
++
+ UTRACY_INTERNAL
+ void *hook(char *const restrict dst, char *const restrict src, char unsigned size, char *trampoline) {
+ 	char unsigned jmp[] = {
+@@ -3202,6 +3437,7 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
+ 	}
+ 
+ 	int unsigned const *const offsets = byond_offsets[BYOND_VERSION_ADJUSTED(byond_build)];
++	(void) snprintf(utracy.health.byond_build, sizeof(utracy.health.byond_build), "%d", byond_build);
+ 
+ 	for(int i=0; i<11; i++) {
+ 		if(offsets[i] == 0) {
+@@ -3209,6 +3445,13 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
+ 			return "byond version unsupported";
+ 		}
+ 	}
++	long long unsigned offset_identity = 1469598103934665603ull;
++	for(int i=0; i<11; i++) {
++		offset_identity ^= offsets[i];
++		offset_identity *= 1099511628211ull;
++	}
++	offset_identity &= ((1ull << 52) - 1);
++	(void) snprintf(utracy.health.offset_table_identity, sizeof(utracy.health.offset_table_identity), "%016llx", offset_identity);
+ 
+ 	char unsigned prologues[3];
+ 
+@@ -3250,23 +3493,36 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
+ 
+ 	LOG_INFO("byond build = %d\n", byond_build);
+ 
++	utracy.health.proc_execution.module_relative_offset = offsets[7];
++	utracy.health.server_tick.module_relative_offset = offsets[8];
++	utracy.health.map_send.module_relative_offset = offsets[9];
++	utracy.health.proc_execution.prologue_validated = meridian_validate_prologue(byond.exec_proc, prologues[0]);
++	utracy.health.server_tick.prologue_validated = meridian_validate_prologue(byond.server_tick, prologues[1]);
++	utracy.health.map_send.prologue_validated = meridian_validate_prologue(byond.send_maps, prologues[2]);
++	if(!utracy.health.proc_execution.prologue_validated || !utracy.health.server_tick.prologue_validated || !utracy.health.map_send.prologue_validated) {
++		return "invalid hook prologue length";
++	}
++
+ 	byond.orig_exec_proc = hook((void *) exec_proc, byond.exec_proc, prologues[0], byond.trampoline.exec_proc);
+ 	if(NULL == byond.orig_exec_proc) {
+ 		LOG_DEBUG_ERROR;
+ 		return "failed to hook exec_proc";
+ 	}
++	utracy.health.proc_execution.installed = 1;
+ 
+ 	byond.orig_server_tick = hook((void *) server_tick, byond.server_tick, prologues[1], byond.trampoline.server_tick);
+ 	if(NULL == byond.orig_server_tick) {
+ 		LOG_DEBUG_ERROR;
+ 		return "failed to hook server_tick";
+ 	}
++	utracy.health.server_tick.installed = 1;
+ 
+ 	byond.orig_send_maps = hook((void *) send_maps, byond.send_maps, prologues[2], byond.trampoline.send_maps);
+ 	if(NULL == byond.orig_send_maps) {
+ 		LOG_DEBUG_ERROR;
+ 		return "failed to hook send_maps";
+ 	}
++	utracy.health.map_send.installed = 1;
+ 
+ #if defined(UTRACY_WINDOWS)
+ 	DWORD old_protect;

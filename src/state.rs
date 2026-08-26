@@ -198,9 +198,22 @@ impl RuntimeState {
 #[derive(Default)]
 pub struct TracyCaptureState {
     pub(crate) active: bool,
-    pub(crate) cancellation: Option<tokio::sync::watch::Sender<bool>>,
     pub(crate) output_path: Option<std::path::PathBuf>,
     pub(crate) last_error: Option<String>,
+    pub(crate) collector: Option<Arc<crate::tracy_collector::TracyCollector>>,
+    pub(crate) phase: Option<crate::tracy_collector::TracySessionPhase>,
+    pub(crate) last_status: Option<serde_json::Value>,
+    pub(crate) integrity: Option<crate::workspace_integrity::IntegrityBaseline>,
+    pub(crate) integrity_owned_paths: Vec<std::path::PathBuf>,
+    pub(crate) experiment: Option<crate::tracy_experiment::ExperimentState>,
+    pub(crate) used_phases: std::collections::BTreeSet<(String, u32)>,
+    pub(crate) memory_series:
+        Option<Arc<tokio::sync::Mutex<Vec<crate::process_metrics::RoleMemorySeries>>>>,
+    pub(crate) memory_stop: Option<tokio::sync::watch::Sender<bool>>,
+    pub(crate) memory_task: Option<JoinHandle<()>>,
+    pub(crate) experiment_started_at: Option<tokio::time::Instant>,
+    pub(crate) capture_records: Vec<serde_json::Value>,
+    pub(crate) network_records: Vec<serde_json::Value>,
 }
 
 impl Default for RuntimeState {

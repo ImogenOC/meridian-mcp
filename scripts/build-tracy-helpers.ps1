@@ -21,6 +21,22 @@ function Assert-Revision([string]$Path, [string]$Expected, [string]$Name) {
 	if ($LASTEXITCODE -ne 0 -or $actual -ne $Expected) {
 		throw "$Name checkout must be at $Expected; found $actual"
 	}
+	$changes = @(& git -C $Path status --porcelain --untracked-files=no)
+	if ($LASTEXITCODE -ne 0 -or $changes.Count -ne 0) {
+		throw "$Name checkout must be unmodified before owned patches are applied to a private copy."
+	}
+}
+
+function Invoke-OwnedPatch([string]$SourceRoot, [string]$PatchPath, [string]$Name) {
+	Push-Location $SourceRoot
+	try {
+		& git apply --check $PatchPath
+		if ($LASTEXITCODE -ne 0) { throw "$Name did not pass git apply --check." }
+		& git apply $PatchPath
+		if ($LASTEXITCODE -ne 0) { throw "$Name did not apply cleanly." }
+	} finally {
+		Pop-Location
+	}
 }
 
 Assert-Revision $tracy $tracyRevision 'Tracy'
@@ -47,9 +63,18 @@ if ($null -eq $cmakeCommand) { throw 'CMake 3.25 or newer is required.' }
 $cmake = if ($cmakeCommand -is [System.Management.Automation.ApplicationInfo]) { $cmakeCommand.Source } else { $cmakeCommand.FullName }
 
 New-Item -ItemType Directory -Force -Path $build, $CpmSourceCache | Out-Null
-& $cmake -S (Join-Path $PSScriptRoot '../helpers/tracy') -B $build "-DTRACY_SOURCE_DIR=$tracy" "-DCPM_SOURCE_CACHE=$CpmSourceCache" -DBUILD_TESTING=ON
+$tracyClockPatch = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../helpers/tracy/tracy-clock-access.patch')).Path
+$tracySource = [IO.Path]::GetFullPath((Join-Path $build 'tracy-source'))
+$expectedPrivatePrefix = $build.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+if (-not $tracySource.StartsWith($expectedPrivatePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Private Tracy source escaped the build root.' }
+if (Test-Path -LiteralPath $tracySource) { Remove-Item -LiteralPath $tracySource -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $tracySource | Out-Null
+Get-ChildItem -LiteralPath $tracy -Force | Where-Object Name -ne '.git' | Copy-Item -Destination $tracySource -Recurse -Force
+Invoke-OwnedPatch $tracySource $tracyClockPatch 'The Meridian Tracy clock-access patch'
+
+& $cmake -S (Join-Path $PSScriptRoot '../helpers/tracy') -B $build "-DTRACY_SOURCE_DIR=$tracySource" "-DCPM_SOURCE_CACHE=$CpmSourceCache" -DBUILD_TESTING=ON
 if ($LASTEXITCODE -ne 0) { throw 'The pinned Tracy helper configure failed.' }
-& $cmake --build $build --config Release --target meridian-tracy-helper meridian_tracy_protocol_tests meridian_tracy_query_tests
+& $cmake --build $build --config Release --target meridian-tracy-helper meridian_tracy_protocol_tests meridian_tracy_query_tests meridian_tracy_validation_tests meridian_tracy_session_tests
 if ($LASTEXITCODE -ne 0) { throw 'The pinned Tracy helper build failed.' }
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'
 if (-not $IsWindows) { $ctest = (Get-Command ctest -ErrorAction Stop).Source }
@@ -75,6 +100,7 @@ $entries += [ordered]@{
 	path = [IO.Path]::GetRelativePath((Split-Path -Parent $manifest), $helperTarget).Replace('\', '/')
 	sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $helperTarget).Hash.ToLowerInvariant()
 	source_revision = $tracyRevision
+	patch_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tracyClockPatch).Hash.ToLowerInvariant()
 	protocol_version = 82
 }
 
@@ -86,13 +112,12 @@ New-Item -ItemType Directory -Force -Path $hookBuildRoot | Out-Null
 $hookBuild = Join-Path $hookBuildRoot $hookName
 $hookSource = Join-Path $hookBuildRoot 'prof.c'
 Copy-Item -LiteralPath (Join-Path $byondTracy 'prof.c') -Destination $hookSource -Force
-$hookPatch = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../helpers/tracy/byond-tracy-empty-queue.patch')).Path
-Push-Location $hookBuildRoot
-try {
-	& git apply --unsafe-paths $hookPatch
-	if ($LASTEXITCODE -ne 0) { throw 'The Meridian byond-tracy empty-queue patch did not apply cleanly.' }
-} finally {
-	Pop-Location
+$hookPatches = @(
+	[ordered]@{ name = 'empty_queue'; path = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../helpers/tracy/byond-tracy-empty-queue.patch')).Path },
+	[ordered]@{ name = 'queue_health'; path = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../helpers/tracy/byond-tracy-health.patch')).Path }
+)
+foreach ($ownedPatch in $hookPatches) {
+	Invoke-OwnedPatch $hookBuildRoot $ownedPatch.path "The Meridian byond-tracy $($ownedPatch.name) patch"
 }
 if ($IsWindows) {
 	$vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
@@ -127,6 +152,20 @@ $entries += [ordered]@{
 	protocol_version = 82
 	byond_min_version = '516.1685'
 	byond_max_version = '516.1687'
+	patches = @($hookPatches | ForEach-Object { [ordered]@{ name = $_.name; patch_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.path).Hash.ToLowerInvariant() } })
+	telemetry = [ordered]@{
+		queue_capacity = $true
+		queue_depth = $true
+		queue_high_water = $true
+		queue_saturation_count = $true
+		queue_dropped_events = $true
+		produced_events = $true
+		consumed_events = $true
+		last_producer_progress = $true
+		prologue_validated = $true
+		module_relative_offset = $true
+		offset_table_identity = $true
+	}
 }
 
 $licenseRoot = Join-Path $output 'helpers/licenses'

@@ -161,9 +161,57 @@ fn tracy_inventory_is_opt_in_and_exposes_fixed_command_tools_only() {
             "dm_tracy_zone",
             "dm_tracy_frame_stats",
             "dm_tracy_compare",
+            "dm_tracy_control_stats",
         ]
         .into_iter()
         .collect()
     );
     assert!(!tracy.iter().any(|name| name.contains("eval")));
+
+    let definitions = meridian_mcp::tools::get_tool_definitions();
+    for tool_name in ["dm_tracy_launch", "dm_tracy_capture"] {
+        let properties = definitions
+            .iter()
+            .find(|tool| tool.name == tool_name)
+            .unwrap()
+            .input_schema["properties"]
+            .as_object()
+            .unwrap();
+        for field in [
+            "map",
+            "seed",
+            "configuration_profile",
+            "feature_set",
+            "scenario",
+            "external_run_id",
+            "annotations",
+        ] {
+            assert!(
+                properties.contains_key(field),
+                "{tool_name} omitted {field}"
+            );
+        }
+        assert_eq!(properties["annotations"]["maxProperties"], 32);
+    }
+    let launch = definitions
+        .iter()
+        .find(|tool| tool.name == "dm_tracy_launch")
+        .unwrap();
+    assert!(launch.input_schema["properties"]["experiment_directory"].is_object());
+    let control = definitions
+        .iter()
+        .find(|tool| tool.name == "dm_tracy_control_stats")
+        .unwrap();
+    assert_eq!(
+        control.input_schema["properties"]["trace_paths"]["minItems"],
+        3
+    );
+    assert_eq!(
+        control.input_schema["properties"]["trace_paths"]["maxItems"],
+        20
+    );
+    assert_eq!(
+        control.input_schema["properties"]["comparison_mode"]["enum"],
+        serde_json::json!(["same_experiment_same_phase", "cross_experiment"])
+    );
 }

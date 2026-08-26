@@ -1,0 +1,42 @@
+# Tracy profiling
+
+Tracy support is an Experimental development-mode opt-in. Set `MERIDIAN_MCP_TRACY=byond` only with a helper manifest produced from the pinned clean revisions by `scripts/build-tracy-helpers.ps1`. Preparation copies the hash-verified x86 hook beside the DMB; it does not edit the DMB or either upstream checkout.
+
+## Tool workflow
+
+1. `dm_tracy_prepare` copies the verified hook beside one contained DMB. It is idempotent for an identical file and refuses replacement unless explicitly requested.
+2. `dm_tracy_launch` starts one MCP-owned DreamDaemon and persistent collector on private loopback, verifies producer progress, records executable and draft workload identity, and begins separate DreamDaemon and collector memory sampling.
+3. `dm_tracy_status` reports both owned lifecycles, the profiler endpoint, worker generation, capture state, bounded output, and the last structured failure.
+4. `dm_tracy_capture` records one uniquely named phase/iteration window, validates it, and atomically publishes `name.tracy` with `name.tracy.meridian.json`. The first capture locks omitted workload fields; later calls may omit them or repeat a matching subset. Capture annotations describe only that window.
+5. `dm_tracy_hotspots` ranks exact proc/file/line identities by inclusive time, self time, count, or maximum duration. Only complete zones in the sidecar's half-open range are analyzed.
+6. `dm_tracy_zone` returns count, inclusive/self totals, extrema, and p50/p95/p99 for one exact profiled proc name, keeping different source identities separate.
+7. `dm_tracy_frame_stats` reports count, mean, extrema, and nearest-rank p50/p95/p99 for complete `ServerTick` frames in the authoritative range.
+8. `dm_tracy_compare` checks technical and workload compatibility before computing bounded exact-identity deltas. Same-experiment/same-phase is the default. Cross-experiment comparison must be requested explicitly and still requires matching executable, workload, phase, and memory-role dimensions.
+9. `dm_tracy_control_stats` accepts 3-20 unique trace/sidecar pairs, rejects incompatible or incomplete controls, selects a requested per-trace frame or exact-zone percentile, and calculates a deterministic distribution and noise envelope across controls.
+10. `dm_tracy_stop` cancels an active window, stops the collector and owned DreamDaemon, finishes the complete role-specific memory series, and writes the experiment-complete manifest.
+
+Offline analysis does not require a parsed DreamMaker environment. When one is active, matching file/line results receive additive source-correlation metadata; measurements are never rewritten.
+
+## Identity and range semantics
+
+Launch records DMB/RSC and DreamDaemon hashes, BYOND version, hook/helper revisions and hashes, loaded native modules, startup parameters, repository revision and dirty digest. Workload identity covers map, seed, configuration profile, sorted feature set, scenario, external run ID, and bounded annotations. Their canonical hashes form an immutable experiment ID. A trace hash mismatch, conflicting workload field, reused phase iteration, or incompatible comparison fails before statistics are returned.
+
+Capture intervals are half-open: `[trace_begin_ns, trace_end_ns)`. A complete frame or zone begins at or after the lower bound and ends at or before the upper bound. A partial-first sample crosses the lower boundary, a partial-last sample crosses the upper boundary, and a spanning sample crosses both. Partial samples remain in explicit counts but are excluded from latency distributions. Counts reconcile as `analyzed <= complete <= intersecting <= raw`; exclusions are reported rather than converted to zero-duration samples. Empty complete samples return `insufficient_complete_samples`.
+
+Statistics schema 2 preserves the helper's existing fields and adds experiment/capture/phase identity, authoritative raw range, native range counts, nested statistics, warnings, `window_source`, and `identity_verification`. Legacy traces without a Meridian sidecar use their full trace, report identity verification as unavailable, may be self-compared, and cannot establish an automated control baseline.
+
+Percentiles sort integer nanoseconds and use nearest rank: `ceil(p * n) - 1`, clamped to the sample array. Control standard deviation is the sample standard deviation. A frame or zone metric is noisy when coefficient of variation exceeds `0.10`, or its absolute range exceeds `max(1,000,000 ns, 0.20 * median)`. Any invalid capture, queue drop/saturation, fewer than three complete frames, missing exact zone, role-identity failure, or noisy requested metric makes `establishes_control_baseline` false.
+
+## Memory and network evidence
+
+Memory is sampled every 500 ms from launch through stop and is never implicitly summed across roles. Windows records working set, private bytes, and virtual bytes. Linux records RSS and virtual bytes. Each series is bound to PID plus process creation/start identity so PID reuse stops the series. Capture sidecars retain samples inside the capture window plus the nearest sample on either side; the final experiment manifest retains the complete bounded series. Metrics of unlike kinds or operating systems are not directly comparable.
+
+`capture_network` is best effort. Structured evidence is restricted to the configured loopback profiler port and the owned DreamDaemon/collector identities. Listener creation and collector handshake can verify those lifecycle facts, but endpoint observation failures are warnings. `network_isolation_confirmed` and `capture_complete` are always false: this feature does not prove that unrelated processes or traffic were absent.
+
+## Reproducible controls and retained artifacts
+
+`scripts/run-tracy-experiment.ps1` drives prepare, launch, status, a default 30-second boot-excluding warmup, repeated capture, range-aware frame analysis, control statistics, stop, and independent validation through the release MCP entry point. The output directory must be new and contained by the configured roots. `WarmupSeconds` can be changed explicitly, including zero for a deliberate boot-phase experiment.
+
+The owned evidence directory contains `experiment.json`, `control-stats.json`, `validation.json`, per-control summaries, `evidence-index.json`, and the local trace/sidecar pairs. Raw `.tracy` files remain local. Workflow uploads explicitly exclude `**/*.tracy`; the index records their hashes so an operator can retain or transfer them deliberately. `scripts/validate-tracy-evidence.ps1` performs no launch and independently rehashes the pairs, verifies immutable identity/ranges, role-specific memory, honest network disclaimers, unique iterations, and control eligibility.
+
+Windows and Ubuntu native results and Windows/Ubuntu live BYOND results are independent evidence. Tracy compatibility remains Experimental until the documented repeated-control live acceptance and hosted platform gates are green; a local native or short-window pass alone does not promote it.

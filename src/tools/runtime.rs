@@ -25,7 +25,14 @@ use crate::state::{
 };
 
 /// Find the DreamDaemon executable
-fn find_dreamdaemon() -> Option<PathBuf> {
+pub(crate) fn find_dreamdaemon() -> Option<PathBuf> {
+    if let Ok(path) = which::which("dreamdaemon") {
+        return Some(path);
+    }
+    if let Ok(path) = which::which("DreamDaemon") {
+        return Some(path);
+    }
+
     let possible_paths = [
         r"C:\Program Files (x86)\BYOND\bin\dreamdaemon.exe",
         r"C:\Program Files\BYOND\bin\dreamdaemon.exe",
@@ -38,13 +45,6 @@ fn find_dreamdaemon() -> Option<PathBuf> {
         if p.exists() {
             return Some(p);
         }
-    }
-
-    if let Ok(path) = which::which("dreamdaemon") {
-        return Some(path);
-    }
-    if let Ok(path) = which::which("DreamDaemon") {
-        return Some(path);
     }
 
     None

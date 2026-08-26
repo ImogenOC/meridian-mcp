@@ -13,6 +13,7 @@ pub mod parameters;
 pub mod path_policy;
 pub mod process;
 pub mod process_environment;
+pub mod process_metrics;
 pub mod project;
 pub mod result;
 mod search;
@@ -22,7 +23,12 @@ pub mod spaceman;
 pub mod state;
 pub mod tools;
 pub mod tracy;
+pub mod tracy_artifact;
+pub mod tracy_collector;
+pub mod tracy_experiment;
 pub mod tracy_protocol;
+pub mod tracy_statistics;
+pub mod workspace_integrity;
 
 pub use config::{CapabilityMode, DebuggerAccess, RiftBuildAccess, ServerConfig, TracyAccess};
 pub use contracts::{

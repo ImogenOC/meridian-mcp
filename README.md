@@ -119,14 +119,15 @@ When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both nativ
 | Tool | Description |
 | --- | --- |
 | `dm_tracy_prepare` | Copy the exact hash-verified x86 byond-tracy hook beside a contained DMB. A matching hook is idempotent; replacing a different file requires `overwrite=true`. |
-| `dm_tracy_launch` | Start one MCP-owned DreamDaemon with fixed `-params tracy`, a private loopback profiler endpoint, a minimal environment, and no arbitrary profiler arguments. The matching hook must already be prepared. |
-| `dm_tracy_capture` | Connect the fixed native helper to the active profiled runtime, enforce duration and memory bounds, optionally record best-effort endpoint observations, and atomically publish the trace only after success. |
-| `dm_tracy_status` | Report runtime kind, DreamDaemon and profiler ports, PID, capture activity/output, last exit code, and the last capture error. |
-| `dm_tracy_stop` | Cancel an active helper capture first, then terminate only the MCP-owned Tracy DreamDaemon. It does not target a standard runtime or unrelated process. |
+| `dm_tracy_launch` | Start one MCP-owned DreamDaemon and persistent collector, validate producer readiness, and retain a drain worker on the private loopback profiler endpoint. |
+| `dm_tracy_capture` | Rotate to a fresh bounded capture worker, reopen and validate the trace, resume draining, and atomically publish `.tracy` plus `.tracy.meridian.json`. Network evidence is best effort and scoped to owned loopback observations. |
+| `dm_tracy_status` | Report DreamDaemon and collector state, profiler endpoint, worker generation, producer/queue health, capture activity, and the last structured error. |
+| `dm_tracy_stop` | Cancel an active window, stop the persistent collector, then terminate only the MCP-owned Tracy DreamDaemon. It does not target a standard runtime or unrelated process. |
 | `dm_tracy_hotspots` | Load a contained trace and return a bounded, deterministic proc/file/line ranking by inclusive time, self time, call count, or maximum duration. |
 | `dm_tracy_zone` | Return bounded aggregate statistics for an exact profiled proc name across its recorded file/line identities. |
 | `dm_tracy_frame_stats` | Summarize the trace's base `ServerTick` frame series with count, span, mean, extrema, and p50/p95/p99 durations. |
 | `dm_tracy_compare` | Compare two contained traces by exact proc/file/line identity and return bounded inclusive, self-time, and count deltas. |
+| `dm_tracy_control_stats` | Validate 3-20 immutable, identity-compatible capture pairs; aggregate a selected complete-frame or exact-zone percentile; and report deterministic sample deviation, coefficient of variation, range, fixed noise thresholds, and baseline eligibility. |
 
 Offline analysis works without a parsed environment. When one is active, matching trace file/line records receive additive source-correlation metadata; profiler measurements are not rewritten.
 
@@ -155,7 +156,11 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 | `test_mcp.ps1` | Build or exercise an installed Meridian-MCP binary over real stdio JSON-RPC. It validates initialization, exact tool inventories and schemas, bounded errors, optional DME parse/search, compile, runtime, Topic, and map behavior. Use `-SkipBuild` with `-BinaryPath`/`-ServerPath` to test an exact release artifact. |
 | `scripts/audit-spacemandmm-capabilities.ps1` | Compare the checked-in SpacemanDMM capability registry with its declared coverage; `-Check` is the non-mutating CI audit. An exact upstream checkout can be supplied for source-aware auditing. |
 | `scripts/build-spacemandmm-helpers.ps1` | Build dmdoc from the pinned local SpacemanDMM checkout, copy the platform helper, hash it, and write or merge the helper manifest. It does not select an arbitrary revision. |
-| `scripts/build-tracy-helpers.ps1` | Build and test the fixed-command native Tracy helper plus the patched x86 byond-tracy hook from exact local source revisions, copy licenses, hash artifacts, and merge schema-v2 manifest entries. It performs no source download. |
+| `scripts/build-tracy-helpers.ps1` | Copy exact clean Tracy/byond-tracy revisions into private build sources, verify and apply ordered clock/queue-health patches, build x64 helper and x86 hook, run all CTests, copy licenses, hash patches/artifacts, and merge schema-v2 manifest entries. It performs no source download or vendor-checkout edit. |
+| `scripts/run-tracy-native-tests.ps1` | Run the complete pinned native build, protocol, query, validation, rotation, cancellation, and packaging gate on Windows or Ubuntu, reported independently. |
+| `scripts/run-tracy-integration.ps1` | Compile the owned BYOND fixture, retain the drain worker for two minutes, run three 30-second MCP captures, verify trace/sidecar pairs and queue health, exercise every analysis command, and stop owned processes. |
+| `scripts/run-tracy-experiment.ps1` | Run a named 3-20-control experiment through the release MCP, produce range-aware summaries and a complete experiment manifest, validate the pairs independently, and retain raw traces locally. |
+| `scripts/validate-tracy-evidence.ps1` | Rehash an existing experiment evidence directory and validate schema-2 identity, ranges, queue health, unique phase iterations, separate process-memory roles, network disclaimers, and control eligibility without launching BYOND. |
 | `scripts/fetch-auxtools.ps1` | Download auxtools `debug_server.dll` v2.3.7 from the fixed release URL, verify its fixed SHA-256, and atomically install it below a supplied destination root. |
 | `scripts/install-auxtools-runtime.ps1` | Verify the x86 MSVC runtime required by the pinned auxtools DLL and, on Windows CI, install it from the runner's bundled `vc_redist.x86.exe` when missing. It performs no network download. |
 | `scripts/install-byond.ps1` | Install the pinned Windows BYOND archive for CI/integration use through verified download and archive checks. This is test infrastructure, not a project build command. |

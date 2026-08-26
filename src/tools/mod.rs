@@ -619,8 +619,71 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     });
 
     tools.push(ToolDefinition { name: "dm_tracy_prepare".into(), description: "Place the verified pinned byond-tracy hook beside a contained DMB using atomic replacement rules.".into(), input_schema: json!({"type":"object","properties":{"dmb_path":{"type":"string"},"overwrite":{"type":"boolean","default":false}},"required":["dmb_path"]}) });
-    tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":{"dmb_path":{"type":"string"},"game_port":{"type":"integer","minimum":1,"maximum":65535},"startup_timeout_ms":{"type":"integer","minimum":1000,"maximum":60000}},"required":["dmb_path"]}) });
-    tools.push(ToolDefinition { name: "dm_tracy_capture".into(), description: "Capture the active profiled DreamDaemon through the verified fixed-command Tracy helper into an atomic contained trace.".into(), input_schema: json!({"type":"object","properties":{"output_path":{"type":"string"},"duration_ms":{"type":"integer","minimum":1,"maximum":300000},"memory_limit_mb":{"type":"integer","minimum":16,"maximum":4096},"overwrite":{"type":"boolean","default":false},"capture_network":{"type":"boolean","default":false}},"required":["output_path","duration_ms","memory_limit_mb"]}) });
+    let workload_properties = json!({
+        "experiment_name":{"type":"string","maxLength":512},
+        "map":{"type":"string","maxLength":512},
+        "seed":{"type":"string","maxLength":512},
+        "configuration_profile":{"type":"string","maxLength":512},
+        "feature_set":{"type":"array","maxItems":64,"items":{"type":"string","maxLength":512}},
+        "scenario":{"type":"string","maxLength":512},
+        "external_run_id":{"type":"string","maxLength":512},
+        "annotations":{"type":"object","maxProperties":32,"additionalProperties":{"type":"string","maxLength":512}}
+    });
+    let mut launch_properties = workload_properties.as_object().cloned().unwrap_or_default();
+    launch_properties.extend(serde_json::Map::from_iter([
+        ("dmb_path".into(), json!({"type":"string"})),
+        (
+            "game_port".into(),
+            json!({"type":"integer","minimum":1,"maximum":65535}),
+        ),
+        (
+            "startup_timeout_ms".into(),
+            json!({"type":"integer","minimum":1000,"maximum":60000}),
+        ),
+        (
+            "experiment_directory".into(),
+            json!({"type":"string","description":"Existing contained directory for immutable experiment manifests; defaults beside the DMB."}),
+        ),
+        (
+            "experiment_name".into(),
+            json!({"type":"string","maxLength":512}),
+        ),
+    ]));
+    tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters, an immutable executable/workload draft, and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":launch_properties,"required":["dmb_path"]}) });
+    let mut capture_properties = workload_properties.as_object().cloned().unwrap_or_default();
+    capture_properties.remove("experiment_name");
+    capture_properties.extend(serde_json::Map::from_iter([
+        ("output_path".into(), json!({"type":"string"})),
+        (
+            "duration_ms".into(),
+            json!({"type":"integer","minimum":1,"maximum":300000}),
+        ),
+        (
+            "memory_limit_mb".into(),
+            json!({"type":"integer","minimum":16,"maximum":4096}),
+        ),
+        (
+            "overwrite".into(),
+            json!({"type":"boolean","default":false}),
+        ),
+        (
+            "capture_network".into(),
+            json!({"type":"boolean","default":false}),
+        ),
+        (
+            "phase".into(),
+            json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z0-9_-]+$"}),
+        ),
+        (
+            "phase_iteration".into(),
+            json!({"type":"integer","minimum":1,"maximum":4294967295_u64}),
+        ),
+        (
+            "capture_annotations".into(),
+            json!({"type":"object","maxProperties":32,"additionalProperties":{"type":"string","maxLength":512}}),
+        ),
+    ]));
+    tools.push(ToolDefinition { name: "dm_tracy_capture".into(), description: "Lock or verify immutable workload identity, then capture one uniquely named phase iteration into an atomic trace/sidecar pair.".into(), input_schema: json!({"type":"object","properties":capture_properties,"required":["output_path","duration_ms","memory_limit_mb","phase","phase_iteration"]}) });
     tools.push(ToolDefinition { name: "dm_tracy_status".into(), description: "Report profiled DreamDaemon, capture, endpoint, hook, helper, protocol, and last-error state.".into(), input_schema: json!({"type":"object","properties":{}}) });
     tools.push(ToolDefinition {
         name: "dm_tracy_stop".into(),
@@ -632,7 +695,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     tools.push(ToolDefinition { name: "dm_tracy_hotspots".into(), description: "Read a contained Tracy trace and return bounded deterministic DreamMaker hotspot statistics.".into(), input_schema: json!({"type":"object","properties":{"trace_path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100},"sort":{"type":"string","enum":["inclusive","self","count","max"],"default":"inclusive"}},"required":["trace_path"]}) });
     tools.push(ToolDefinition { name: "dm_tracy_zone".into(), description: "Inspect bounded statistics for one DreamMaker proc name across source locations in a contained Tracy trace.".into(), input_schema: json!({"type":"object","properties":{"trace_path":{"type":"string"},"name":{"type":"string","maxLength":4096},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100}},"required":["trace_path","name"]}) });
     tools.push(ToolDefinition { name: "dm_tracy_frame_stats".into(), description: "Summarize ServerTick frame count, span, mean, extrema, and p50/p95/p99 from a contained Tracy trace.".into(), input_schema: json!({"type":"object","properties":{"trace_path":{"type":"string"}},"required":["trace_path"]}) });
-    tools.push(ToolDefinition { name: "dm_tracy_compare".into(), description: "Compare two contained Tracy traces by proc, file, and line with bounded deterministic deltas.".into(), input_schema: json!({"type":"object","properties":{"baseline_path":{"type":"string"},"current_path":{"type":"string"},"minimum_delta_ns":{"type":"integer","minimum":0,"default":0},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100}},"required":["baseline_path","current_path"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_compare".into(), description: "Verify trace identity compatibility, then compare two contained Tracy traces by proc, file, and line.".into(), input_schema: json!({"type":"object","properties":{"baseline_path":{"type":"string"},"current_path":{"type":"string"},"comparison_mode":{"type":"string","enum":["same_experiment_same_phase","cross_experiment"],"default":"same_experiment_same_phase"},"minimum_delta_ns":{"type":"integer","minimum":0,"default":0},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100}},"required":["baseline_path","current_path"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_control_stats".into(), description: "Validate 3-20 identity-compatible controls and calculate fixed frame and exact-zone noise statistics.".into(), input_schema: json!({"type":"object","properties":{"trace_paths":{"type":"array","minItems":3,"maxItems":20,"uniqueItems":true,"items":{"type":"string"}},"frame_percentile":{"type":"string","enum":["p50","p95","p99"],"default":"p95"},"zone_keys":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","maxLength":4096,"description":"file|line|name|inclusive_or_self|p50_p95_or_p99"}},"comparison_mode":{"type":"string","enum":["same_experiment_same_phase","cross_experiment"],"default":"same_experiment_same_phase"}},"required":["trace_paths"]}) });
 
     tools
 }
@@ -841,11 +905,12 @@ pub async fn call_tool(
         "dm_tracy_launch" => tracy::launch(context, state, args).await,
         "dm_tracy_capture" => tracy::capture(context, state, args).await,
         "dm_tracy_status" => tracy::status(state).await,
-        "dm_tracy_stop" => tracy::stop(state).await,
+        "dm_tracy_stop" => tracy::stop(context, state).await,
         "dm_tracy_hotspots" => tracy::hotspots(context, state, args).await,
         "dm_tracy_zone" => tracy::zone(context, state, args).await,
         "dm_tracy_frame_stats" => tracy::frame_stats(context, state, args).await,
         "dm_tracy_compare" => tracy::compare(context, state, args).await,
+        "dm_tracy_control_stats" => tracy::control_stats(context, state, args).await,
         _ => Err(anyhow!("Unknown tool: {name}")),
     }
 }

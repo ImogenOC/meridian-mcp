@@ -28,8 +28,11 @@ include("${TRACY_SOURCE_DIR}/cmake/vendor.cmake")
 include("${TRACY_SOURCE_DIR}/cmake/server.cmake")
 
 add_library(meridian_tracy_protocol STATIC
+	src/collector.cpp
 	src/protocol.cpp
 	src/queries.cpp
+	src/session_json.cpp
+	src/validation.cpp
 )
 target_include_directories(meridian_tracy_protocol PUBLIC src)
 target_link_libraries(meridian_tracy_protocol PUBLIC nlohmann_json::nlohmann_json)
@@ -48,4 +51,10 @@ if(BUILD_TESTING)
 	add_executable(meridian_tracy_query_tests tests/query_tests.cpp)
 	target_link_libraries(meridian_tracy_query_tests PRIVATE meridian_tracy_protocol)
 	add_test(NAME meridian_tracy_query_tests COMMAND meridian_tracy_query_tests)
+	add_executable(meridian_tracy_validation_tests tests/validation_tests.cpp)
+	target_link_libraries(meridian_tracy_validation_tests PRIVATE meridian_tracy_protocol)
+	add_test(NAME meridian_tracy_validation_tests COMMAND meridian_tracy_validation_tests)
+	add_executable(meridian_tracy_session_tests tests/session_tests.cpp)
+	target_link_libraries(meridian_tracy_session_tests PRIVATE meridian_tracy_protocol)
+	add_test(NAME meridian_tracy_session_tests COMMAND meridian_tracy_session_tests)
 endif()

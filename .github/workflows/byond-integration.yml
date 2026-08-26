@@ -13,7 +13,7 @@ on:
 
 jobs:
   compatibility:
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v7
       - name: Check out exact SpacemanDMM helper source
@@ -79,6 +79,17 @@ jobs:
             -ArchivePath "$env:RUNNER_TEMP\byond.zip" `
             -DestinationPath "$env:RUNNER_TEMP\byond" `
             -ExpectedSha256 6A69818D8216E089D5C16506659A8883D8CCF06A673A2DD9F7C0777E81BCD9A4
+      - name: Install pinned BYOND x86 runtime prerequisites
+        shell: pwsh
+        env:
+          MERIDIAN_DXSDK_PACKAGE: Microsoft.DXSDK.D3DX
+          MERIDIAN_DXSDK_VERSION: 9.29.952.8
+          MERIDIAN_DXSDK_SHA256: ead0906ae8a26c18a7525da7490127a2110f7c58f18293738283e30e97c6ea4b
+        run: |
+          ./scripts/install-byond-runtime.ps1 `
+            -ApplicationDirectory "$env:RUNNER_TEMP\byond\byond\bin" `
+            -DownloadDirectory ./integration/evidence/byond-runtime-package `
+            -EvidencePath ./integration/evidence/byond-runtime.json
       - name: Install auxtools x86 runtime
         shell: pwsh
         run: ./scripts/install-auxtools-runtime.ps1
@@ -91,7 +102,7 @@ jobs:
           ./scripts/fetch-auxtools.ps1 -DestinationRoot ./target/release
       - name: Run over-64K prototype startup gate
         shell: pwsh
-        run: ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -EvidencePath ./integration/evidence/large-prototype-compatibility.json
+        run: ./scripts/run-large-prototype-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -PrerequisiteEvidencePath ./integration/evidence/byond-runtime.json -EvidencePath ./integration/evidence/large-prototype-compatibility.json
       - name: Run owned fixture and Meridian-Rift compatibility gates
         shell: pwsh
         run: |
@@ -110,8 +121,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: meridian-compatibility-evidence
-          path: integration/evidence/*.json
+          name: large-prototype-evidence-and-meridian-compatibility
+          path: |
+            integration/evidence/**
+            !**/*.tracy
           if-no-files-found: warn
 
   tracy-linux-live:
@@ -156,5 +169,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: tracy-linux-compatibility-evidence
-          path: integration/evidence/*.json
+          path: |
+            integration/evidence/*.json
+            !**/*.tracy
           if-no-files-found: warn

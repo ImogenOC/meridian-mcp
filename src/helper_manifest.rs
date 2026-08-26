@@ -24,6 +24,14 @@ pub struct VerifiedHelper {
     pub protocol_version: Option<u32>,
     pub byond_min_version: Option<String>,
     pub byond_max_version: Option<String>,
+    pub patch_sha256: Option<String>,
+    pub patches: Vec<OwnedPatchIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, serde::Serialize)]
+pub struct OwnedPatchIdentity {
+    pub name: String,
+    pub patch_sha256: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +100,10 @@ struct RawEntry {
     byond_min_version: Option<String>,
     #[serde(default)]
     byond_max_version: Option<String>,
+    #[serde(default)]
+    patch_sha256: Option<String>,
+    #[serde(default)]
+    patches: Vec<OwnedPatchIdentity>,
 }
 
 #[derive(Clone)]
@@ -105,6 +117,8 @@ struct Entry {
     protocol_version: Option<u32>,
     byond_min_version: Option<String>,
     byond_max_version: Option<String>,
+    patch_sha256: Option<String>,
+    patches: Vec<OwnedPatchIdentity>,
 }
 
 pub fn verified_helper(
@@ -160,6 +174,17 @@ pub fn verified_helper(
     if entry.sha256.len() != 64 || !entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ManifestError::InvalidChecksum { id: entry.id });
     }
+    for checksum in entry
+        .patch_sha256
+        .iter()
+        .chain(entry.patches.iter().map(|patch| &patch.patch_sha256))
+    {
+        if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ManifestError::InvalidChecksum {
+                id: entry.id.clone(),
+            });
+        }
+    }
     if entry.path.is_absolute()
         || entry
             .path
@@ -190,6 +215,8 @@ pub fn verified_helper(
         protocol_version: entry.protocol_version,
         byond_min_version: entry.byond_min_version,
         byond_max_version: entry.byond_max_version,
+        patch_sha256: entry.patch_sha256,
+        patches: entry.patches,
     })
 }
 
@@ -214,6 +241,8 @@ fn normalize_manifest(raw: RawManifest) -> Result<Vec<Entry>, ManifestError> {
                     protocol_version: None,
                     byond_min_version: None,
                     byond_max_version: None,
+                    patch_sha256: None,
+                    patches: Vec::new(),
                 }
             })
             .collect()),
@@ -230,6 +259,8 @@ fn normalize_manifest(raw: RawManifest) -> Result<Vec<Entry>, ManifestError> {
                 protocol_version: entry.protocol_version,
                 byond_min_version: entry.byond_min_version,
                 byond_max_version: entry.byond_max_version,
+                patch_sha256: entry.patch_sha256,
+                patches: entry.patches,
             })
             .collect()),
         schema => Err(ManifestError::Schema(schema)),

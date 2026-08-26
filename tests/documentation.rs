@@ -105,6 +105,7 @@ fn tracy_is_explicitly_opt_in_and_each_tool_is_documented() {
         "`dm_tracy_zone`",
         "`dm_tracy_frame_stats`",
         "`dm_tracy_compare`",
+        "`dm_tracy_control_stats`",
         "protocol 82",
     ] {
         assert!(readme.contains(required), "README is missing {required}");
@@ -118,6 +119,31 @@ fn tracy_is_explicitly_opt_in_and_each_tool_is_documented() {
     assert!(!configure.contains("mcp_servers\\.dm-mcp"));
     assert!(install.contains("[switch]$EnableTracy"));
     assert!(install.contains("PSObject.Properties['protocol_version']"));
+}
+
+#[test]
+fn tracy_evidence_semantics_and_honesty_are_documented() {
+    let document = std::fs::read_to_string("docs/tracy-profiling.md")
+        .expect("Tracy profiling documentation should be readable");
+    for required in [
+        "half-open",
+        "partial-first",
+        "partial-last",
+        "immutable experiment ID",
+        "DreamDaemon and collector memory",
+        "working set, private bytes, and virtual bytes",
+        "network_isolation_confirmed",
+        "capture_complete",
+        "coefficient of variation exceeds `0.10`",
+        "`max(1,000,000 ns, 0.20 * median)`",
+        "Raw `.tracy` files remain local",
+        "Experimental",
+    ] {
+        assert!(
+            document.contains(required),
+            "Tracy documentation is missing {required}"
+        );
+    }
 }
 
 #[test]
@@ -136,6 +162,33 @@ fn auxtools_documentation_explains_setup_workflow_and_boundaries() {
         "does not support attaching to an existing process",
     ] {
         assert!(readme.contains(required), "README is missing {required}");
+    }
+}
+
+#[test]
+fn byond_runtime_prerequisite_provenance_is_pinned_and_application_local() {
+    let provenance = std::fs::read_to_string("docs/provenance.md")
+        .expect("provenance documentation should be readable");
+    let policy = std::fs::read_to_string("docs/dependency-policy.md")
+        .expect("dependency policy should be readable");
+    for required in [
+        "Microsoft.DXSDK.D3DX",
+        "9.29.952.8",
+        "ead0906ae8a26c18a7525da7490127a2110f7c58f18293738283e30e97c6ea4b",
+        "D3DX9_43.dll",
+        "application-local",
+        "LICENSE.txt",
+        "NOTICE.md",
+        "x86",
+    ] {
+        assert!(
+            provenance.contains(required),
+            "provenance is missing {required}"
+        );
+        assert!(
+            policy.contains(required),
+            "dependency policy is missing {required}"
+        );
     }
 }
 

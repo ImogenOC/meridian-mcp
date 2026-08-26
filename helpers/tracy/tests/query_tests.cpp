@@ -1,6 +1,11 @@
 #include "queries.hpp"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 using namespace meridian::tracy;
@@ -30,6 +35,16 @@ int main()
 	assert(frames.p50 == 50);
 	assert(frames.p95 == 100);
 	assert(frames.p99 == 100);
+	bool overflow_rejected = false;
+	try
+	{
+		static_cast<void>(summarize_frames({std::numeric_limits<std::int64_t>::max(), 1}));
+	}
+	catch(const std::overflow_error&)
+	{
+		overflow_rejected = true;
+	}
+	assert(overflow_rejected);
 
 	const std::vector<ZoneStatistics> baseline {
 		{{"/proc/alpha", "code/a.dm", 10}, 4, 400, 250, 50, 150},

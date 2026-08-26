@@ -47,8 +47,9 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | `dm_status` | Development | Provisional | memory | - | 1048576 | Inspect server-owned DreamDaemon state. |
 | `dm_stop` | Development | Provisional | memory | - | 262144 | Stop the server-owned DreamDaemon process. |
 | `dm_topic` | Development | Provisional | loopback | 60000 | 262144 | Call world.Topic on the loopback game server. |
-| `dm_tracy_capture` | Development | Experimental | read, write, process, loopback | 330000 | 1048576 | Capture a bounded trace through the fixed Tracy helper. |
+| `dm_tracy_capture` | Development | Experimental | read, write, process, loopback | 330000 | 1048576 | Rotate the persistent collector for one validated window and publish an atomic `.tracy` plus schema-2 sidecar pair. |
 | `dm_tracy_compare` | Development | Experimental | read, process | 180000 | 1048576 | Compare two traces by proc source identity. |
+| `dm_tracy_control_stats` | Development | Experimental | read, process | 2400000 | 1048576 | Validate 3-20 repeated Tracy controls and calculate fixed noise statistics. |
 | `dm_tracy_frame_stats` | Development | Experimental | read, process | 120000 | 262144 | Summarize ServerTick frame durations. |
 | `dm_tracy_hotspots` | Development | Experimental | read, process | 120000 | 1048576 | Return bounded deterministic trace hotspots. |
 | `dm_tracy_launch` | Development | Experimental | read, write, process, loopback | 60000 | 262144 | Launch an MCP-owned profiled DreamDaemon on loopback. |

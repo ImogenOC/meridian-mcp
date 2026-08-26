@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <limits>
+#include <stdexcept>
 #include <tuple>
 
 namespace meridian::tracy
@@ -48,6 +50,10 @@ FrameStatistics summarize_frames(std::vector<std::int64_t> durations)
 	std::int64_t total = 0;
 	for(const auto duration : durations)
 	{
+		if(duration < 0 || duration > std::numeric_limits<std::int64_t>::max() - total)
+		{
+			throw std::overflow_error("statistics duration accumulator overflow");
+		}
 		total += duration;
 	}
 	const auto percentile = [&](const double fraction) {

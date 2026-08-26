@@ -60,6 +60,10 @@ impl ReservedExternalOutput {
         &self.temporary.path
     }
 
+    pub fn output_path(&self) -> &Path {
+        &self.output
+    }
+
     pub fn commit(self) -> Result<OutputArtifact, AtomicOutputError> {
         let metadata = std::fs::symlink_metadata(&self.temporary.path)?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
