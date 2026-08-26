@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Made workflow contract parsing portable across LF and CRLF checkouts, and made the explicitly diagnostic Windows synthetic runtime lane retain evidence as a warning while Ubuntu remains the required compatibility gate.
+
 - Defined analysis and development capability modes and evidence-based support labels.
 - Clarified that `dm_compile` is a direct DreamMaker gate rather than a repository full build.
 - Separated real Windows Meridian-Rift, synthetic BYOND runtime, parser-boundary, and Linux Tracy jobs so one specialized failure cannot suppress unrelated evidence.

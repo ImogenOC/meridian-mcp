@@ -3,9 +3,12 @@ use std::fs;
 use std::path::Path;
 
 fn workflow_job_block<'a>(workflow: &'a str, job_name: &str) -> &'a str {
-    let header = format!("  {job_name}:\n");
+    let header = format!("  {job_name}:");
     let start = workflow
-        .find(&header)
+        .match_indices(&header)
+        .find_map(|(offset, _)| {
+            (offset == 0 || workflow.as_bytes()[offset - 1] == b'\n').then_some(offset)
+        })
         .unwrap_or_else(|| panic!("workflow is missing job {job_name}"));
     let body_start = start + header.len();
     let mut cursor = body_start;
@@ -16,6 +19,15 @@ fn workflow_job_block<'a>(workflow: &'a str, job_name: &str) -> &'a str {
         cursor += line.len();
     }
     &workflow[start..]
+}
+
+#[test]
+fn workflow_job_block_accepts_crlf() {
+    let workflow = "jobs:\r\n  example:\r\n    runs-on: windows-2025\r\n  following:\r\n    runs-on: ubuntu-24.04\r\n";
+    let block = workflow_job_block(workflow, "example");
+
+    assert!(block.contains("runs-on: windows-2025"));
+    assert!(!block.contains("following:"));
 }
 
 #[test]
@@ -50,6 +62,12 @@ fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
     assert!(runtime.contains("os: windows-2025"));
     assert!(runtime.contains("required: false"));
     assert!(runtime.contains("continue-on-error: ${{ !matrix.required }}"));
+    assert!(runtime.contains("id: control_runtime"));
+    assert!(runtime
+        .contains("if: ${{ matrix.required || steps.control_runtime.outcome == 'success' }}"));
+    assert!(
+        runtime.contains("::warning::Windows prototype runtime diagnostic did not reach readiness")
+    );
     assert!(runtime
         .contains("prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json"));
     assert!(runtime.contains("-PrerequisiteEvidencePath $prerequisiteEvidence"));
