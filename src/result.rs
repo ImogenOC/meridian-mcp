@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ToolMetadata {
     pub meridian_mcp_version: &'static str,
+    pub meridian_mcp_build: crate::build_identity::BuildIdentity,
     pub spacemandmm_revision: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_generation: Option<u64>,
@@ -18,6 +19,7 @@ impl ToolMetadata {
     pub fn complete(state_generation: Option<u64>) -> Self {
         Self {
             meridian_mcp_version: env!("CARGO_PKG_VERSION"),
+            meridian_mcp_build: crate::build_identity::current().clone(),
             spacemandmm_revision: SPACEMANDMM_REVISION,
             state_generation,
             asset_generation: None,
@@ -39,6 +41,10 @@ pub enum ToolErrorCode {
     UnsupportedUpstream,
     LimitExceeded,
     TimedOut,
+    InvalidCapture,
+    CaptureNotReady,
+    RecoveryRequired,
+    WorkspaceIntegrityViolation,
     PartialEvidence,
     HelperFailure,
     HelperChecksumMismatch,

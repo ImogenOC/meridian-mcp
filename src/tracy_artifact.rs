@@ -34,6 +34,13 @@ pub struct PromotedTraceSet {
     pub sidecar: OutputArtifact,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DiagnosticTraceSet {
+    pub authoritative: bool,
+    pub trace: OutputArtifact,
+    pub sidecar: OutputArtifact,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RawRange {
     pub raw_begin: u64,
@@ -43,6 +50,7 @@ pub struct RawRange {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceMetadata {
     pub trace_sha256: String,
+    pub meridian_mcp_build_id: String,
     pub experiment_identity: ExperimentIdentity,
     pub phase: String,
     pub phase_iteration: u32,
@@ -125,6 +133,10 @@ pub fn read_trace_metadata(trace: &Path) -> Result<Option<TraceMetadata>, TraceS
     let validation = &document["capture"]["validation"];
     let metadata = TraceMetadata {
         trace_sha256: actual,
+        meridian_mcp_build_id: document["meridian_mcp_build"]["build_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
         experiment_identity: serde_json::from_value(document["experiment_identity"].clone())?,
         phase: document["phase"].as_str().unwrap_or_default().to_owned(),
         phase_iteration: document["phase_iteration"].as_u64().unwrap_or(0) as u32,
@@ -152,7 +164,8 @@ pub fn read_trace_metadata(trace: &Path) -> Result<Option<TraceMetadata>, TraceS
             .filter_map(|series| serde_json::from_value(series["identity"]["role"].clone()).ok())
             .collect(),
     };
-    if metadata.phase.is_empty()
+    if metadata.meridian_mcp_build_id.is_empty()
+        || metadata.phase.is_empty()
         || metadata.phase_iteration == 0
         || metadata.range.raw_end <= metadata.range.raw_begin
         || metadata.trace_range_ns.raw_end <= metadata.trace_range_ns.raw_begin
@@ -183,6 +196,11 @@ pub fn compare_metadata(
             });
         }
     };
+    check(
+        "meridian_mcp_build_id",
+        baseline.meridian_mcp_build_id.clone(),
+        current.meridian_mcp_build_id.clone(),
+    );
     check(
         "executable_identity",
         baseline
@@ -248,6 +266,72 @@ impl ReservedTraceSet {
                 Err(error.into())
             }
         }
+    }
+
+    pub fn promote_diagnostic<T: Serialize>(
+        self,
+        policy: &PathPolicy,
+        diagnostic_trace: &Path,
+        sidecar: &T,
+    ) -> Result<DiagnosticTraceSet, TraceSetError> {
+        let diagnostic = reserve_trace_set(policy, diagnostic_trace, false)?;
+        std::fs::copy(
+            self.temporary_trace_path(),
+            diagnostic.temporary_trace_path(),
+        )?;
+        let promoted = diagnostic.promote(sidecar)?;
+        Ok(DiagnosticTraceSet {
+            authoritative: false,
+            trace: promoted.trace,
+            sidecar: promoted.sidecar,
+        })
+    }
+}
+
+pub fn validate_capture_result(capture: &serde_json::Value) -> Result<(), Vec<String>> {
+    let validation = &capture["validation"];
+    let mut errors = validation["error_codes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if validation["valid"].as_bool() != Some(true) && errors.is_empty() {
+        push_unique(&mut errors, "invalid_capture");
+    }
+    match (
+        validation["raw_begin"].as_u64(),
+        validation["raw_end"].as_u64(),
+    ) {
+        (Some(begin), Some(end)) if end > begin => {}
+        (Some(_), Some(_)) => push_unique(&mut errors, "non_monotonic_raw_clock"),
+        _ => push_unique(&mut errors, "missing_raw_range"),
+    }
+    match (
+        validation["trace_begin_ns"].as_u64(),
+        validation["trace_end_ns"].as_u64(),
+    ) {
+        (Some(begin), Some(end)) if end > begin => {}
+        (Some(_), Some(_)) => push_unique(&mut errors, "nonpositive_trace_span"),
+        _ => push_unique(&mut errors, "missing_trace_range"),
+    }
+    if validation["complete_frames"].as_u64().unwrap_or(0) == 0 {
+        push_unique(&mut errors, "no_complete_frames");
+    }
+    if validation["zones"].as_u64().unwrap_or(0) == 0 {
+        push_unique(&mut errors, "zero_zones");
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn push_unique(errors: &mut Vec<String>, code: &str) {
+    if !errors.iter().any(|existing| existing == code) {
+        errors.push(code.to_owned());
     }
 }
 

@@ -139,3 +139,19 @@ fn first_capture_binds_only_omitted_workload_and_later_capture_is_immutable() {
     )
     .is_err());
 }
+
+#[test]
+fn launch_manifest_carries_the_exact_meridian_mcp_build_identity() {
+    let manifest = ExperimentLaunchManifest {
+        schema: 1,
+        experiment_name: Some("fixture".to_owned()),
+        meridian_mcp_build: meridian_mcp::build_identity::current().clone(),
+        executable: executable(),
+        workload_draft: WorkloadInput::default(),
+    };
+    let value = serde_json::to_value(manifest).unwrap();
+    assert_eq!(
+        value["meridian_mcp_build"]["build_id"],
+        meridian_mcp::build_identity::current().build_id
+    );
+}

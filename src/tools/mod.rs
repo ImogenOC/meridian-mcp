@@ -642,14 +642,14 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ),
         (
             "experiment_directory".into(),
-            json!({"type":"string","description":"Existing contained directory for immutable experiment manifests; defaults beside the DMB."}),
+            json!({"type":"string","description":"Existing contained directory for immutable experiment manifests, recovery journals, and diagnostics."}),
         ),
         (
             "experiment_name".into(),
             json!({"type":"string","maxLength":512}),
         ),
     ]));
-    tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters, an immutable executable/workload draft, and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":launch_properties,"required":["dmb_path"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters, an immutable executable/workload draft, and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":launch_properties,"required":["dmb_path","experiment_directory"]}) });
     let mut capture_properties = workload_properties.as_object().cloned().unwrap_or_default();
     capture_properties.remove("experiment_name");
     capture_properties.extend(serde_json::Map::from_iter([

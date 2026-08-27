@@ -119,10 +119,10 @@ When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both nativ
 | Tool | Description |
 | --- | --- |
 | `dm_tracy_prepare` | Copy the exact hash-verified x86 byond-tracy hook beside a contained DMB. A matching hook is idempotent; replacing a different file requires `overwrite=true`. |
-| `dm_tracy_launch` | Start one MCP-owned DreamDaemon and persistent collector, validate producer readiness, and retain a drain worker on the private loopback profiler endpoint. |
-| `dm_tracy_capture` | Rotate to a fresh bounded capture worker, reopen and validate the trace, resume draining, and atomically publish `.tracy` plus `.tracy.meridian.json`. Network evidence is best effort and scoped to owned loopback observations. |
-| `dm_tracy_status` | Report DreamDaemon and collector state, profiler endpoint, worker generation, producer/queue health, capture activity, and the last structured error. |
-| `dm_tracy_stop` | Cancel an active window, stop the persistent collector, then terminate only the MCP-owned Tracy DreamDaemon. It does not target a standard runtime or unrelated process. |
+| `dm_tracy_launch` | Require an existing contained experiment directory, create its durable integrity journal, start one MCP-owned DreamDaemon and persistent collector, validate producer readiness, and retain a drain worker on the private loopback profiler endpoint. Launch evidence includes the exact MCP build identity. |
+| `dm_tracy_capture` | Use a bounded transient reconnect retry to rotate to a fresh capture worker, begin timing only after queue-health readiness, reopen and validate the trace, resume draining, and atomically publish `.tracy` plus `.tracy.meridian.json`. Invalid traces are retained only as non-authoritative diagnostics and never enter statistics. Network evidence is best effort and scoped to owned loopback observations. |
+| `dm_tracy_status` | Report DreamDaemon and collector state, profiler endpoint, transition/worker purpose, retry count, queue and hook health, capture activity, integrity-journal state, and the last structured error. |
+| `dm_tracy_stop` | Record shutdown integrity, cancel an active window, stop the persistent collector, then terminate only the MCP-owned Tracy DreamDaemon and finalize the journal after the final clean checkpoint. It does not target a standard runtime, unrelated process, or repair source changes. |
 | `dm_tracy_hotspots` | Load a contained trace and return a bounded, deterministic proc/file/line ranking by inclusive time, self time, call count, or maximum duration. |
 | `dm_tracy_zone` | Return bounded aggregate statistics for an exact profiled proc name across its recorded file/line identities. |
 | `dm_tracy_frame_stats` | Summarize the trace's base `ServerTick` frame series with count, span, mean, extrema, and p50/p95/p99 durations. |

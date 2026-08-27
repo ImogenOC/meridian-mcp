@@ -31,6 +31,18 @@ fn workflow_job_block_accepts_crlf() {
 }
 
 #[test]
+fn ci_builds_embed_the_authoritative_github_revision() {
+    for path in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/byond-integration.yml",
+    ] {
+        let workflow = fs::read_to_string(path).unwrap();
+        assert!(workflow.contains("MERIDIAN_BUILD_REVISION: ${{ github.sha }}"));
+        assert!(workflow.contains("MERIDIAN_BUILD_DIRTY: \"false\""));
+    }
+}
+
+#[test]
 fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
     let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
         .expect("BYOND integration workflow should be readable");
@@ -154,17 +166,23 @@ fn tracy_gates_require_persistent_rotation_and_independent_native_platforms() {
     let native = std::fs::read_to_string(root.join("scripts/run-tracy-native-tests.ps1")).unwrap();
     let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
     for required in [
-        "delayed-first-capture marker",
+        "immediate-capture-complete marker",
         "$delay_seconds = 120",
         "Start-Sleep -Seconds $delay_seconds",
         "duration_ms = 30000",
         "delayed_first_capture_seconds = $delay_seconds",
         "capture_duration_ms = $duration_ms",
-        "capture_count = 3",
+        "capture_count = 4",
+        "experiment_directory = $fixtureRoot",
         ".tracy.meridian.json",
+        "meridian_mcp_build.executable_sha256",
+        ".meridian-tracy-session.json",
+        "complete_frames -lt 3",
         "queue.saturation_count",
         "queue.dropped_events",
         "repository_integrity",
+        "$traces += @(1..3 | ForEach-Object",
+        "Restored Tracy status omitted ready drain-worker queue health.",
     ] {
         assert!(
             live.contains(required),
@@ -196,6 +214,8 @@ fn tracy_experiment_runner_is_bounded_and_raw_traces_are_not_uploaded() {
         "control-stats.json",
         "evidence-index.json",
         "raw_traces_local_only",
+        ".meridian-tracy-session.json",
+        "meridian_mcp_build",
     ] {
         assert!(
             runner.contains(required),
@@ -209,6 +229,7 @@ fn tracy_experiment_runner_is_bounded_and_raw_traces_are_not_uploaded() {
         "collector",
         "network_isolation_confirmed",
         "capture_complete",
+        "meridian_mcp_build.build_id",
     ] {
         assert!(
             validator.contains(required),

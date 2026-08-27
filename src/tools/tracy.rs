@@ -1,15 +1,18 @@
 use super::ToolExecutionContext;
 use crate::atomic_output::{write_atomic, OutputArtifact};
 use crate::mcp::ToolResult;
-use crate::result::{json_success, ToolMetadata};
-use crate::tracy_artifact::reserve_trace_set;
-use crate::tracy_collector::{TracyCollector, TracyCollectorSpec, TracySessionPhase};
+use crate::result::{json_success, structured_error, ToolErrorCode, ToolMetadata};
+use crate::tracy_artifact::{reserve_trace_set, validate_capture_result, ReservedTraceSet};
+use crate::tracy_collector::{
+    capture_failure_code, capture_window_started, TracyCollector, TracyCollectorSpec,
+    TracySessionPhase,
+};
 use crate::tracy_experiment::{
     bind_workload, canonical_sha256, experiment_identity, finalize_executable,
     verify_locked_workload, ExecutableIdentity, ExperimentLaunchManifest, ExperimentState,
     HelperIdentity, NativeModuleIdentity, WorkloadInput,
 };
-use crate::tracy_protocol::{invoke_helper, TracyCommand, TracyInvocationSpec};
+use crate::tracy_protocol::{invoke_helper, TracyCommand, TracyInvocationSpec, TracyProtocolError};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -159,22 +162,33 @@ pub async fn launch(
     let launch_manifest = ExperimentLaunchManifest {
         schema: 1,
         experiment_name,
+        meridian_mcp_build: crate::build_identity::current().clone(),
         executable: executable.clone(),
         workload_draft: workload_draft.clone(),
     };
-    let experiment_directory = if let Some(path) = optional_string(&args, "experiment_directory")? {
-        let path = context.policy().read_path(path)?;
-        if !path.is_dir() {
-            return Err(anyhow!(
-                "experiment_directory must be an existing contained directory"
+    let experiment_directory = context
+        .policy()
+        .read_path(required_string(&args, "experiment_directory")?)?;
+    if !experiment_directory.is_dir() {
+        return Err(anyhow!(
+            "experiment_directory must be an existing contained directory"
+        ));
+    }
+    let mut integrity_journal = match crate::workspace_integrity::IntegrityJournal::create(
+        context.policy(),
+        &experiment_directory,
+        &integrity,
+    ) {
+        Ok(journal) => journal,
+        Err(crate::workspace_integrity::IntegrityError::RecoveryRequired { last_action }) => {
+            return Ok(structured_error(
+                ToolErrorCode::RecoveryRequired,
+                "The experiment directory contains an unfinished Tracy integrity journal.",
+                Some("Inspect the recorded lifecycle state and use a new experiment directory or explicitly resolve the unfinished session before launch.".to_owned()),
+                json!({"last_action": last_action}),
             ));
         }
-        path
-    } else {
-        canonical_dmb
-            .parent()
-            .ok_or_else(|| anyhow!("dmb_path has no parent"))?
-            .to_owned()
+        Err(error) => return Err(error.into()),
     };
     let launch_manifest_path = experiment_directory.join("experiment-launch.meridian.json");
     let launch_manifest_bytes = serde_json::to_vec_pretty(&launch_manifest)?;
@@ -187,14 +201,22 @@ pub async fn launch(
         launch_manifest_path.with_file_name("experiment-identity.meridian.json");
     let final_manifest_path =
         launch_manifest_path.with_file_name("experiment-complete.meridian.json");
+    let integrity_owned_paths = vec![
+        canonical_dmb.with_extension("log"),
+        launch_artifact.path.clone(),
+        integrity_journal.path().to_owned(),
+        identity_manifest_path.clone(),
+        final_manifest_path.clone(),
+    ];
+    let pre_launch_checkpoint = integrity.checkpoint("pre_launch", &integrity_owned_paths)?;
+    integrity_journal.record(context.policy(), pre_launch_checkpoint)?;
     {
         let mut capture = state.tracy_capture().await;
         capture.integrity = Some(integrity);
-        capture.integrity_owned_paths = vec![
-            canonical_dmb.with_extension("log"),
-            launch_artifact.path.clone(),
-        ];
+        capture.integrity_journal = Some(integrity_journal);
+        capture.integrity_owned_paths = integrity_owned_paths;
         capture.experiment = Some(ExperimentState {
+            directory: experiment_directory,
             launch_manifest_sha256: launch_artifact.sha256.clone(),
             launch_manifest_path: launch_artifact.path,
             identity_manifest_path,
@@ -205,6 +227,7 @@ pub async fn launch(
         });
         capture.used_phases.clear();
         capture.capture_records.clear();
+        capture.diagnostic_records.clear();
         capture.network_records.clear();
     }
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
@@ -288,6 +311,7 @@ pub async fn launch(
             ),
         }));
     }
+    let integrity_checkpoint = checkpoint_integrity(context, state, "post_launch").await?;
     Ok(json_success(
         ToolMetadata::complete(None),
         json!({
@@ -295,6 +319,8 @@ pub async fn launch(
             "profiler_port":profiler_port,
             "collector":state.tracy_capture().await.last_status,
             "executable_identity":state.tracy_capture().await.experiment.as_ref().map(|experiment| &experiment.executable),
+            "integrity_checkpoint":integrity_checkpoint,
+            "integrity_journal":state.tracy_capture().await.integrity_journal.as_ref().map(crate::workspace_integrity::IntegrityJournal::summary),
         }),
     ))
 }
@@ -363,8 +389,6 @@ pub async fn capture(
         .get("overwrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let reserved = reserve_trace_set(context.policy(), output_path, overwrite)?;
-    let temporary_path = reserved.temporary_trace_path().to_owned();
     let capture_network = args
         .get("capture_network")
         .and_then(Value::as_bool)
@@ -380,7 +404,7 @@ pub async fn capture(
         .map(|identity| identity.pid)
         .collect::<Vec<_>>();
     network_audit.sample(&owned_process_ids, 0);
-    let (experiment, launch_manifest_sha256, experiment_manifest_sha256) = {
+    let (experiment, launch_manifest_sha256, experiment_manifest_sha256, experiment_directory) = {
         let mut capture = state.tracy_capture().await;
         let (result, new_owned_path) = {
             let experiment = capture
@@ -417,6 +441,7 @@ pub async fn capture(
                     identity,
                     experiment.launch_manifest_sha256.clone(),
                     manifest_sha256,
+                    experiment.directory.clone(),
                 ),
                 new_owned_path,
             )
@@ -426,17 +451,22 @@ pub async fn capture(
         }
         result
     };
+    let _ = checkpoint_integrity(context, state, "pre_capture").await?;
+    let reserved = reserve_trace_set(context.policy(), output_path, overwrite)?;
+    let temporary_path = reserved.temporary_trace_path().to_owned();
     {
         let mut capture = state.tracy_capture().await;
-        if capture.active {
-            return Err(anyhow!("a Tracy capture is already active"));
+        match capture.begin_capture(&phase, phase_iteration) {
+            Ok(()) => {}
+            Err(crate::state::TracyCaptureStartError::Active) => {
+                return Err(anyhow!("a Tracy capture is already active"));
+            }
+            Err(crate::state::TracyCaptureStartError::PhaseAlreadyUsed) => {
+                return Err(anyhow!(
+                    "phase and phase_iteration must be unique within one experiment"
+                ));
+            }
         }
-        if !capture.used_phases.insert((phase.clone(), phase_iteration)) {
-            return Err(anyhow!(
-                "phase and phase_iteration must be unique within one experiment"
-            ));
-        }
-        capture.active = true;
         capture.output_path = Some(output_path.to_owned());
         capture.last_error = None;
         capture.phase = Some(TracySessionPhase::CaptureActive);
@@ -477,20 +507,152 @@ pub async fn capture(
         true,
         true,
     );
-    {
-        let mut capture = state.tracy_capture().await;
-        capture.active = false;
-        capture.phase = Some(TracySessionPhase::HealthyIdle);
-        if let Err(error) = &invocation {
+    let integrity_journal = state
+        .tracy_capture()
+        .await
+        .integrity_journal
+        .as_ref()
+        .map(crate::workspace_integrity::IntegrityJournal::summary);
+    let invocation = match invocation {
+        Ok(invocation) => {
+            let mut capture = state.tracy_capture().await;
+            capture.finish_capture(&phase, phase_iteration, true);
+            capture.phase = Some(TracySessionPhase::HealthyIdle);
+            invocation
+        }
+        Err(TracyProtocolError::Helper {
+            code,
+            message,
+            details,
+        }) if code == "invalid_capture" => {
+            {
+                let mut capture = state.tracy_capture().await;
+                capture.finish_capture(&phase, phase_iteration, true);
+                capture.phase = Some(if details["collector_recovered"].as_bool() == Some(false) {
+                    TracySessionPhase::RecoveryRequired
+                } else {
+                    TracySessionPhase::HealthyIdle
+                });
+                capture.last_error = Some(message.clone());
+            }
+            let diagnostic = retain_invalid_capture(
+                context,
+                reserved,
+                InvalidCaptureContext {
+                    experiment_directory: &experiment_directory,
+                    experiment: &experiment,
+                    phase: &phase,
+                    phase_iteration,
+                    integrity_journal: &integrity_journal,
+                },
+                details.clone(),
+            )?;
+            let integrity_checkpoint = record_invalid_capture(
+                context,
+                state,
+                &diagnostic,
+                &phase,
+                phase_iteration,
+                &details,
+            )
+            .await?;
+            return Ok(structured_error(
+                ToolErrorCode::InvalidCapture,
+                message,
+                Some("Inspect the retained diagnostic trace and repeat the phase with a new phase_iteration after correcting the reported invariants.".to_owned()),
+                json!({
+                    "validation": details,
+                    "diagnostic": diagnostic,
+                    "phase": phase,
+                    "phase_iteration": phase_iteration,
+                    "window_started": true,
+                    "integrity_checkpoint": integrity_checkpoint,
+                }),
+            ));
+        }
+        Err(error) => {
             let stderr_tail = collector.stderr_tail().await;
+            let window_started = capture_window_started(&error);
+            let collector_recovered = match &error {
+                TracyProtocolError::Helper { details, .. } => {
+                    details["collector_recovered"].as_bool().unwrap_or(false)
+                }
+                _ => false,
+            };
+            let details = match &error {
+                TracyProtocolError::Helper { details, .. } => details.clone(),
+                _ => Value::Null,
+            };
+            let mut capture = state.tracy_capture().await;
+            capture.finish_capture(&phase, phase_iteration, window_started);
+            capture.phase = Some(if collector_recovered {
+                TracySessionPhase::HealthyIdle
+            } else {
+                TracySessionPhase::RecoveryRequired
+            });
             capture.last_error = Some(if stderr_tail.is_empty() {
                 error.to_string()
             } else {
                 format!("{error}; collector stderr tail: {stderr_tail:?}")
             });
+            drop(capture);
+            return Ok(structured_error(
+                capture_failure_code(&error),
+                error.to_string(),
+                Some(if collector_recovered {
+                    "Retry the same phase_iteration only when window_started is false; otherwise use the next iteration.".to_owned()
+                } else {
+                    "Stop the profiling session, inspect collector status and diagnostics, then relaunch before another capture.".to_owned()
+                }),
+                json!({
+                    "helper_details": details,
+                    "collector_stderr_tail": stderr_tail,
+                    "phase": phase,
+                    "phase_iteration": phase_iteration,
+                    "window_started": window_started,
+                    "collector_recovered": collector_recovered,
+                }),
+            ));
         }
+    };
+    if let Err(error_codes) = validate_capture_result(&invocation) {
+        let validation = invocation["validation"].clone();
+        let diagnostic = retain_invalid_capture(
+            context,
+            reserved,
+            InvalidCaptureContext {
+                experiment_directory: &experiment_directory,
+                experiment: &experiment,
+                phase: &phase,
+                phase_iteration,
+                integrity_journal: &integrity_journal,
+            },
+            validation.clone(),
+        )?;
+        let integrity_checkpoint = record_invalid_capture(
+            context,
+            state,
+            &diagnostic,
+            &phase,
+            phase_iteration,
+            &validation,
+        )
+        .await?;
+        return Ok(structured_error(
+            ToolErrorCode::InvalidCapture,
+            "The collector returned a capture that failed the MCP publication contract.",
+            Some("Inspect the retained diagnostic trace and correct the reported capture invariants before collecting another iteration.".to_owned()),
+            json!({
+                "validation": validation,
+                "error_codes": error_codes,
+                "diagnostic": diagnostic,
+                "phase": phase,
+                "phase_iteration": phase_iteration,
+                "window_started": true,
+                "integrity_checkpoint": integrity_checkpoint,
+            }),
+        ));
     }
-    let invocation = invocation?;
     if let (Some(raw_begin), Some(raw_end)) = (
         invocation["validation"]["raw_begin"].as_u64(),
         invocation["validation"]["raw_end"].as_u64(),
@@ -527,15 +689,17 @@ pub async fn capture(
         "memory_summary":crate::process_metrics::summarize_memory(&memory_series),
         "network_evidence":network_audit,
         "integrity_status":"baseline_recorded",
+        "integrity_journal":integrity_journal,
         "phase":phase,
         "phase_iteration":phase_iteration,
         "capture_annotations":capture_annotations,
         "experiment_identity":experiment,
+        "meridian_mcp_build":crate::build_identity::current(),
         "launch_manifest_sha256":launch_manifest_sha256,
         "experiment_manifest_sha256":experiment_manifest_sha256,
     });
     let artifacts = reserved.promote(&sidecar)?;
-    let integrity_checkpoint = {
+    {
         let mut capture = state.tracy_capture().await;
         capture
             .integrity_owned_paths
@@ -554,12 +718,8 @@ pub async fn capture(
             "phase_iteration": phase_iteration,
             "evidence": sidecar["network_evidence"],
         }));
-        capture
-            .integrity
-            .as_ref()
-            .map(|baseline| baseline.checkpoint("capture", &capture.integrity_owned_paths))
-            .transpose()?
-    };
+    }
+    let integrity_checkpoint = checkpoint_integrity(context, state, "post_capture").await?;
     Ok(json_success(
         ToolMetadata::complete(None),
         json!({
@@ -572,6 +732,106 @@ pub async fn capture(
             "integrity_checkpoint":integrity_checkpoint,
         }),
     ))
+}
+
+struct InvalidCaptureContext<'a> {
+    experiment_directory: &'a Path,
+    experiment: &'a crate::tracy_experiment::ExperimentIdentity,
+    phase: &'a str,
+    phase_iteration: u32,
+    integrity_journal: &'a Option<crate::workspace_integrity::IntegrityJournalSummary>,
+}
+
+fn retain_invalid_capture(
+    context: &ToolExecutionContext,
+    reserved: ReservedTraceSet,
+    capture_context: InvalidCaptureContext<'_>,
+    validation: Value,
+) -> Result<crate::tracy_artifact::DiagnosticTraceSet> {
+    let diagnostics = capture_context
+        .experiment_directory
+        .join(".meridian-tracy-diagnostics");
+    std::fs::create_dir_all(&diagnostics)?;
+    let diagnostics = context.policy().read_path(&diagnostics)?;
+    let created_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    let diagnostic_trace = diagnostics.join(format!(
+        "{}-{}-{created_at_unix_ms}.invalid.tracy",
+        capture_context.phase, capture_context.phase_iteration
+    ));
+    let trace_sha256 = hash_file(reserved.temporary_trace_path())?;
+    let trace_bytes = std::fs::metadata(reserved.temporary_trace_path())?.len();
+    reserved
+        .promote_diagnostic(
+            context.policy(),
+            &diagnostic_trace,
+            &json!({
+                "schema": 2,
+                "authoritative": false,
+                "diagnostic_reason": "invalid_capture",
+                "created_at_unix_ms": created_at_unix_ms,
+                "trace_sha256": trace_sha256,
+                "trace_bytes": trace_bytes,
+                "phase": capture_context.phase,
+                "phase_iteration": capture_context.phase_iteration,
+                "validation": validation,
+                "experiment_identity": capture_context.experiment,
+                "meridian_mcp_build": crate::build_identity::current(),
+                "integrity_journal": capture_context.integrity_journal,
+            }),
+        )
+        .map_err(Into::into)
+}
+
+async fn record_invalid_capture(
+    context: &ToolExecutionContext,
+    state: &crate::state::ServerState,
+    diagnostic: &crate::tracy_artifact::DiagnosticTraceSet,
+    phase: &str,
+    phase_iteration: u32,
+    validation: &Value,
+) -> Result<Option<crate::workspace_integrity::IntegrityCheckpoint>> {
+    let mut capture = state.tracy_capture().await;
+    capture.record_diagnostic(
+        json!({
+            "authoritative": false,
+            "trace": &diagnostic.trace,
+            "sidecar": &diagnostic.sidecar,
+            "phase": phase,
+            "phase_iteration": phase_iteration,
+            "validation": validation,
+        }),
+        [
+            diagnostic.trace.path.clone(),
+            diagnostic.sidecar.path.clone(),
+        ],
+    );
+    drop(capture);
+    checkpoint_integrity(context, state, "invalid_capture").await
+}
+
+async fn checkpoint_integrity(
+    context: &ToolExecutionContext,
+    state: &crate::state::ServerState,
+    action: &str,
+) -> Result<Option<crate::workspace_integrity::IntegrityCheckpoint>> {
+    let (baseline, owned_paths) = {
+        let capture = state.tracy_capture().await;
+        (
+            capture.integrity.clone(),
+            capture.integrity_owned_paths.clone(),
+        )
+    };
+    let Some(baseline) = baseline else {
+        return Ok(None);
+    };
+    let checkpoint = baseline.checkpoint(action, &owned_paths)?;
+    let mut capture = state.tracy_capture().await;
+    if let Some(journal) = capture.integrity_journal.as_mut() {
+        journal.record(context.policy(), checkpoint.clone())?;
+    }
+    Ok(Some(checkpoint))
 }
 
 pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
@@ -620,6 +880,7 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
             "last_capture_error":capture.last_error,
             "collector_phase":capture.phase,
             "collector_status":capture.last_status,
+            "integrity_journal":capture.integrity_journal.as_ref().map(crate::workspace_integrity::IntegrityJournal::summary),
             "collector_stderr_tail":collector_stderr_tail,
             "collector_exit_code":collector_exit_code,
         }),
@@ -630,6 +891,7 @@ pub async fn stop(
     context: &ToolExecutionContext,
     state: &crate::state::ServerState,
 ) -> Result<ToolResult> {
+    let pre_stop_checkpoint = checkpoint_integrity(context, state, "pre_stop").await;
     let stop_identities = owned_process_identities(state).await;
     let stop_profiler_port = state.runtime().await.profiler_port;
     let mut stop_network_audit = crate::network_audit::NetworkAuditCollector::new(true);
@@ -658,7 +920,14 @@ pub async fn stop(
         runtime.stop_game_process().await?;
     }
     drop(runtime);
-    let (memory_series, memory_task, experiment, capture_records, mut network_records) = {
+    let (
+        memory_series,
+        memory_task,
+        experiment,
+        capture_records,
+        diagnostic_records,
+        mut network_records,
+    ) = {
         let mut capture = state.tracy_capture().await;
         if let Some(stop) = capture.memory_stop.take() {
             let _ = stop.send(true);
@@ -668,6 +937,7 @@ pub async fn stop(
             capture.memory_task.take(),
             capture.experiment.take(),
             std::mem::take(&mut capture.capture_records),
+            std::mem::take(&mut capture.diagnostic_records),
             std::mem::take(&mut capture.network_records),
         )
     };
@@ -698,8 +968,10 @@ pub async fn stop(
         let document = json!({
             "schema": 2,
             "experiment_identity": experiment.locked_identity,
+            "meridian_mcp_build": crate::build_identity::current(),
             "launch_manifest_sha256": experiment.launch_manifest_sha256,
             "captures": capture_records,
+            "diagnostics": diagnostic_records,
             "network_evidence": network_records,
             "memory_series": complete_memory,
             "memory_summary": crate::process_metrics::summarize_memory(&complete_memory),
@@ -718,9 +990,55 @@ pub async fn stop(
     } else {
         None
     };
+    let post_stop_checkpoint = checkpoint_integrity(context, state, "post_stop").await;
+    let integrity_errors = [pre_stop_checkpoint.as_ref(), post_stop_checkpoint.as_ref()]
+        .into_iter()
+        .filter_map(|result| result.err().map(ToString::to_string))
+        .collect::<Vec<_>>();
+    let journal_summary = if integrity_errors.is_empty() {
+        let mut capture = state.tracy_capture().await;
+        if let Some(journal) = capture.integrity_journal.as_mut() {
+            journal.finalize(context.policy())?;
+        }
+        let summary = capture
+            .integrity_journal
+            .as_ref()
+            .map(crate::workspace_integrity::IntegrityJournal::summary);
+        capture.integrity = None;
+        capture.integrity_journal = None;
+        capture.integrity_owned_paths.clear();
+        summary
+    } else {
+        state
+            .tracy_capture()
+            .await
+            .integrity_journal
+            .as_ref()
+            .map(crate::workspace_integrity::IntegrityJournal::summary)
+    };
+    if !integrity_errors.is_empty() {
+        return Ok(structured_error(
+            ToolErrorCode::WorkspaceIntegrityViolation,
+            "The profiling lifecycle stopped its owned processes but failed workspace integrity checks.",
+            Some("Inspect the unfinished integrity journal and affected relative paths; do not automatically repair or delete source files.".to_owned()),
+            json!({
+                "lifecycle": "stopped",
+                "errors": integrity_errors,
+                "experiment_manifest": experiment_manifest,
+                "integrity_journal": journal_summary,
+            }),
+        ));
+    }
     Ok(json_success(
         ToolMetadata::complete(None),
-        json!({"lifecycle":"stopped","runtime_was_running":runtime_was_running,"experiment_manifest":experiment_manifest}),
+        json!({
+            "lifecycle":"stopped",
+            "runtime_was_running":runtime_was_running,
+            "experiment_manifest":experiment_manifest,
+            "pre_stop_integrity_checkpoint":pre_stop_checkpoint.ok().flatten(),
+            "post_stop_integrity_checkpoint":post_stop_checkpoint.ok().flatten(),
+            "integrity_journal":journal_summary,
+        }),
     ))
 }
 

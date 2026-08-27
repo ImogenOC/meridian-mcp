@@ -373,7 +373,17 @@ public:
 		return last_progress;
 	}
 
-	CaptureResult capture(const CaptureWindowOptions& options, const std::atomic_bool& cancelled) override
+	std::optional<QueueHealth> health() override
+	{
+		if(!worker) return std::nullopt;
+		return extract_queue_health(*worker);
+	}
+
+	CaptureResult capture(
+		const CaptureWindowOptions& options,
+		const std::atomic_bool& cancelled,
+		std::atomic_bool& window_started
+	) override
 	{
 		std::cerr << "collector.capture.begin" << std::endl;
 		if(!worker || current_purpose != WorkerPurpose::Capture)
@@ -394,6 +404,7 @@ public:
 			throw ProtocolError("invalid_clock_conversion", "Could not convert the producer start clock into Tracy time.");
 		}
 		const auto wall_begin = std::chrono::steady_clock::now();
+		window_started.store(true);
 		const auto deadline = wall_begin + std::chrono::milliseconds(options.duration_ms);
 		while(worker->IsConnected() && std::chrono::steady_clock::now() < deadline)
 		{
@@ -455,7 +466,8 @@ CaptureResult capture_trace(
 	backend.configure({"127.0.0.1", port, 15'000, 15'000});
 	backend.attach(WorkerPurpose::Capture);
 	std::atomic_bool cancelled {false};
-	auto result = backend.capture({duration_ms, memory_limit_mb, output.string(), "legacy", 1}, cancelled);
+	std::atomic_bool window_started {false};
+	auto result = backend.capture({duration_ms, memory_limit_mb, output.string(), "legacy", 1}, cancelled, window_started);
 	backend.detach();
 	return result;
 }

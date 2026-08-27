@@ -1,5 +1,9 @@
 name: BYOND integration
 
+env:
+  MERIDIAN_BUILD_REVISION: ${{ github.sha }}
+  MERIDIAN_BUILD_DIRTY: "false"
+
 on:
   workflow_dispatch:
     inputs:

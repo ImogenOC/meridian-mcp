@@ -204,6 +204,7 @@ pub struct TracyCaptureState {
     pub(crate) phase: Option<crate::tracy_collector::TracySessionPhase>,
     pub(crate) last_status: Option<serde_json::Value>,
     pub(crate) integrity: Option<crate::workspace_integrity::IntegrityBaseline>,
+    pub(crate) integrity_journal: Option<crate::workspace_integrity::IntegrityJournal>,
     pub(crate) integrity_owned_paths: Vec<std::path::PathBuf>,
     pub(crate) experiment: Option<crate::tracy_experiment::ExperimentState>,
     pub(crate) used_phases: std::collections::BTreeSet<(String, u32)>,
@@ -213,7 +214,55 @@ pub struct TracyCaptureState {
     pub(crate) memory_task: Option<JoinHandle<()>>,
     pub(crate) experiment_started_at: Option<tokio::time::Instant>,
     pub(crate) capture_records: Vec<serde_json::Value>,
+    pub(crate) diagnostic_records: Vec<serde_json::Value>,
     pub(crate) network_records: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TracyCaptureStartError {
+    Active,
+    PhaseAlreadyUsed,
+}
+
+impl TracyCaptureState {
+    pub(crate) fn begin_capture(
+        &mut self,
+        phase: &str,
+        phase_iteration: u32,
+    ) -> Result<(), TracyCaptureStartError> {
+        if self.active {
+            return Err(TracyCaptureStartError::Active);
+        }
+        if self
+            .used_phases
+            .contains(&(phase.to_owned(), phase_iteration))
+        {
+            return Err(TracyCaptureStartError::PhaseAlreadyUsed);
+        }
+        self.active = true;
+        Ok(())
+    }
+
+    pub(crate) fn finish_capture(
+        &mut self,
+        phase: &str,
+        phase_iteration: u32,
+        window_started: bool,
+    ) {
+        self.active = false;
+        if window_started {
+            self.used_phases.insert((phase.to_owned(), phase_iteration));
+        }
+    }
+
+    pub(crate) fn record_diagnostic(
+        &mut self,
+        record: serde_json::Value,
+        owned_paths: impl IntoIterator<Item = std::path::PathBuf>,
+    ) {
+        self.diagnostic_records.push(record);
+        self.integrity_owned_paths.extend(owned_paths);
+    }
 }
 
 impl Default for RuntimeState {
@@ -360,5 +409,33 @@ mod tests {
             Err(StateError::ParseRequired)
         ));
         assert_eq!(state.state_generation().await, 0);
+    }
+
+    #[test]
+    fn tracy_phase_is_reusable_only_when_the_measurement_window_never_started() {
+        let mut capture = TracyCaptureState::default();
+        assert!(capture.begin_capture("steady", 1).is_ok());
+        capture.finish_capture("steady", 1, false);
+        assert!(capture.begin_capture("steady", 1).is_ok());
+        capture.finish_capture("steady", 1, true);
+        assert_eq!(
+            capture.begin_capture("steady", 1),
+            Err(TracyCaptureStartError::PhaseAlreadyUsed)
+        );
+    }
+
+    #[test]
+    fn invalid_capture_records_remain_separate_from_authoritative_captures() {
+        let mut capture = TracyCaptureState::default();
+        let trace = std::path::PathBuf::from("diagnostics/invalid.tracy");
+        let sidecar = std::path::PathBuf::from("diagnostics/invalid.tracy.meridian.json");
+        capture.record_diagnostic(
+            serde_json::json!({"authoritative": false}),
+            [trace.clone(), sidecar.clone()],
+        );
+        assert!(capture.capture_records.is_empty());
+        assert_eq!(capture.diagnostic_records.len(), 1);
+        assert!(capture.integrity_owned_paths.contains(&trace));
+        assert!(capture.integrity_owned_paths.contains(&sidecar));
     }
 }

@@ -1,5 +1,6 @@
 use meridian_mcp::tracy_artifact::{
-    compare_metadata, reserve_trace_set, ComparisonMode, RawRange, TraceMetadata, TraceSetError,
+    compare_metadata, reserve_trace_set, validate_capture_result, ComparisonMode, RawRange,
+    TraceMetadata, TraceSetError,
 };
 use meridian_mcp::tracy_experiment::{
     ExecutableIdentity, ExperimentIdentity, HelperIdentity, WorkloadIdentity,
@@ -40,6 +41,91 @@ fn promotes_exact_trace_and_schema_sidecar_pair() {
 }
 
 #[test]
+fn invalid_capture_is_retained_only_as_a_non_authoritative_diagnostic() {
+    let root = fixture();
+    let trace = root.join("authoritative.tracy");
+    let diagnostics = root.join("diagnostics");
+    std::fs::create_dir_all(&diagnostics).unwrap();
+    let diagnostic_trace = diagnostics.join("steady-state-1.invalid.tracy");
+    let policy = PathPolicy::new(vec![root.clone()], Vec::new()).unwrap();
+    let reserved = reserve_trace_set(&policy, &trace, false).unwrap();
+    std::fs::write(reserved.temporary_trace_path(), b"invalid-tracy-bytes").unwrap();
+
+    let retained = reserved
+        .promote_diagnostic(
+            &policy,
+            &diagnostic_trace,
+            &json!({
+                "schema": 2,
+                "authoritative": false,
+                "validation": {"valid": false, "error_codes": ["zero_zones"]},
+            }),
+        )
+        .unwrap();
+
+    assert!(!trace.exists());
+    assert!(!root.join("authoritative.tracy.meridian.json").exists());
+    assert!(!retained.authoritative);
+    assert_eq!(
+        retained.trace.path,
+        diagnostic_trace.canonicalize().unwrap()
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&retained.sidecar.path).unwrap()
+        )
+        .unwrap()["validation"]["error_codes"],
+        json!(["zero_zones"])
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn capture_publication_rejects_invalid_or_malformed_helper_results() {
+    let invalid = json!({
+        "validation": {
+            "valid": false,
+            "raw_begin": 10,
+            "raw_end": 20,
+            "trace_begin_ns": 100,
+            "trace_end_ns": 200,
+            "complete_frames": 3,
+            "zones": 0,
+            "error_codes": ["zero_zones"],
+        }
+    });
+    assert_eq!(
+        validate_capture_result(&invalid).unwrap_err(),
+        vec!["zero_zones"]
+    );
+
+    let malformed = json!({"validation": {"valid": true}});
+    assert_eq!(
+        validate_capture_result(&malformed).unwrap_err(),
+        vec![
+            "missing_raw_range",
+            "missing_trace_range",
+            "no_complete_frames",
+            "zero_zones"
+        ]
+    );
+
+    let valid = json!({
+        "validation": {
+            "valid": true,
+            "raw_begin": 10,
+            "raw_end": 20,
+            "trace_begin_ns": 100,
+            "trace_end_ns": 200,
+            "complete_frames": 3,
+            "zones": 4,
+            "error_codes": [],
+        }
+    });
+    assert_eq!(validate_capture_result(&valid), Ok(()));
+}
+
+#[test]
 fn refuses_collisions_and_overwrite_before_capture() {
     let root = fixture();
     let trace = root.join("sample.tracy");
@@ -62,6 +148,7 @@ fn metadata(
 ) -> TraceMetadata {
     TraceMetadata {
         trace_sha256: "00".repeat(32),
+        meridian_mcp_build_id: "mcp-build-a".into(),
         experiment_identity: ExperimentIdentity {
             experiment_id: experiment_id.into(),
             executable: ExecutableIdentity {
@@ -136,5 +223,10 @@ fn comparison_requires_identity_compatibility_before_native_analysis() {
     assert!(compare_metadata(&baseline, &cross, ComparisonMode::CrossExperiment).compatible);
     assert!(
         !compare_metadata(&baseline, &cross, ComparisonMode::SameExperimentSamePhase).compatible
+    );
+    let mut different_mcp = baseline.clone();
+    different_mcp.meridian_mcp_build_id = "mcp-build-b".into();
+    assert!(
+        !compare_metadata(&baseline, &different_mcp, ComparisonMode::CrossExperiment).compatible
     );
 }

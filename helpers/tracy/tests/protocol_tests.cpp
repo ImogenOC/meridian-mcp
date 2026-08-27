@@ -56,5 +56,15 @@ int main()
 	const auto failure = meridian::tracy::error_response(10, "bad_trace", "Trace is invalid.");
 	assert(failure.at("ok") == false);
 	assert(failure.at("error").at("code") == "bad_trace");
+	const auto detailed_failure = meridian::tracy::error_response(
+		11,
+		"client_disconnected",
+		"Capture disconnected.",
+		{{"window_started", true}, {"collector_recovered", true}}
+	);
+	assert(detailed_failure.at("error").at("details").at("window_started") == true);
+	assert(detailed_failure.at("error").at("details").at("collector_recovered") == true);
+	const ProtocolError detailed_error("capture_failed", "failed", {{"window_started", true}});
+	assert(detailed_error.details().at("window_started") == true);
 	return 0;
 }

@@ -43,17 +43,24 @@ struct Request
 class ProtocolError final : public std::runtime_error
 {
 public:
-	ProtocolError(std::string code, std::string message);
+	ProtocolError(std::string code, std::string message, nlohmann::json details = nullptr);
 
 	[[nodiscard]] const std::string& code() const noexcept;
+	[[nodiscard]] const nlohmann::json& details() const noexcept;
 
 private:
 	std::string error_code;
+	nlohmann::json error_details;
 };
 
 [[nodiscard]] Request parse_request(std::string_view input);
 [[nodiscard]] nlohmann::json success_response(std::uint64_t id, nlohmann::json result);
-[[nodiscard]] nlohmann::json error_response(std::uint64_t id, std::string code, std::string message);
+[[nodiscard]] nlohmann::json error_response(
+	std::uint64_t id,
+	std::string code,
+	std::string message,
+	nlohmann::json details = nullptr
+);
 
 }
 

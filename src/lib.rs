@@ -1,6 +1,7 @@
 pub mod analysis_snapshot;
 pub mod artifact;
 pub mod atomic_output;
+pub mod build_identity;
 pub mod capabilities;
 pub mod config;
 pub mod contracts;

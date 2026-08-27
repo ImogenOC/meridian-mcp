@@ -6,9 +6,10 @@
 namespace meridian::tracy
 {
 
-ProtocolError::ProtocolError(std::string code, std::string message)
+ProtocolError::ProtocolError(std::string code, std::string message, nlohmann::json details)
 	: std::runtime_error(std::move(message)),
-	  error_code(std::move(code))
+	  error_code(std::move(code)),
+	  error_details(std::move(details))
 {
 }
 
@@ -120,9 +121,9 @@ nlohmann::json success_response(const std::uint64_t id, nlohmann::json result)
 	};
 }
 
-nlohmann::json error_response(const std::uint64_t id, std::string code, std::string message)
+nlohmann::json error_response(const std::uint64_t id, std::string code, std::string message, nlohmann::json details)
 {
-	return {
+	auto response = nlohmann::json {
 		{"schema_version", ProtocolSchemaVersion},
 		{"id", id},
 		{"ok", false},
@@ -131,6 +132,13 @@ nlohmann::json error_response(const std::uint64_t id, std::string code, std::str
 			{"message", std::move(message)},
 		}},
 	};
+	if(!details.is_null()) response["error"]["details"] = std::move(details);
+	return response;
+}
+
+const nlohmann::json& ProtocolError::details() const noexcept
+{
+	return error_details;
 }
 
 }

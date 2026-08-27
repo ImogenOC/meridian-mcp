@@ -11,6 +11,7 @@ fn payload(result: meridian_mcp::result::ToolResult) -> Value {
 fn metadata() -> ToolMetadata {
     ToolMetadata {
         meridian_mcp_version: env!("CARGO_PKG_VERSION"),
+        meridian_mcp_build: meridian_mcp::build_identity::current().clone(),
         spacemandmm_revision: "351ddc0ffb2439876d4565ce5130bb6b027ee605",
         state_generation: Some(7),
         asset_generation: None,
@@ -34,6 +35,13 @@ fn error_codes_serialize_as_stable_snake_case() {
         (ToolErrorCode::UnsupportedUpstream, "unsupported_upstream"),
         (ToolErrorCode::LimitExceeded, "limit_exceeded"),
         (ToolErrorCode::TimedOut, "timed_out"),
+        (ToolErrorCode::InvalidCapture, "invalid_capture"),
+        (ToolErrorCode::CaptureNotReady, "capture_not_ready"),
+        (ToolErrorCode::RecoveryRequired, "recovery_required"),
+        (
+            ToolErrorCode::WorkspaceIntegrityViolation,
+            "workspace_integrity_violation",
+        ),
         (ToolErrorCode::PartialEvidence, "partial_evidence"),
         (ToolErrorCode::HelperFailure, "helper_failure"),
         (
@@ -57,6 +65,13 @@ fn success_results_merge_trusted_metadata_with_existing_payload_fields() {
     let value = payload(result);
 
     assert_eq!(value["meridian_mcp_version"], "0.1.0");
+    assert_eq!(value["meridian_mcp_build"]["schema"], 1);
+    assert_eq!(
+        value["meridian_mcp_build"]["executable_sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
     assert_eq!(
         value["spacemandmm_revision"],
         "351ddc0ffb2439876d4565ce5130bb6b027ee605"

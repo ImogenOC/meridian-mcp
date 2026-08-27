@@ -103,6 +103,8 @@ try {
 	[IO.File]::WriteAllText((Join-Path $evidence 'control-stats.json'), (($control | ConvertTo-Json -Depth 20) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 	$stop = (Get-McpResponse -Responses $session.Responses -Id $stopId).result.content[0].text | ConvertFrom-Json
 	if (-not $stop.experiment_manifest.path) { throw 'Stop response omitted the complete experiment manifest.' }
+	$journal = Get-Content -LiteralPath (Join-Path $evidence '.meridian-tracy-session.json') -Raw | ConvertFrom-Json
+	if ($journal.status -ne 'finalized' -or $journal.last_action -ne 'finalized') { throw 'The experiment integrity journal was not finalized.' }
 	Copy-Item -LiteralPath $stop.experiment_manifest.path -Destination (Join-Path $evidence 'experiment.json')
 	$validation = & (Join-Path $PSScriptRoot 'validate-tracy-evidence.ps1') -EvidenceDirectory $evidence
 	[IO.File]::WriteAllText((Join-Path $evidence 'validation.json'), (($validation | Out-String).Trim() + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
@@ -112,6 +114,7 @@ try {
 	$failure = $_.Exception.Message
 	throw
 } finally {
-	$index = [ordered]@{ schema = 2; status = $status; experiment_name = $ExperimentName; phase = $Phase; control_count = $ControlCount; capture_seconds = $CaptureSeconds; warmup_seconds = $WarmupSeconds; raw_traces_local_only = $true; completed_steps = @($completedSteps); cleanup = $cleanup; traces = @($traces | ForEach-Object { [ordered]@{ file = Split-Path -Leaf $_; sha256 = if (Test-Path -LiteralPath $_) { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant() } else { $null }; sidecar = (Split-Path -Leaf $_) + '.meridian.json' } }); failure = $failure }
+	$buildIdentity = if (Test-Path -LiteralPath ($traces[0] + '.meridian.json')) { (Get-Content -LiteralPath ($traces[0] + '.meridian.json') -Raw | ConvertFrom-Json).meridian_mcp_build } else { $null }
+	$index = [ordered]@{ schema = 3; status = $status; experiment_name = $ExperimentName; phase = $Phase; control_count = $ControlCount; capture_seconds = $CaptureSeconds; warmup_seconds = $WarmupSeconds; raw_traces_local_only = $true; meridian_mcp_build = $buildIdentity; completed_steps = @($completedSteps); cleanup = $cleanup; traces = @($traces | ForEach-Object { [ordered]@{ file = Split-Path -Leaf $_; sha256 = if (Test-Path -LiteralPath $_) { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant() } else { $null }; sidecar = (Split-Path -Leaf $_) + '.meridian.json' } }); failure = $failure }
 	[IO.File]::WriteAllText((Join-Path $evidence 'evidence-index.json'), (($index | ConvertTo-Json -Depth 8) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 }

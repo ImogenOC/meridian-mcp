@@ -198,6 +198,10 @@ fn tracy_inventory_is_opt_in_and_exposes_fixed_command_tools_only() {
         .find(|tool| tool.name == "dm_tracy_launch")
         .unwrap();
     assert!(launch.input_schema["properties"]["experiment_directory"].is_object());
+    assert!(launch.input_schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("experiment_directory")));
     let control = definitions
         .iter()
         .find(|tool| tool.name == "dm_tracy_control_stats")
