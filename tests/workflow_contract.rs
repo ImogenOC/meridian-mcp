@@ -117,6 +117,35 @@ fn development_stdio_smoke_uses_private_temporary_state() {
 }
 
 #[test]
+fn development_integration_runners_use_private_temporary_state() {
+    for path in [
+        "scripts/run-auxtools-integration.ps1",
+        "scripts/run-meridian-compatibility.ps1",
+        "scripts/run-tracy-experiment.ps1",
+        "scripts/run-tracy-integration.ps1",
+        "scripts/test_unsupported_rift_compile.ps1",
+    ] {
+        let runner = fs::read_to_string(path).unwrap();
+        for required in [
+            "MERIDIAN_MCP_STATE_DIR",
+            "[IO.Path]::GetTempPath()",
+            "[IO.Path]::GetRelativePath",
+        ] {
+            assert!(
+                runner.contains(required),
+                "development integration runner {path} is missing {required}"
+            );
+        }
+        assert!(
+            runner.contains("Remove-Item -LiteralPath $stateDirectory")
+                || (runner.contains("$temporaryFiles.Add($stateDirectory)")
+                    && runner.contains("Remove-Item -LiteralPath $temporaryFile")),
+            "development integration runner {path} does not clean its private state"
+        );
+    }
+}
+
+#[test]
 fn managed_provenance_gate_is_bounded_and_retained() {
     let script = fs::read_to_string("scripts/run-provenance-integrity-integration.ps1").unwrap();
     let validator = fs::read_to_string("scripts/test-provenance-evidence-validation.ps1").unwrap();

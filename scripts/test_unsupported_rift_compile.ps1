@@ -7,6 +7,14 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Import-Module (Join-Path $repoRoot 'scripts\MeridianMcpSession.psm1') -Force
+$temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$stateDirectory = Join-Path $temporaryRoot ('.meridian-unsupported-rift-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stateDirectory | Out-Null
+$stateDirectory = (Resolve-Path -LiteralPath $stateDirectory).Path
+$relativeStateDirectory = [IO.Path]::GetRelativePath($temporaryRoot, $stateDirectory)
+if ($relativeStateDirectory -eq '..' -or $relativeStateDirectory.StartsWith('..' + [IO.Path]::DirectorySeparatorChar)) {
+	throw 'Temporary state directory resolved outside the operating-system temporary directory.'
+}
 
 function New-JsonLine {
 	param([Parameter(Mandatory)][System.Collections.IDictionary]$Value)
@@ -24,16 +32,21 @@ $requests = @(
 		params = [ordered]@{ name = 'rift_compile'; arguments = [ordered]@{} }
 	}))
 )
-$session = Invoke-McpSession `
-	-BinaryPath $BinaryPath `
-	-WorkingDirectory $repoRoot `
-	-Environment @{
-		MERIDIAN_MCP_MODE = 'development'
-		MERIDIAN_MCP_ROOTS = $repoRoot
-		MERIDIAN_MCP_RIFT_BUILD = 'network'
-	} `
-	-Requests $requests `
-	-TimeoutMilliseconds 30000
+try {
+	$session = Invoke-McpSession `
+		-BinaryPath $BinaryPath `
+		-WorkingDirectory $repoRoot `
+		-Environment @{
+			MERIDIAN_MCP_MODE = 'development'
+			MERIDIAN_MCP_ROOTS = $repoRoot
+			MERIDIAN_MCP_RIFT_BUILD = 'network'
+			MERIDIAN_MCP_STATE_DIR = $stateDirectory
+		} `
+		-Requests $requests `
+		-TimeoutMilliseconds 30000
+} finally {
+	Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if ($session.ExitCode -ne 0) {
 	throw "meridian-mcp exited with $($session.ExitCode): $($session.Stderr)"

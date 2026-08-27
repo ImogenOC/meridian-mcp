@@ -18,6 +18,14 @@ $dmb = (Resolve-Path -LiteralPath $DmbPath).Path
 $runtimeRoot = (Split-Path -Parent $dmb)
 $hostExecutableName = if ($HostMode -eq 'headless') { 'dreamdaemon.exe' } else { 'dreamseeker.exe' }
 $hostExecutable = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $compiler) $hostExecutableName)).Path
+$systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$stateDirectory = Join-Path $systemTemporaryRoot ('.meridian-auxtools-state-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stateDirectory | Out-Null
+$stateDirectory = (Resolve-Path -LiteralPath $stateDirectory).Path
+$relativeStateDirectory = [IO.Path]::GetRelativePath($systemTemporaryRoot, $stateDirectory)
+if ($relativeStateDirectory -eq '..' -or $relativeStateDirectory.StartsWith('..' + [IO.Path]::DirectorySeparatorChar)) {
+	throw 'Temporary state directory resolved outside the operating-system temporary directory.'
+}
 
 function Request([int]$Id, [string]$Name, [hashtable]$Arguments) {
 	return ConvertTo-McpJsonLine ([ordered]@{ jsonrpc = '2.0'; id = $Id; method = 'tools/call'; params = [ordered]@{ name = $Name; arguments = $Arguments } })
@@ -35,6 +43,7 @@ $environment = @{
 	MERIDIAN_MCP_MODE = 'development'
 	MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, (@($mcpRoot, $runtimeRoot) | Select-Object -Unique))
 	MERIDIAN_MCP_COMPILERS = $compiler
+	MERIDIAN_MCP_STATE_DIR = $stateDirectory
 	MERIDIAN_MCP_DEBUGGER = 'auxtools'
 }
 $evidenceFile = [IO.Path]::GetFullPath($EvidencePath)
@@ -81,4 +90,5 @@ try {
 	throw
 } finally {
 	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 5) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+	Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }

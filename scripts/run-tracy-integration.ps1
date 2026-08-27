@@ -33,6 +33,14 @@ foreach ($artifact in $ownedArtifacts) {
 
 & $compiler (Join-Path $fixtureRoot 'tracy.dme')
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dmb -PathType Leaf)) { throw 'The Tracy fixture did not compile.' }
+$systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$stateDirectory = Join-Path $systemTemporaryRoot ('.meridian-tracy-state-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stateDirectory | Out-Null
+$stateDirectory = (Resolve-Path -LiteralPath $stateDirectory).Path
+$relativeStateDirectory = [IO.Path]::GetRelativePath($systemTemporaryRoot, $stateDirectory)
+if ($relativeStateDirectory -eq '..' -or $relativeStateDirectory.StartsWith('..' + [IO.Path]::DirectorySeparatorChar)) {
+	throw 'Temporary state directory resolved outside the operating-system temporary directory.'
+}
 
 $requests = @(
 	(ConvertTo-McpJsonLine ([ordered]@{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = [ordered]@{ protocolVersion = '2024-11-05'; capabilities = [ordered]@{}; clientInfo = [ordered]@{ name = 'meridian-tracy-integration'; version = '1.0' } } })),
@@ -56,6 +64,7 @@ $environment = @{
 	MERIDIAN_MCP_MODE = 'development'
 	MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, @($mcpRoot, $fixtureRoot))
 	MERIDIAN_MCP_COMPILERS = $compiler
+	MERIDIAN_MCP_STATE_DIR = $stateDirectory
 	MERIDIAN_MCP_HELPER_MANIFEST = $manifest
 	MERIDIAN_MCP_TRACY = 'byond'
 	PATH = ([IO.Path]::GetDirectoryName($compiler) + [IO.Path]::PathSeparator + $env:PATH)
@@ -122,4 +131,5 @@ try {
 	foreach ($artifact in $ownedArtifacts) {
 		Remove-Item -LiteralPath (Join-Path $fixtureRoot $artifact) -Force -ErrorAction SilentlyContinue
 	}
+	Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }

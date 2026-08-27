@@ -31,6 +31,14 @@ $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 if (Test-Path -LiteralPath $evidence) { throw 'EvidenceDirectory must be a new owned directory.' }
 New-Item -ItemType Directory -Path $evidence | Out-Null
 Import-Module (Join-Path $PSScriptRoot 'MeridianMcpSession.psm1') -Force
+$systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$stateDirectory = Join-Path $systemTemporaryRoot ('.meridian-tracy-experiment-state-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stateDirectory | Out-Null
+$stateDirectory = (Resolve-Path -LiteralPath $stateDirectory).Path
+$relativeStateDirectory = [IO.Path]::GetRelativePath($systemTemporaryRoot, $stateDirectory)
+if ($relativeStateDirectory -eq '..' -or $relativeStateDirectory.StartsWith('..' + [IO.Path]::DirectorySeparatorChar)) {
+	throw 'Temporary state directory resolved outside the operating-system temporary directory.'
+}
 
 function Request([int]$Id, [string]$Name, [hashtable]$Arguments) {
 	ConvertTo-McpJsonLine ([ordered]@{ jsonrpc = '2.0'; id = $Id; method = 'tools/call'; params = [ordered]@{ name = $Name; arguments = $Arguments } })
@@ -65,7 +73,7 @@ $nextId++
 $stopId = $nextId
 $requests += Request $stopId 'dm_tracy_stop' @{}
 
-$environment = @{ MERIDIAN_MCP_MODE = 'development'; MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, @($root, $evidence, (Split-Path -Parent $dmb))); MERIDIAN_MCP_HELPER_MANIFEST = $manifest; MERIDIAN_MCP_TRACY = 'byond'; MERIDIAN_MCP_COMPILERS = $dreamMaker; PATH = ((Split-Path -Parent $dreamMaker) + [IO.Path]::PathSeparator + $env:PATH) }
+$environment = @{ MERIDIAN_MCP_MODE = 'development'; MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, @($root, $evidence, (Split-Path -Parent $dmb))); MERIDIAN_MCP_HELPER_MANIFEST = $manifest; MERIDIAN_MCP_TRACY = 'byond'; MERIDIAN_MCP_COMPILERS = $dreamMaker; MERIDIAN_MCP_STATE_DIR = $stateDirectory; PATH = ((Split-Path -Parent $dreamMaker) + [IO.Path]::PathSeparator + $env:PATH) }
 $status = 'failed'
 $failure = $null
 $completedSteps = [Collections.Generic.List[string]]::new()
@@ -117,4 +125,5 @@ try {
 	$buildIdentity = if (Test-Path -LiteralPath ($traces[0] + '.meridian.json')) { (Get-Content -LiteralPath ($traces[0] + '.meridian.json') -Raw | ConvertFrom-Json).meridian_mcp_build } else { $null }
 	$index = [ordered]@{ schema = 3; status = $status; experiment_name = $ExperimentName; phase = $Phase; control_count = $ControlCount; capture_seconds = $CaptureSeconds; warmup_seconds = $WarmupSeconds; raw_traces_local_only = $true; meridian_mcp_build = $buildIdentity; completed_steps = @($completedSteps); cleanup = $cleanup; traces = @($traces | ForEach-Object { [ordered]@{ file = Split-Path -Leaf $_; sha256 = if (Test-Path -LiteralPath $_) { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant() } else { $null }; sidecar = (Split-Path -Leaf $_) + '.meridian.json' } }); failure = $failure }
 	[IO.File]::WriteAllText((Join-Path $evidence 'evidence-index.json'), (($index | ConvertTo-Json -Depth 8) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+	Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }

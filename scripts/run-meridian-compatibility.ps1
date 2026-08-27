@@ -36,6 +36,15 @@ $evidence = [ordered]@{
 	warnings = @()
 }
 $temporaryFiles = [System.Collections.Generic.List[string]]::new()
+$systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$stateDirectory = Join-Path $systemTemporaryRoot ('.meridian-compatibility-state-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stateDirectory | Out-Null
+$stateDirectory = (Resolve-Path -LiteralPath $stateDirectory).Path
+$relativeStateDirectory = [IO.Path]::GetRelativePath($systemTemporaryRoot, $stateDirectory)
+if ($relativeStateDirectory -eq '..' -or $relativeStateDirectory.StartsWith('..' + [IO.Path]::DirectorySeparatorChar)) {
+	throw 'Temporary state directory resolved outside the operating-system temporary directory.'
+}
+$temporaryFiles.Add($stateDirectory)
 
 function Limit-CapturedText {
 	param(
@@ -233,6 +242,9 @@ function Invoke-NegativeSession {
 		MERIDIAN_MCP_COMPILERS = $DreamMakerPath
 		MERIDIAN_MCP_RIFT_BUILD = $Ceiling
 	}
+	if ($Mode -eq 'development') {
+		$sessionEnvironment.MERIDIAN_MCP_STATE_DIR = $stateDirectory
+	}
 	foreach ($entry in $ExtraEnvironment.GetEnumerator()) {
 		$sessionEnvironment[$entry.Key] = $entry.Value
 	}
@@ -392,6 +404,7 @@ try {
 		MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, @($mcpRoot, $MeridianRiftRoot))
 		MERIDIAN_MCP_COMPILERS = $DreamMakerPath
 		MERIDIAN_MCP_RIFT_BUILD = 'network'
+		MERIDIAN_MCP_STATE_DIR = $stateDirectory
 	}
 	$session = Invoke-McpSession -BinaryPath $BinaryPath -WorkingDirectory $mcpRoot -Environment $sessionEnvironment -Requests $requests.ToArray() -TimeoutMilliseconds 1800000 -AfterResponse $afterResponse
 	Assert-True ($session.ExitCode -eq 0) "Compatibility MCP session exited with $($session.ExitCode)."
@@ -400,7 +413,7 @@ try {
 	Assert-True ($toolNames -contains 'rift_compile') 'rift_compile was not advertised under the network development ceiling.'
 	$riftTool = @($toolsResponse.result.tools | Where-Object { $_.name -eq 'rift_compile' })[0]
 	$riftProperties = @($riftTool.inputSchema.properties.PSObject.Properties.Name | Sort-Object)
-	$expectedRiftProperties = @('capture_network', 'force_rebuild', 'idle_timeout_ms', 'network_mode', 'timeout_ms')
+	$expectedRiftProperties = @('capture_network', 'fixture_manifest_path', 'force_rebuild', 'idle_timeout_ms', 'network_mode', 'timeout_ms')
 	Assert-True ([string]::Join(',', $riftProperties) -eq [string]::Join(',', $expectedRiftProperties)) 'rift_compile advertised an unexpected schema.'
 
 	$parsePayload = Get-ToolPayload -Responses $session.Responses -Id 3 -Stage 'dm_parse_environment'
