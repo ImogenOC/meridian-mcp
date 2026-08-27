@@ -109,6 +109,56 @@ async fn analysis_mode_policy_error_uses_the_shared_error_shape() {
 }
 
 #[tokio::test]
+async fn path_policy_tool_error_reports_effective_roots_and_source() {
+    let root = std::env::temp_dir().join(format!(
+        "meridian-mcp-active-policy-context-{}",
+        std::process::id()
+    ));
+    let outside = std::env::temp_dir().join(format!(
+        "meridian-mcp-active-policy-outside-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&outside);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&outside, "#include \"fixture.dm\"\n").unwrap();
+    let context = ToolExecutionContext::new(
+        CapabilityMode::Analysis,
+        PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+    );
+
+    let result = call_tool(
+        &context,
+        &ServerState::new(),
+        "dm_parse_environment",
+        json!({"dme_path": outside}),
+    )
+    .await
+    .unwrap();
+    let value = payload(&result);
+
+    assert_eq!(value["code"], "path_outside_workspace");
+    assert_eq!(
+        value["details"]["containment_mode"],
+        "immutable_startup_roots"
+    );
+    assert_eq!(
+        value["details"]["policy_source"],
+        "server_startup_configuration"
+    );
+    assert_eq!(
+        value["details"]["effective_roots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    std::fs::remove_file(outside).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn development_mode_rejects_unlisted_compilers_and_implicit_overwrite() {
     let root = std::env::temp_dir().join(format!("meridian-mcp-active-dev-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -142,5 +192,36 @@ async fn development_mode_rejects_unlisted_compilers_and_implicit_overwrite() {
     .await
     .unwrap();
     assert!(message(&render_result).contains("output_exists"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn standard_runtime_rejects_unverified_artifacts_before_process_discovery() {
+    let root = std::env::temp_dir().join(format!(
+        "meridian-mcp-runtime-provenance-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dmb = root.join("fixture.dmb");
+    std::fs::write(&dmb, "unmanaged fixture").unwrap();
+    let context = ToolExecutionContext::new(
+        CapabilityMode::Development,
+        PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+    );
+
+    let result = call_tool(
+        &context,
+        &ServerState::new(),
+        "dm_run",
+        json!({"dmb_path": dmb, "require_verified_provenance": true}),
+    )
+    .await
+    .unwrap();
+    let value = payload(&result);
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(value["message"], "build_provenance_unavailable");
+    assert_eq!(value["details"]["provenance"]["status"], "unverified");
     std::fs::remove_dir_all(root).unwrap();
 }

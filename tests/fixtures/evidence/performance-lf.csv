@@ -1,0 +1,4 @@
+timestamp,tick_usage,cpu,ckey
+2026-01-01T00:00:00Z,10,2,synthetic_one
+2026-01-01T00:00:01Z,20,4,synthetic_two
+2026-01-01T00:00:02Z,30,6,synthetic_three

@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-01T00:00:00Z","event":"fixture_start","value":1,"client_id":"synthetic-client"}
+{"timestamp":"2026-01-01T00:00:01Z","event":"fixture_end","value":2,"client_id":"synthetic-client"}

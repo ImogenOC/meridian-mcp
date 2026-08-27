@@ -3,16 +3,59 @@ use crate::PathPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MAX_INTEGRITY_ENTRIES: usize = 250_000;
 const MAX_INTEGRITY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FileIdentity {
+    pub tracked: bool,
+    pub git_object_kind: Option<String>,
+    pub git_object_id: Option<String>,
+    pub sha256: Option<String>,
+    pub size: Option<u64>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceSnapshot {
+    pub root: PathBuf,
+    pub records: BTreeMap<String, FileIdentity>,
+    pub digest: String,
+    pub preexisting_changes: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PathMutation {
+    pub relative_path: String,
+    pub change_kind: MutationKind,
+    pub before: Option<FileIdentity>,
+    pub after: Option<FileIdentity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct IntegrityDelta {
+    pub added: Vec<PathMutation>,
+    pub modified: Vec<PathMutation>,
+    pub deleted: Vec<PathMutation>,
+    pub owned_paths: Vec<String>,
+    pub current_digest: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct IntegrityBaseline {
-    root: PathBuf,
-    records: BTreeMap<String, String>,
+    snapshot: WorkspaceSnapshot,
     pub digest: String,
     pub preexisting_changes: Vec<String>,
 }
@@ -70,10 +113,144 @@ pub enum IntegrityError {
     Violation(Vec<String>),
     #[error("an unfinished Tracy integrity journal requires recovery after {last_action}")]
     RecoveryRequired { last_action: String },
+    #[error("owned integrity exemptions must name exact files: {0}")]
+    InvalidOwnedPath(String),
     #[error(transparent)]
     Atomic(#[from] AtomicOutputError),
     #[error(transparent)]
     Serialize(#[from] serde_json::Error),
+}
+
+impl WorkspaceSnapshot {
+    pub fn capture(root: &Path) -> Result<Self, IntegrityError> {
+        let root = root.canonicalize()?;
+        let (records, preexisting_changes) = capture_records(&root)?;
+        let digest = digest_records(&records);
+        Ok(Self {
+            root,
+            records,
+            digest,
+            preexisting_changes,
+        })
+    }
+}
+
+pub fn compare_snapshots(
+    baseline: &WorkspaceSnapshot,
+    current: &WorkspaceSnapshot,
+    owned_paths: &[PathBuf],
+) -> Result<IntegrityDelta, IntegrityError> {
+    if baseline.root != current.root {
+        return Err(IntegrityError::InvalidOwnedPath(
+            "snapshot roots differ".to_owned(),
+        ));
+    }
+    let mut owned = BTreeSet::new();
+    for path in owned_paths {
+        if path.is_dir() {
+            return Err(IntegrityError::InvalidOwnedPath(path.display().to_string()));
+        }
+        let absolute = if path.is_absolute() {
+            path.clone()
+        } else {
+            baseline.root.join(path)
+        };
+        let absolute = absolute.canonicalize().unwrap_or(absolute);
+        let relative = absolute
+            .strip_prefix(&baseline.root)
+            .map_err(|_| IntegrityError::InvalidOwnedPath(path.display().to_string()))?;
+        owned.insert(normalize_relative(relative));
+    }
+    let mut delta = IntegrityDelta {
+        added: Vec::new(),
+        modified: Vec::new(),
+        deleted: Vec::new(),
+        owned_paths: owned.iter().cloned().collect(),
+        current_digest: current.digest.clone(),
+    };
+    for (path, after) in &current.records {
+        if owned.contains(path) {
+            continue;
+        }
+        match baseline.records.get(path) {
+            None => delta.added.push(PathMutation {
+                relative_path: path.clone(),
+                change_kind: MutationKind::Added,
+                before: None,
+                after: Some(after.clone()),
+            }),
+            Some(before) if before != after => delta.modified.push(PathMutation {
+                relative_path: path.clone(),
+                change_kind: MutationKind::Modified,
+                before: Some(before.clone()),
+                after: Some(after.clone()),
+            }),
+            _ => {}
+        }
+    }
+    for (path, before) in &baseline.records {
+        if !owned.contains(path) && !current.records.contains_key(path) {
+            delta.deleted.push(PathMutation {
+                relative_path: path.clone(),
+                change_kind: MutationKind::Deleted,
+                before: Some(before.clone()),
+                after: None,
+            });
+        }
+    }
+    Ok(delta)
+}
+
+impl IntegrityBaseline {
+    pub fn capture(root: &Path) -> Result<Self, IntegrityError> {
+        let snapshot = WorkspaceSnapshot::capture(root)?;
+        Ok(Self {
+            digest: snapshot.digest.clone(),
+            preexisting_changes: snapshot.preexisting_changes.clone(),
+            snapshot,
+        })
+    }
+    pub fn checkpoint(
+        &self,
+        action: impl Into<String>,
+        owned_paths: &[PathBuf],
+    ) -> Result<IntegrityCheckpoint, IntegrityError> {
+        let current = WorkspaceSnapshot::capture(&self.snapshot.root)?;
+        let delta = compare_snapshots(&self.snapshot, &current, owned_paths)?;
+        let checkpoint = IntegrityCheckpoint {
+            action: action.into(),
+            baseline_digest: self.digest.clone(),
+            current_digest: delta.current_digest,
+            added: delta
+                .added
+                .iter()
+                .map(|item| item.relative_path.clone())
+                .collect(),
+            modified: delta
+                .modified
+                .iter()
+                .map(|item| item.relative_path.clone())
+                .collect(),
+            deleted: delta
+                .deleted
+                .iter()
+                .map(|item| item.relative_path.clone())
+                .collect(),
+            owned_paths: delta.owned_paths,
+        };
+        let violations = checkpoint
+            .added
+            .iter()
+            .chain(&checkpoint.modified)
+            .chain(&checkpoint.deleted)
+            .cloned()
+            .collect::<Vec<_>>();
+        if violations.is_empty() {
+            Ok(checkpoint)
+        } else {
+            Err(IntegrityError::Violation(violations))
+        }
+    }
 }
 
 impl IntegrityJournal {
@@ -95,11 +272,9 @@ impl IntegrityJournal {
         } else {
             false
         };
-        let mut random = [0_u8; 16];
-        getrandom::fill(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
         let document = IntegrityJournalDocument {
             schema: 1,
-            journal_id: random.iter().map(|byte| format!("{byte:02x}")).collect(),
+            journal_id: random_id()?,
             status: IntegrityJournalStatus::Active,
             baseline_digest: baseline.digest.clone(),
             preexisting_change_count: baseline.preexisting_changes.len(),
@@ -109,15 +284,12 @@ impl IntegrityJournal {
         let path = persist_journal(policy, &path, overwrite, &document)?;
         Ok(Self { path, document })
     }
-
     pub fn path(&self) -> &Path {
         &self.path
     }
-
     pub fn status(&self) -> IntegrityJournalStatus {
         self.document.status
     }
-
     pub fn summary(&self) -> IntegrityJournalSummary {
         IntegrityJournalSummary {
             journal_id: self.document.journal_id.clone(),
@@ -126,7 +298,6 @@ impl IntegrityJournal {
             checkpoint_count: self.document.checkpoints.len(),
         }
     }
-
     pub fn record(
         &mut self,
         policy: &PathPolicy,
@@ -137,7 +308,6 @@ impl IntegrityJournal {
         self.path = persist_journal(policy, &self.path, true, &self.document)?;
         Ok(())
     }
-
     pub fn finalize(&mut self, policy: &PathPolicy) -> Result<(), IntegrityError> {
         self.document.status = IntegrityJournalStatus::Finalized;
         self.document.last_action = "finalized".to_owned();
@@ -161,79 +331,10 @@ fn persist_journal(
     Ok(artifact.path)
 }
 
-impl IntegrityBaseline {
-    pub fn capture(root: &Path) -> Result<Self, IntegrityError> {
-        let root = root.canonicalize()?;
-        let (records, preexisting_changes) = capture_records(&root)?;
-        let digest = digest_records(&records);
-        Ok(Self {
-            root,
-            records,
-            digest,
-            preexisting_changes,
-        })
-    }
-
-    pub fn checkpoint(
-        &self,
-        action: impl Into<String>,
-        owned_paths: &[PathBuf],
-    ) -> Result<IntegrityCheckpoint, IntegrityError> {
-        let (current, _) = capture_records(&self.root)?;
-        let owned: BTreeSet<String> = owned_paths
-            .iter()
-            .filter_map(|path| {
-                let normalized = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-                normalized
-                    .strip_prefix(&self.root)
-                    .ok()
-                    .map(normalize_relative)
-            })
-            .collect();
-        let mut added = Vec::new();
-        let mut modified = Vec::new();
-        let mut deleted = Vec::new();
-        for (path, identity) in &current {
-            if owned.contains(path) {
-                continue;
-            }
-            match self.records.get(path) {
-                None => added.push(path.clone()),
-                Some(previous) if previous != identity => modified.push(path.clone()),
-                _ => {}
-            }
-        }
-        for path in self.records.keys() {
-            if !current.contains_key(path) && !owned.contains(path) {
-                deleted.push(path.clone());
-            }
-        }
-        let checkpoint = IntegrityCheckpoint {
-            action: action.into(),
-            baseline_digest: self.digest.clone(),
-            current_digest: digest_records(&current),
-            added,
-            modified,
-            deleted,
-            owned_paths: owned.into_iter().collect(),
-        };
-        let violations = checkpoint
-            .added
-            .iter()
-            .chain(&checkpoint.modified)
-            .chain(&checkpoint.deleted)
-            .cloned()
-            .collect::<Vec<_>>();
-        if violations.is_empty() {
-            Ok(checkpoint)
-        } else {
-            Err(IntegrityError::Violation(violations))
-        }
-    }
-}
-
-fn capture_records(root: &Path) -> Result<(BTreeMap<String, String>, Vec<String>), IntegrityError> {
-    let git = Command::new("git")
+fn capture_records(
+    root: &Path,
+) -> Result<(BTreeMap<String, FileIdentity>, Vec<String>), IntegrityError> {
+    let status = Command::new("git")
         .args([
             "-C",
             &root.to_string_lossy(),
@@ -243,39 +344,9 @@ fn capture_records(root: &Path) -> Result<(BTreeMap<String, String>, Vec<String>
             "--untracked-files=all",
         ])
         .output();
-    if let Ok(output) = git {
-        if output.status.success() {
-            let changes = output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|entry| !entry.is_empty())
-                .map(|entry| String::from_utf8_lossy(entry).into_owned())
-                .collect::<Vec<_>>();
-            let mut records = BTreeMap::new();
-            let tracked = Command::new("git")
-                .args(["-C", &root.to_string_lossy(), "ls-files", "-z"])
-                .output()?;
-            for path in tracked
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|entry| !entry.is_empty())
-            {
-                let relative = String::from_utf8_lossy(path).replace('\\', "/");
-                let identity = file_identity(&root.join(&relative))?;
-                records.insert(relative, identity);
-                if records.len() > MAX_INTEGRITY_ENTRIES {
-                    return Err(IntegrityError::ScopeTooLarge);
-                }
-            }
-            for change in &changes {
-                if let Some(relative) = change.strip_prefix("? ") {
-                    records.insert(
-                        relative.replace('\\', "/"),
-                        file_identity(&root.join(relative))?,
-                    );
-                }
-            }
-            return Ok((records, changes));
+    if let Ok(status) = status {
+        if status.status.success() {
+            return capture_git_records(root, &status.stdout);
         }
     }
     let mut records = BTreeMap::new();
@@ -284,10 +355,110 @@ fn capture_records(root: &Path) -> Result<(BTreeMap<String, String>, Vec<String>
     Ok((records, Vec::new()))
 }
 
+fn capture_git_records(
+    root: &Path,
+    status_bytes: &[u8],
+) -> Result<(BTreeMap<String, FileIdentity>, Vec<String>), IntegrityError> {
+    let changes = status_bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect::<Vec<_>>();
+    let mut statuses = BTreeMap::new();
+    for change in &changes {
+        if let Some(path) = status_path(change) {
+            statuses.insert(path.replace('\\', "/"), change.clone());
+        }
+    }
+    let tracked = Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "ls-files", "-s", "-z"])
+        .output()?;
+    let mut records = BTreeMap::new();
+    for entry in tracked
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let entry = String::from_utf8_lossy(entry);
+        let Some((metadata, path)) = entry.split_once('\t') else {
+            continue;
+        };
+        let mut fields = metadata.split_whitespace();
+        let mode = fields.next().map(str::to_owned);
+        let object = fields.next().map(str::to_owned);
+        let relative = path.replace('\\', "/");
+        records.insert(
+            relative.clone(),
+            capture_identity(
+                &root.join(path),
+                true,
+                mode,
+                object,
+                statuses.get(&relative).cloned(),
+            )?,
+        );
+        if records.len() > MAX_INTEGRITY_ENTRIES {
+            return Err(IntegrityError::ScopeTooLarge);
+        }
+    }
+    for change in &changes {
+        if let Some(relative) = change.strip_prefix("? ") {
+            let relative = relative.replace('\\', "/");
+            records.insert(
+                relative.clone(),
+                capture_identity(
+                    &root.join(&relative),
+                    false,
+                    None,
+                    None,
+                    Some(change.clone()),
+                )?,
+            );
+        }
+    }
+    Ok((records, changes))
+}
+
+fn status_path(change: &str) -> Option<&str> {
+    if let Some(path) = change.strip_prefix("? ") {
+        return Some(path);
+    }
+    if change.starts_with("1 ") {
+        return change.splitn(9, ' ').nth(8);
+    }
+    if change.starts_with("2 ") {
+        return change.splitn(10, ' ').nth(9);
+    }
+    None
+}
+
+fn capture_identity(
+    path: &Path,
+    tracked: bool,
+    kind: Option<String>,
+    object: Option<String>,
+    status: Option<String>,
+) -> Result<FileIdentity, IntegrityError> {
+    let (sha256, size) = if path.is_file() {
+        let metadata = std::fs::metadata(path)?;
+        (Some(hash_file(path)?), Some(metadata.len()))
+    } else {
+        (None, None)
+    };
+    Ok(FileIdentity {
+        tracked,
+        git_object_kind: kind,
+        git_object_id: object,
+        sha256,
+        size,
+        status: status.unwrap_or_else(|| "clean".to_owned()),
+    })
+}
+
 fn visit_files(
     root: &Path,
     directory: &Path,
-    records: &mut BTreeMap<String, String>,
+    records: &mut BTreeMap<String, FileIdentity>,
     total_bytes: &mut u64,
 ) -> Result<(), IntegrityError> {
     for entry in std::fs::read_dir(directory)? {
@@ -310,32 +481,44 @@ fn visit_files(
             }
             records.insert(
                 normalize_relative(path.strip_prefix(root).unwrap_or(&path)),
-                file_identity(&path)?,
+                capture_identity(&path, false, None, None, None)?,
             );
         }
     }
     Ok(())
 }
 
-fn file_identity(path: &Path) -> Result<String, IntegrityError> {
-    if !path.is_file() {
-        return Ok("missing".to_owned());
+fn hash_file(path: &Path) -> Result<String, IntegrityError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
     }
-    let bytes = std::fs::read(path)?;
-    Ok(format!("{}:{:x}", bytes.len(), Sha256::digest(&bytes)))
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn digest_records(records: &BTreeMap<String, String>) -> String {
+fn digest_records(records: &BTreeMap<String, FileIdentity>) -> String {
     let mut hasher = Sha256::new();
     for (path, identity) in records {
         hasher.update(path.as_bytes());
         hasher.update([0]);
-        hasher.update(identity.as_bytes());
+        hasher
+            .update(serde_json::to_vec(identity).expect("file identity serialization cannot fail"));
         hasher.update([0]);
     }
     format!("{:x}", hasher.finalize())
 }
 
+fn random_id() -> Result<String, IntegrityError> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
+}
 fn normalize_relative(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }

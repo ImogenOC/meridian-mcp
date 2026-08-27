@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-01T00:00:00Z","category":"runtime","duration_ms":2,"message":"ckey=synthetic_one failed"}
+{"timestamp":"2026-01-01T00:00:01Z","category":"runtime","duration_ms":4,"message":"stable"}

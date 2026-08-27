@@ -1,4 +1,5 @@
 use crate::analysis_snapshot::{AnalysisContext, MacroDefinitionRecord};
+use crate::proc_resolution::ProcResolver;
 use dreammaker::objtree::ObjectTree;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -41,6 +42,8 @@ pub struct DocumentSymbol {
     pub name: String,
     pub kind: SymbolKind,
     pub owner: Option<String>,
+    pub implementation_owner: Option<String>,
+    pub declaration_owner: Option<String>,
     pub file: String,
     pub line: u32,
     pub column: u16,
@@ -69,6 +72,8 @@ pub struct ReferenceHit {
 pub struct ImplementationHit {
     pub symbol: SymbolId,
     pub declared_in: String,
+    pub implementation_owner: String,
+    pub declaration_owner: String,
     pub inherited_from: Option<String>,
     pub file: String,
     pub line: u32,
@@ -86,6 +91,7 @@ impl LanguageIndex {
         context: &AnalysisContext,
         objtree: &ObjectTree,
         macros: &[MacroDefinitionRecord],
+        proc_resolver: &ProcResolver,
     ) -> Self {
         let mut index = Self::default();
         for macro_record in macros {
@@ -98,6 +104,8 @@ impl LanguageIndex {
                 name: macro_record.name.clone(),
                 kind: SymbolKind::Macro,
                 owner: None,
+                implementation_owner: None,
+                declaration_owner: None,
                 file: macro_record.file.clone(),
                 line: macro_record.line,
                 column: macro_record.column,
@@ -113,6 +121,8 @@ impl LanguageIndex {
                 name: owner.rsplit('/').next().unwrap_or("/").to_owned(),
                 kind: SymbolKind::Type,
                 owner: None,
+                implementation_owner: None,
+                declaration_owner: None,
                 file: file.clone(),
                 line: ty.location.line,
                 column: ty.location.column,
@@ -122,6 +132,8 @@ impl LanguageIndex {
                     path: owner.clone(),
                 },
                 declared_in: owner.clone(),
+                implementation_owner: owner.clone(),
+                declaration_owner: owner.clone(),
                 inherited_from: ty.parent_type().map(|parent| parent.path.to_string()),
                 file: file.clone(),
                 line: ty.location.line,
@@ -144,6 +156,8 @@ impl LanguageIndex {
                     name: name.to_string(),
                     kind: SymbolKind::Var,
                     owner: Some(owner.clone()),
+                    implementation_owner: Some(owner.clone()),
+                    declaration_owner: Some(owner.clone()),
                     file: file.clone(),
                     line: var.value.location.line,
                     column: var.value.location.column,
@@ -151,6 +165,8 @@ impl LanguageIndex {
                 index.implementations.push(ImplementationHit {
                     symbol,
                     declared_in: owner.clone(),
+                    implementation_owner: owner.clone(),
+                    declaration_owner: owner.clone(),
                     inherited_from: None,
                     file,
                     line: var.value.location.line,
@@ -159,6 +175,9 @@ impl LanguageIndex {
             }
             for proc_ref in ty.iter_self_procs() {
                 let value = proc_ref.get();
+                let resolution = proc_resolver
+                    .resolve(&owner, proc_ref.name())
+                    .expect("a local proc implementation must resolve from its owner");
                 let file = context.file_path(value.location.file).display().to_string();
                 let symbol = SymbolId::Proc {
                     owner: owner.clone(),
@@ -170,6 +189,8 @@ impl LanguageIndex {
                     name: proc_ref.name().to_owned(),
                     kind: SymbolKind::Proc,
                     owner: Some(owner.clone()),
+                    implementation_owner: Some(owner.clone()),
+                    declaration_owner: Some(resolution.declaration_owner.clone()),
                     file: file.clone(),
                     line: value.location.line,
                     column: value.location.column,
@@ -177,6 +198,8 @@ impl LanguageIndex {
                 index.implementations.push(ImplementationHit {
                     symbol,
                     declared_in: owner.clone(),
+                    implementation_owner: owner.clone(),
+                    declaration_owner: resolution.declaration_owner.clone(),
                     inherited_from: proc_ref
                         .parent_proc()
                         .map(|parent| parent.ty().path.to_string()),

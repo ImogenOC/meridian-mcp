@@ -173,6 +173,7 @@ fn metadata(
                 },
                 startup_mode: "tracy".into(),
                 launch_parameters_sha256: String::new(),
+                build_record_id: None,
             },
             workload: WorkloadIdentity {
                 workload_id: workload_id.into(),

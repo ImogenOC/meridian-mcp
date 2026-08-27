@@ -326,6 +326,7 @@ pub struct DebuggerSession {
     pub active_breakpoints: HashSet<InstructionRef>,
     pub events: VecDeque<DebuggerEventRecord>,
     pub dropped_events: u64,
+    pub launch_provenance: crate::LaunchProvenance,
     pub(crate) containment: crate::process::ProcessContainment,
 }
 

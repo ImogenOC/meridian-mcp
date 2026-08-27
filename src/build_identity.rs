@@ -1,9 +1,9 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::sync::OnceLock;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BuildIdentityInput {
     pub version: String,
     pub source_revision: Option<String>,
@@ -13,7 +13,7 @@ pub struct BuildIdentityInput {
     pub executable_sha256: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BuildIdentity {
     pub schema: u32,
     pub build_id: String,

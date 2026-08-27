@@ -40,14 +40,23 @@ pub async fn launch(
             "a DreamDaemon runtime is active; stop it before launching the debugger"
         ));
     }
-    let installation = context
-        .debugger()
-        .ok_or_else(|| anyhow!("auxtools debugger is unavailable"))?;
     let dmb_path = args
         .get("dmb_path")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Missing dmb_path"))?;
     let dmb_path = std::path::PathBuf::from(dmb_path);
+    let require_verified = args
+        .get("require_verified_provenance")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let launch_provenance =
+        match super::require_launchable_artifact(context, &dmb_path, require_verified) {
+            Ok(provenance) => provenance,
+            Err(result) => return Ok(result),
+        };
+    let installation = context
+        .debugger()
+        .ok_or_else(|| anyhow!("auxtools debugger is unavailable"))?;
     let mut slot = state.debugger().await;
     if slot.is_some() {
         return Err(anyhow!("a debugger session is already active"));
@@ -148,11 +157,12 @@ pub async fn launch(
         active_breakpoints: HashSet::new(),
         events: VecDeque::new(),
         dropped_events: 0,
+        launch_provenance: launch_provenance.clone(),
         containment,
     });
     Ok(json_success(
         ToolMetadata::complete(Some(generation)),
-        json!({"lifecycle":"running","host_mode":host_mode,"port":port,"dmb_path":dmb_path,"dll_sha256":installation.dll_sha256}),
+        json!({"lifecycle":"running","host_mode":host_mode,"port":port,"dmb_path":dmb_path,"dll_sha256":installation.dll_sha256,"launch_provenance":launch_provenance}),
     ))
 }
 
@@ -208,10 +218,11 @@ pub async fn stop(state: &ServerState) -> Result<ToolResult> {
         .take()
         .ok_or_else(|| anyhow!("no debugger session is active"))?;
     let generation = session.state_generation;
+    let launch_provenance = session.launch_provenance.clone();
     session.stop().await?;
     Ok(json_success(
         ToolMetadata::complete(Some(generation)),
-        json!({"lifecycle":"stopped"}),
+        json!({"lifecycle":"stopped","launch_provenance":launch_provenance}),
     ))
 }
 

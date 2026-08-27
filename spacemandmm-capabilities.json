@@ -3,11 +3,22 @@
   "spacemandmm_revision": "351ddc0ffb2439876d4565ce5130bb6b027ee605",
   "capabilities": [
     {
+      "id": "meridian.native_evidence",
+      "category": "meridian",
+      "upstream_component": "meridian-mcp",
+      "disposition": "mcp_native",
+      "targets": ["dm_native_evidence_summary", "dm_native_evidence_compare"],
+      "platforms": ["all"],
+      "verification": "bounded native evidence fixture and identity-comparison gates",
+      "evidence": ["owned:evidence-fixtures"],
+      "rationale": null
+    },
+    {
       "id": "crate.dreammaker",
       "category": "workspace",
       "upstream_component": "dreammaker",
       "disposition": "direct",
-      "targets": ["dm_parse_environment", "dm_get_type", "dm_get_proc", "dm_get_var", "dm_list_types", "dm_get_definition"],
+      "targets": ["dm_parse_environment", "dm_check_fixture_sync", "dm_get_type", "dm_get_proc", "dm_get_var", "dm_list_types", "dm_get_definition"],
       "platforms": ["all"],
       "verification": "dependency_baseline and language fixture gates",
       "evidence": ["workspace:dreammaker"],
@@ -473,7 +484,18 @@
       "platforms": ["windows"],
       "verification": "owned runtime readiness output Topic and shutdown fixture gates",
       "evidence": ["meridian:runtime"],
-      "rationale": "The existing DreamDaemon lifecycle is independent of debugger-owned DreamSeeker."
-    }
+		"rationale": "The existing DreamDaemon lifecycle is independent of debugger-owned DreamSeeker."
+	},
+	{
+		"id": "meridian.server_status",
+		"category": "existing_meridian",
+		"upstream_component": "Meridian-MCP immutable startup and session state",
+		"disposition": "mcp_native",
+		"targets": ["dm_server_status"],
+		"platforms": ["all"],
+		"verification": "owned server status policy and session-state fixture gate",
+		"evidence": ["meridian:server_status"],
+		"rationale": "The read-only status tool makes the MCP's effective authorization and current owned state directly inspectable."
+	}
   ]
 }

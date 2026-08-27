@@ -72,6 +72,113 @@ fn readme_has_an_individual_description_for_every_public_tool() {
 }
 
 #[test]
+fn policy_and_proc_ownership_are_documented() {
+    let readme = std::fs::read_to_string("README.md").expect("README should be readable");
+    for required in [
+        "MERIDIAN_MCP_REPOSITORIES",
+        "dm_server_status",
+        "immutable_startup_roots",
+        "implementation owner",
+        "declaration owner",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
+}
+
+#[test]
+fn build_provenance_and_fixture_sync_are_documented() {
+    let readme = std::fs::read_to_string("README.md").expect("README should be readable");
+    for required in [
+        "MERIDIAN_MCP_STATE_DIR",
+        "`dm_check_fixture_sync`",
+        "managed artifact",
+        "unmanaged human-built",
+        "`require_verified_provenance`",
+        "later failed compile",
+        "private state",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
+}
+
+#[test]
+fn standard_runtime_integrity_is_documented() {
+    let readme = std::fs::read_to_string("README.md").expect("README should be readable");
+    for required in [
+        "runtime-integrity/",
+        "five-second",
+        "exact owned files",
+        "never reverts",
+        "natural process exit",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
+}
+
+#[test]
+fn native_evidence_semantics_are_documented() {
+    let document = std::fs::read_to_string("docs/native-evidence.md")
+        .expect("native evidence guide should be readable");
+    for required in [
+        "byond_proc_profile_json",
+        "byond_sendmaps_json",
+        "performance_csv",
+        "runtime_jsonl",
+        "event_jsonl",
+        "cumulative snapshot",
+        "interval series",
+        "pre_game_cumulative",
+        "half-open",
+        "type-7",
+        "default redaction",
+        "Raw artifacts remain local",
+        "evidence_identity_mismatch",
+        "not a production performance conclusion",
+    ] {
+        assert!(
+            document.contains(required),
+            "native evidence guide is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn release_operations_document_provenance_and_private_state_boundaries() {
+    let readme = std::fs::read_to_string("README.md").unwrap();
+    let testing = std::fs::read_to_string("TESTING.md").unwrap();
+    let provenance = std::fs::read_to_string("docs/provenance.md").unwrap();
+    for required in [
+        "dm_server_status",
+        "dm_check_fixture_sync",
+        "dm_native_evidence_summary",
+        "dm_native_evidence_compare",
+        "require_verified_provenance",
+        "source_integrity_warning",
+        "pre_game_cumulative",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
+    for required in [
+        "run-provenance-integrity-integration.ps1",
+        "test-provenance-evidence-validation.ps1",
+        "cargo +1.95.0 clippy --locked",
+        "cargo +1.95.0 deny check",
+    ] {
+        assert!(testing.contains(required), "TESTING is missing {required}");
+    }
+    for required in [
+        "Managed build provenance",
+        "exclusive process lock",
+        "known-stale",
+    ] {
+        assert!(
+            provenance.contains(required),
+            "provenance documentation is missing {required}"
+        );
+    }
+}
+
+#[test]
 fn compatibility_document_tracks_deferred_named_gates() {
     let compatibility = std::fs::read_to_string("docs/compatibility.md")
         .expect("compatibility documentation should be readable");

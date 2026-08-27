@@ -113,6 +113,15 @@ jobs:
             -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" `
             -BinaryPath ./target/release/meridian-mcp.exe `
             -EvidencePath ./integration/evidence/meridian-compatibility.json
+      - name: Run managed provenance and integrity gate
+        id: provenance_gate
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          ./scripts/run-provenance-integrity-integration.ps1 `
+            -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" `
+            -BinaryPath ./target/release/meridian-mcp.exe `
+            -EvidencePath ./integration/evidence/provenance-integrity.json
       - name: Run live auxtools debugger gate
         id: auxtools_gate
         continue-on-error: true
@@ -127,10 +136,12 @@ jobs:
         if: always()
         shell: pwsh
         env:
+          PROVENANCE_OUTCOME: ${{ steps.provenance_gate.outcome }}
           AUXTOOLS_OUTCOME: ${{ steps.auxtools_gate.outcome }}
           TRACY_OUTCOME: ${{ steps.tracy_gate.outcome }}
         run: |
           $failures = @()
+          if ($env:PROVENANCE_OUTCOME -eq 'failure') { $failures += 'managed provenance and integrity' }
           if ($env:AUXTOOLS_OUTCOME -eq 'failure') { $failures += 'auxtools debugger' }
           if ($env:TRACY_OUTCOME -eq 'failure') { $failures += 'Tracy profiler' }
           if ($failures.Count -gt 0) {

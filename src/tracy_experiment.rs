@@ -37,6 +37,8 @@ pub struct ExecutableIdentity {
     pub hook_identity: HelperIdentity,
     pub startup_mode: String,
     pub launch_parameters_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_record_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

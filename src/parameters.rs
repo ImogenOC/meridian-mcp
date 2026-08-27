@@ -25,6 +25,7 @@ pub struct RiftCompileParams {
     pub capture_network: bool,
     #[serde(default)]
     pub force_rebuild: bool,
+    pub fixture_manifest_path: Option<PathBuf>,
 }
 
 impl RiftCompileParams {
@@ -123,6 +124,7 @@ pub struct CompileParams {
     pub idle_timeout_ms: Option<u64>,
     #[serde(default)]
     pub capture_network: bool,
+    pub fixture_manifest_path: Option<PathBuf>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RenderMapParams {
@@ -152,6 +154,13 @@ pub struct RunParams {
     #[serde(default)]
     pub wait_regex: bool,
     pub startup_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub require_verified_provenance: bool,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureSyncParams {
+    pub fixture_manifest_path: PathBuf,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WaitForOutputParams {

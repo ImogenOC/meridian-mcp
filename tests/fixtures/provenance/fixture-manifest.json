@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "fixture_id": "owned-provenance-fixture",
+  "dme_path": "fixture.dme",
+  "dmb_path": "fixture.dmb",
+  "inputs": [
+    {"path": "fixture.dm", "role": "source"},
+    {"path": "generated_bindings.dm", "role": "generated_binding"},
+    {"path": "native_module.bin", "role": "native_module"},
+    {"path": "service.bin", "role": "service_executable"}
+  ],
+  "required_procs": [
+    {"path": "/proc/meridian_fixture_state_batch", "arguments": ["payload"]}
+  ],
+  "required_tokens": ["#define MERIDIAN_FIXTURE_PROTOCOL 4"]
+}

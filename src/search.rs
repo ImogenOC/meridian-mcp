@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use dreammaker::objtree::ObjectTree;
 use dreammaker::Context;
 
+use crate::proc_resolution::ProcResolver;
 use crate::source::extract_source_from_text;
 
 const BM25_K1: f64 = 1.2;
@@ -36,6 +37,8 @@ pub(crate) struct SearchDocument {
     pub(crate) symbol: String,
     pub(crate) name: String,
     pub(crate) type_path: String,
+    pub(crate) implementation_owner: Option<String>,
+    pub(crate) declaration_owner: Option<String>,
     pub(crate) parent: Option<String>,
     pub(crate) file: String,
     pub(crate) line: u32,
@@ -131,6 +134,8 @@ impl SearchIndex {
                     symbol: type_path.clone(),
                     name: ty.name().to_string(),
                     type_path: type_path.clone(),
+                    implementation_owner: None,
+                    declaration_owner: None,
                     parent: parent.clone(),
                     file: file.display().to_string(),
                     line: ty.location.line,
@@ -155,6 +160,8 @@ impl SearchIndex {
                     symbol: member_symbol(&type_path, "var", name),
                     name: name.to_string(),
                     type_path: type_path.clone(),
+                    implementation_owner: None,
+                    declaration_owner: None,
                     parent: parent.clone(),
                     file: file.display().to_string(),
                     line: location.line,
@@ -187,6 +194,8 @@ impl SearchIndex {
                         symbol: member_symbol(&type_path, "proc", name),
                         name: name.to_string(),
                         type_path: type_path.clone(),
+                        implementation_owner: None,
+                        declaration_owner: None,
                         parent: parent.clone(),
                         file: file.display().to_string(),
                         line: location.line,
@@ -210,6 +219,71 @@ impl SearchIndex {
         }
 
         Self::new(documents)
+    }
+
+    pub(crate) fn with_proc_resolver(mut self, resolver: &ProcResolver) -> Self {
+        let mut canonical = HashMap::new();
+        for resolution in resolver
+            .resolutions()
+            .filter(|resolution| resolution.requested_type_path == resolution.implementation_owner)
+        {
+            let override_count = resolution
+                .implementations
+                .iter()
+                .filter(|implementation| implementation.owner == resolution.implementation_owner)
+                .count();
+            for implementation in resolution
+                .implementations
+                .iter()
+                .filter(|implementation| implementation.owner == resolution.implementation_owner)
+            {
+                canonical.insert(
+                    (
+                        resolution.proc_name.clone(),
+                        normalize_path_text(&implementation.location.file),
+                        implementation.location.line,
+                        u32::from(implementation.location.column),
+                    ),
+                    (
+                        resolution.implementation_owner.clone(),
+                        resolution.declaration_owner.clone(),
+                        implementation.override_index,
+                        override_count,
+                    ),
+                );
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        self.documents.retain_mut(|document| {
+            if document.kind != SymbolKind::Proc {
+                return true;
+            }
+            let Some((implementation_owner, declaration_owner, override_index, override_count)) =
+                canonical.get(&(
+                    document.name.clone(),
+                    normalize_path_text(&document.file),
+                    document.line,
+                    document.column,
+                ))
+            else {
+                return false;
+            };
+            document.type_path = implementation_owner.clone();
+            document.symbol = member_symbol(implementation_owner, "proc", &document.name);
+            document.implementation_owner = Some(implementation_owner.clone());
+            document.declaration_owner = Some(declaration_owner.clone());
+            document.override_index = Some(*override_index);
+            document.override_count = Some(*override_count);
+            seen.insert((
+                document.symbol.clone(),
+                document.file.clone(),
+                document.line,
+                document.column,
+                *override_index,
+            ))
+        });
+        Self::new(self.documents)
     }
 
     pub(crate) fn query_terms(query: &str) -> Vec<String> {
@@ -340,6 +414,10 @@ fn member_symbol(type_path: &str, kind: &str, name: &str) -> String {
     }
 }
 
+fn normalize_path_text(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
 fn resolve_context_file(
     context: &Context,
     environment_root: &Path,
@@ -408,6 +486,8 @@ mod tests {
             symbol: symbol.to_string(),
             name: name.to_string(),
             type_path: type_path.to_string(),
+            implementation_owner: None,
+            declaration_owner: None,
             parent: None,
             file: file.to_string(),
             line: 1,

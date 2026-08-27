@@ -3,18 +3,22 @@ mod compile;
 mod debugger;
 mod dmi;
 mod docs;
+mod fixture;
 mod language;
 mod map;
+mod native_evidence;
 mod parse;
 pub mod rift;
 mod runtime;
 mod search;
+mod server_status;
 mod tracy;
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::mcp::{ToolDefinition, ToolResult};
+use crate::result::{structured_error, ToolErrorCode};
 use crate::spaceman::debugger::DebuggerInstallation;
 use crate::state::ServerState;
 use crate::tracy::TracyInstallation;
@@ -28,6 +32,9 @@ pub struct ToolExecutionContext {
     dmdoc_helper: Option<std::path::PathBuf>,
     debugger: Option<DebuggerInstallation>,
     tracy: Option<TracyInstallation>,
+    private_state: Option<std::sync::Arc<crate::PrivateStateStore>>,
+    build_provenance: Option<std::sync::Arc<crate::BuildProvenanceStore>>,
+    integrity_recovery: std::sync::Arc<[crate::runtime_integrity::RuntimeIntegritySummary]>,
 }
 
 impl ToolExecutionContext {
@@ -47,6 +54,9 @@ impl ToolExecutionContext {
             dmdoc_helper: None,
             debugger: None,
             tracy: None,
+            private_state: None,
+            build_provenance: None,
+            integrity_recovery: std::sync::Arc::from([]),
         }
     }
 
@@ -58,6 +68,38 @@ impl ToolExecutionContext {
         debugger: Option<DebuggerInstallation>,
         tracy: Option<TracyInstallation>,
     ) -> Self {
+        Self::with_features_and_state(
+            mode,
+            policy,
+            rift_build,
+            dmdoc_helper,
+            debugger,
+            tracy,
+            None,
+        )
+    }
+
+    pub fn with_features_and_state(
+        mode: CapabilityMode,
+        policy: PathPolicy,
+        rift_build: RiftBuildAccess,
+        dmdoc_helper: Option<std::path::PathBuf>,
+        debugger: Option<DebuggerInstallation>,
+        tracy: Option<TracyInstallation>,
+        private_state: Option<std::sync::Arc<crate::PrivateStateStore>>,
+    ) -> Self {
+        let build_provenance = private_state.as_ref().map(|state| {
+            std::sync::Arc::new(crate::BuildProvenanceStore::new(
+                std::sync::Arc::clone(state),
+                policy.clone(),
+            ))
+        });
+        let integrity_recovery = private_state
+            .as_ref()
+            .and_then(|state| {
+                crate::runtime_integrity::recover_unfinished(state, policy.effective_roots()).ok()
+            })
+            .unwrap_or_default();
         Self {
             mode,
             policy,
@@ -65,6 +107,9 @@ impl ToolExecutionContext {
             dmdoc_helper,
             debugger,
             tracy,
+            private_state,
+            build_provenance,
+            integrity_recovery: std::sync::Arc::from(integrity_recovery),
         }
     }
 
@@ -88,6 +133,25 @@ impl ToolExecutionContext {
     pub(crate) fn tracy(&self) -> Option<&TracyInstallation> {
         self.tracy.as_ref()
     }
+    pub(crate) fn private_state(&self) -> Option<&crate::PrivateStateStore> {
+        self.private_state.as_deref()
+    }
+    pub(crate) fn private_state_arc(&self) -> Option<std::sync::Arc<crate::PrivateStateStore>> {
+        self.private_state.as_ref().map(std::sync::Arc::clone)
+    }
+    pub(crate) fn build_provenance(&self) -> Option<&crate::BuildProvenanceStore> {
+        self.build_provenance.as_deref()
+    }
+    pub(crate) fn build_provenance_arc(
+        &self,
+    ) -> Option<std::sync::Arc<crate::BuildProvenanceStore>> {
+        self.build_provenance.as_ref().map(std::sync::Arc::clone)
+    }
+    pub(crate) fn integrity_recovery(
+        &self,
+    ) -> &[crate::runtime_integrity::RuntimeIntegritySummary] {
+        &self.integrity_recovery
+    }
 }
 
 /// Get all available tool definitions
@@ -96,7 +160,17 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
     // Parsing tools
     tools.push(ToolDefinition {
-        name: "dm_parse_environment".to_string(),
+		name: "dm_server_status".to_string(),
+		description: "Report immutable startup policy, build identity, analysis generation, and owned runtime summary.".to_string(),
+		input_schema: json!({
+			"type": "object",
+			"properties": {},
+			"additionalProperties": false
+		}),
+	});
+
+    tools.push(ToolDefinition {
+		name: "dm_parse_environment".to_string(),
         description: "Parse a DreamMaker environment (.dme file) and cache the object tree. This must be called before using other analysis tools.".to_string(),
         input_schema: json!({
             "type": "object",
@@ -109,6 +183,32 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             "required": ["dme_path"]
         }),
     });
+
+    tools.push(ToolDefinition {
+        name: "dm_check_fixture_sync".to_string(),
+        description: "Validate a contained fixture manifest against parsed DreamMaker proc contracts, required text tokens, and managed build provenance.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "fixture_manifest_path": {"type": "string"}
+            },
+            "required": ["fixture_manifest_path"],
+            "additionalProperties": false
+        }),
+    });
+    let evidence_request_schema = json!({
+        "type":"object",
+        "properties":{
+            "artifacts":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","properties":{"kind":{"type":"string","enum":["byond_proc_profile_json","byond_sendmaps_json","performance_csv","runtime_jsonl","event_jsonl"]},"path":{"type":"string"},"options":{"type":"object"}},"required":["kind","path"],"additionalProperties":false}},
+            "dmb_path":{"type":"string"},
+            "workload":{"type":"object"},
+            "phases":{"type":"array","maxItems":64,"items":{"type":"object"}}
+        },
+        "required":["artifacts"],
+        "additionalProperties":false
+    });
+    tools.push(ToolDefinition { name:"dm_native_evidence_summary".into(), description:"Validate, redact, phase-align, and summarize bounded BYOND and application-native evidence without modifying raw artifacts.".into(), input_schema:evidence_request_schema.clone() });
+    tools.push(ToolDefinition { name:"dm_native_evidence_compare".into(), description:"Recompute and identity-check 2-20 complete native-evidence runs before calculating deterministic metric deltas and distributions.".into(), input_schema:json!({"type":"object","properties":{"runs":{"type":"array","minItems":2,"maxItems":20,"items":evidence_request_schema}},"required":["runs"],"additionalProperties":false}) });
 
     tools.push(ToolDefinition {
         name: "dm_get_type".to_string(),
@@ -340,6 +440,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "capture_network": {
                     "type": "boolean",
                     "description": "Request best-effort endpoint observation (default: false)"
+                },
+                "fixture_manifest_path": {
+                    "type": "string",
+                    "description": "Optional contained declarative fixture manifest"
                 }
             },
             "required": ["dme_path"]
@@ -376,6 +480,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "force_rebuild": {
                     "type": "boolean",
                     "description": "Remove only canonical root build artifacts before building (default: false)"
+                },
+                "fixture_manifest_path": {
+                    "type": "string",
+                    "description": "Optional contained declarative fixture manifest"
                 }
             }
         }),
@@ -496,7 +604,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     });
 
     tools.extend([
-        ToolDefinition { name:"dm_debug_launch".into(), description:"Launch one MCP-owned interactive DreamSeeker or headless DreamDaemon session with the fixed, hash-verified auxtools debugger.".into(), input_schema:json!({"type":"object","properties":{"dmb_path":{"type":"string"},"host_mode":{"type":"string","enum":["interactive","headless"],"default":"interactive"},"startup_timeout_ms":{"type":"integer","minimum":1,"maximum":60000}},"required":["dmb_path"]}) },
+        ToolDefinition { name:"dm_debug_launch".into(), description:"Launch one MCP-owned interactive DreamSeeker or headless DreamDaemon session with the fixed, hash-verified auxtools debugger.".into(), input_schema:json!({"type":"object","properties":{"dmb_path":{"type":"string"},"host_mode":{"type":"string","enum":["interactive","headless"],"default":"interactive"},"startup_timeout_ms":{"type":"integer","minimum":1,"maximum":60000},"require_verified_provenance":{"type":"boolean","default":false}},"required":["dmb_path"],"additionalProperties":false}) },
         ToolDefinition { name:"dm_debug_stop".into(), description:"Disconnect and terminate the active MCP-owned debugger process tree.".into(), input_schema:json!({"type":"object","properties":{}}) },
         ToolDefinition { name:"dm_debug_set_breakpoints".into(), description:"Replace all source breakpoints for one contained parsed DreamMaker file.".into(), input_schema:debug_source_breakpoint_schema() },
         ToolDefinition { name:"dm_debug_set_function_breakpoints".into(), description:"Set a bounded complete list of canonical proc breakpoints.".into(), input_schema:debug_breakpoint_schema() },
@@ -549,9 +657,15 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "startup_timeout_ms": {
                     "type": "integer",
                     "description": "Maximum wait for wait_for in milliseconds (default: 30000)"
+                },
+                "require_verified_provenance": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Reject an unmanaged DMB unless it has a current Meridian-MCP build record"
                 }
             },
-            "required": ["dmb_path"]
+            "required": ["dmb_path"],
+            "additionalProperties": false
         }),
     });
 
@@ -647,6 +761,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         (
             "experiment_name".into(),
             json!({"type":"string","maxLength":512}),
+        ),
+        (
+            "require_verified_provenance".into(),
+            json!({"type":"boolean","default":false}),
         ),
     ]));
     tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters, an immutable executable/workload draft, and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":launch_properties,"required":["dmb_path","experiment_directory"]}) });
@@ -838,12 +956,19 @@ pub async fn call_tool(
             json!({
                 "path": error.path().display().to_string(),
                 "policy_code": error.code(),
+                "containment_mode": error.context().containment_mode,
+                "policy_source": error.context().policy_source,
+                "effective_roots": error.context().effective_roots,
             }),
         ));
     }
     match name {
         // Parsing tools
+        "dm_server_status" => server_status::status(context, state).await,
         "dm_parse_environment" => parse::parse_environment(state, args).await,
+        "dm_check_fixture_sync" => fixture::check_sync(context, state, args).await,
+        "dm_native_evidence_summary" => native_evidence::summary(context, args).await,
+        "dm_native_evidence_compare" => native_evidence::compare(context, args).await,
         "dm_get_type" => parse::get_type(state, args).await,
         "dm_get_proc" => parse::get_proc(state, args).await,
         "dm_get_var" => parse::get_var(state, args).await,
@@ -865,7 +990,7 @@ pub async fn call_tool(
         "dm_extract_dmi" => dmi::extract(context, state, args).await,
 
         // Compile tool
-        "dm_compile" => compile::compile(args).await,
+        "dm_compile" => compile::compile(context, state, args).await,
         "rift_compile" => rift::compile(context, state, args).await,
 
         // Map tools
@@ -896,7 +1021,7 @@ pub async fn call_tool(
         "dm_debug_wait_for_event" => debugger::wait_for_event(state, args).await,
 
         // Runtime tools
-        "dm_run" => runtime::run(state, args).await,
+        "dm_run" => runtime::run(context, state, args).await,
         "dm_wait_for_output" => runtime::wait_for_output(state, args).await,
         "dm_stop" => runtime::stop(state, args).await,
         "dm_status" => runtime::status(state, args).await,
@@ -923,6 +1048,17 @@ fn contain_arguments(
     match name {
         "dm_parse_environment" | "dm_compile" => {
             canonical_argument(policy, args, "dme_path", false)?
+        }
+        "dm_check_fixture_sync" => {
+            canonical_argument(policy, args, "fixture_manifest_path", false)?
+        }
+        "dm_native_evidence_summary" => contain_evidence_request(policy, args)?,
+        "dm_native_evidence_compare" => {
+            if let Some(runs) = args.get_mut("runs").and_then(Value::as_array_mut) {
+                for run in runs {
+                    contain_evidence_request(policy, run)?;
+                }
+            }
         }
         "dm_document_symbols" => canonical_argument(policy, args, "file_path", false)?,
         "dm_dmi_info" => canonical_argument(policy, args, "dmi_path", false)?,
@@ -961,10 +1097,14 @@ fn contain_arguments(
     }
     if name == "dm_compile" {
         canonical_optional_argument(policy, args, "working_directory")?;
+        canonical_optional_argument(policy, args, "fixture_manifest_path")?;
         if let Some(path) = args.get("compiler_path").and_then(Value::as_str) {
             let path = policy.executable(path)?;
             args["compiler_path"] = Value::String(path.display().to_string());
         }
+    }
+    if name == "rift_compile" {
+        canonical_optional_argument(policy, args, "fixture_manifest_path")?;
     }
     if name == "dm_run" {
         canonical_optional_argument(policy, args, "working_directory")?;
@@ -1005,6 +1145,85 @@ fn contain_arguments(
         }
     }
     Ok(())
+}
+
+fn contain_evidence_request(
+    policy: &PathPolicy,
+    request: &mut Value,
+) -> std::result::Result<(), crate::PolicyError> {
+    if let Some(artifacts) = request.get_mut("artifacts").and_then(Value::as_array_mut) {
+        for artifact in artifacts {
+            canonical_argument(policy, artifact, "path", false)?;
+        }
+    }
+    canonical_optional_argument(policy, request, "dmb_path")?;
+    Ok(())
+}
+
+pub(crate) fn require_launchable_artifact(
+    context: &ToolExecutionContext,
+    dmb_path: &std::path::Path,
+    require_verified: bool,
+) -> std::result::Result<crate::LaunchProvenance, ToolResult> {
+    let dmb = match crate::FileIdentity::capture(dmb_path) {
+        Ok(dmb) => dmb,
+        Err(error) => {
+            return Err(structured_error(
+                ToolErrorCode::InvalidInput,
+                "could not identify the DMB immediately before launch",
+                Some("Use an existing contained regular DMB file.".to_owned()),
+                json!({"dmb_path":dmb_path,"error":error.to_string()}),
+            ));
+        }
+    };
+    let decision = match context.build_provenance() {
+        Some(store) => match store.evaluate_launch(dmb_path, require_verified) {
+            Ok(decision) => decision,
+            Err(error) => {
+                return Err(structured_error(
+                    ToolErrorCode::WorkspaceIntegrityViolation,
+                    "managed build provenance could not be validated",
+                    Some(
+                        "Inspect the private state store and compile the artifact again."
+                            .to_owned(),
+                    ),
+                    json!({"dmb_path":dmb_path,"error":error.to_string()}),
+                ));
+            }
+        },
+        None => crate::LaunchDecision {
+            status: crate::ProvenanceStatus::Unverified,
+            allowed: !require_verified,
+            record_id: None,
+            reasons: vec![crate::ProvenanceReason {
+                code: "no_build_record".to_owned(),
+                message: "no managed successful build record exists for this artifact".to_owned(),
+                role: None,
+                path: Some(dmb.path.clone()),
+            }],
+        },
+    };
+    let launch = crate::LaunchProvenance {
+        status: decision.status,
+        build_record_id: decision.record_id,
+        dmb_sha256: dmb.sha256,
+        warnings: decision.reasons,
+    };
+    if decision.allowed {
+        Ok(launch)
+    } else {
+        let code = if launch.status == crate::ProvenanceStatus::Stale {
+            "stale_build_artifact"
+        } else {
+            "build_provenance_unavailable"
+        };
+        Err(structured_error(
+            ToolErrorCode::WorkspaceIntegrityViolation,
+            code,
+            Some("Compile the DMB through Meridian-MCP and retry the launch.".to_owned()),
+            json!({"provenance":launch}),
+        ))
+    }
 }
 
 fn canonical_argument(

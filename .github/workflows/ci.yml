@@ -45,10 +45,17 @@ jobs:
       - name: Test Meridian compatibility evidence validation
         shell: pwsh
         run: ./scripts/test-meridian-evidence-validation.ps1
+      - name: Test Codex configuration preservation
+        shell: pwsh
+        run: ./scripts/test-configure-codex-meridian-mcp.ps1
+      - name: Print exact Rust toolchain
+        run: rustc --version --verbose
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
-      - run: cargo build --release
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Portable provenance and evidence gates
+        run: cargo test --locked --test repository_roots --test proc_resolution --test build_provenance --test runtime_integrity --test native_evidence_readers --test native_evidence_timeline --test native_evidence_summary --test native_evidence_comparison
+      - run: cargo test --locked --all-features
+      - run: cargo build --locked --release
       - name: Installed stdio MCP protocol smoke
         shell: pwsh
         run: ./test_mcp.ps1 -SkipBuild -BinaryPath '${{ matrix.binary }}' -Mode development

@@ -70,6 +70,13 @@ const RUNTIME: ToolEffects = ToolEffects {
     network_loopback: true,
     network_external: false,
 };
+const RUNTIME_STATE: ToolEffects = ToolEffects {
+    reads_files: true,
+    writes_files: true,
+    spawns_process: false,
+    network_loopback: false,
+    network_external: false,
+};
 const TOPIC: ToolEffects = ToolEffects {
     reads_files: false,
     writes_files: false,
@@ -114,7 +121,16 @@ macro_rules! contract {
 }
 
 static CONTRACTS: &[ToolContract] = &[
-    contract!(
+	contract!(
+		"dm_server_status",
+		"Report immutable startup policy, build identity, analysis generation, and owned runtime summary.",
+		Analysis,
+		MEMORY,
+		Provisional,
+		None,
+		262_144
+	),
+	contract!(
         "dm_parse_environment",
         "Parse and atomically index a DreamMaker environment.",
         Analysis,
@@ -123,6 +139,17 @@ static CONTRACTS: &[ToolContract] = &[
         None,
         1_048_576
     ),
+    contract!(
+        "dm_check_fixture_sync",
+        "Validate declared fixture source contracts and build provenance.",
+        Analysis,
+        READ,
+        Experimental,
+        None,
+        1_048_576
+    ),
+    contract!("dm_native_evidence_summary", "Summarize bounded redacted native runtime evidence.", Analysis, READ, Experimental, Some(120_000), 1_048_576),
+    contract!("dm_native_evidence_compare", "Compare identity-compatible native evidence runs.", Analysis, READ, Experimental, Some(600_000), 1_048_576),
     contract!(
         "dm_get_type",
         "Inspect an exact DreamMaker type.",
@@ -487,7 +514,7 @@ static CONTRACTS: &[ToolContract] = &[
         "dm_wait_for_output",
         "Wait for bounded server-owned DreamDaemon output.",
         Development,
-        MEMORY,
+        RUNTIME_STATE,
         Provisional,
         Some(300_000),
         1_048_576
@@ -496,7 +523,7 @@ static CONTRACTS: &[ToolContract] = &[
         "dm_stop",
         "Stop the server-owned DreamDaemon process.",
         Development,
-        MEMORY,
+        RUNTIME_STATE,
         Provisional,
         None,
         262_144
@@ -505,7 +532,7 @@ static CONTRACTS: &[ToolContract] = &[
         "dm_status",
         "Inspect server-owned DreamDaemon state.",
         Development,
-        MEMORY,
+        RUNTIME_STATE,
         Provisional,
         None,
         1_048_576

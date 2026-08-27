@@ -5,6 +5,10 @@ param(
 	[Parameter(Mandatory)][string]$AuxtoolsRoot,
 	[Parameter(Mandatory)][string]$DestinationRoot,
 	[string]$InstalledName = 'meridian-mcp-spacemandmm-20260824.exe',
+	[string[]]$WorkspaceRoots = @(),
+	[string[]]$RepositoryRoots = @(),
+	[string]$StateDirectory,
+	[switch]$Development,
 	[switch]$EnableTracy
 )
 
@@ -15,6 +19,24 @@ $manifestPath = (Resolve-Path -LiteralPath $HelperManifestPath).Path
 $auxRoot = (Resolve-Path -LiteralPath $AuxtoolsRoot).Path
 $destination = [IO.Path]::GetFullPath($DestinationRoot)
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
+$resolvedWorkspaceRoots = @($WorkspaceRoots | ForEach-Object {
+	if (-not (Test-Path -LiteralPath $_ -PathType Container)) { throw "Workspace root does not exist: $_" }
+	(Resolve-Path -LiteralPath $_).Path
+} | Select-Object -Unique)
+$resolvedRepositoryRoots = @($RepositoryRoots | ForEach-Object {
+	if (-not (Test-Path -LiteralPath $_ -PathType Container)) { throw "Repository root does not exist: $_" }
+	(Resolve-Path -LiteralPath $_).Path
+} | Select-Object -Unique)
+$resolvedStateDirectory = $null
+if ($Development) {
+	if ([string]::IsNullOrWhiteSpace($StateDirectory)) { throw 'Development mode requires StateDirectory.' }
+	$resolvedStateDirectory = [IO.Path]::GetFullPath($StateDirectory)
+	foreach ($root in $resolvedWorkspaceRoots) {
+		$relative = [IO.Path]::GetRelativePath($root, $resolvedStateDirectory)
+		if ($relative -eq '.' -or (-not $relative.StartsWith('..' + [IO.Path]::DirectorySeparatorChar) -and $relative -ne '..')) { throw 'StateDirectory must be outside every workspace root.' }
+	}
+	New-Item -ItemType Directory -Force -Path $resolvedStateDirectory | Out-Null
+}
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $platform = if ($IsWindows) { 'windows' } elseif ($IsLinux) { 'linux' } else { throw 'Unsupported installation platform.' }
 $hostArchitecture = 'x86_64'
@@ -100,4 +122,18 @@ try {
 } finally {
 	Remove-Item -LiteralPath $manifestTemporary -Force -ErrorAction SilentlyContinue
 }
-[pscustomobject]@{ binary = $installedBinary; helper_manifest = $installedManifestPath; auxtools = $auxTarget; tracy_enabled = [bool]$EnableTracy; binary_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash.ToLowerInvariant() } | ConvertTo-Json
+$configurationEnvironment = [ordered]@{}
+if ($resolvedWorkspaceRoots.Count -gt 0) { $configurationEnvironment.MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, $resolvedWorkspaceRoots) }
+if ($resolvedRepositoryRoots.Count -gt 0) { $configurationEnvironment.MERIDIAN_MCP_REPOSITORIES = [string]::Join([IO.Path]::PathSeparator, $resolvedRepositoryRoots) }
+if ($Development) { $configurationEnvironment.MERIDIAN_MCP_STATE_DIR = $resolvedStateDirectory }
+[pscustomobject]@{
+	binary = $installedBinary
+	helper_manifest = $installedManifestPath
+	auxtools = $auxTarget
+	tracy_enabled = [bool]$EnableTracy
+	binary_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedBinary).Hash.ToLowerInvariant()
+	workspace_roots = $resolvedWorkspaceRoots
+	repository_roots = $resolvedRepositoryRoots
+	state_directory = $resolvedStateDirectory
+	configuration_environment = $configurationEnvironment
+} | ConvertTo-Json

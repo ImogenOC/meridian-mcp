@@ -31,6 +31,19 @@ pub struct ServerLimits {
     pub max_debug_variables: usize,
 }
 
+pub const MAX_EVIDENCE_ARTIFACTS: usize = 32;
+pub const MAX_EVIDENCE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_EVIDENCE_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_EVIDENCE_ROWS: usize = 5_000_000;
+pub const MAX_EVIDENCE_COLUMNS: usize = 512;
+pub const MAX_EVIDENCE_LINE_BYTES: usize = 1024 * 1024;
+pub const MAX_EVIDENCE_STRING_BYTES: usize = 64 * 1024;
+pub const MAX_EVIDENCE_GROUPS: usize = 100_000;
+pub const MAX_EVIDENCE_PHASES: usize = 64;
+pub const MAX_EVIDENCE_SELECTED_METRICS: usize = 64;
+pub const MAX_EVIDENCE_RETURNED_GROUPS: usize = 1_000;
+pub const MAX_EVIDENCE_COMPARISON_RUNS: usize = 20;
+
 impl Default for ServerLimits {
     fn default() -> Self {
         Self {

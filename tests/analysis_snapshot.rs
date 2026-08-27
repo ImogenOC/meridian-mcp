@@ -40,7 +40,7 @@ async fn held_snapshot_survives_a_new_parse_generation() {
         &context,
         &state,
         "dm_parse_environment",
-        json!({ "dme_path": one }),
+        json!({ "dme_path": one.clone() }),
     )
     .await
     .unwrap();
@@ -63,6 +63,7 @@ async fn held_snapshot_survives_a_new_parse_generation() {
     assert!(held.environment_path.ends_with("one.dme"));
     assert!(active.environment_path.ends_with("two.dme"));
     assert!(held.objtree.find("/datum/snapshot_one").is_some());
+    assert_eq!(held.source_inputs(), &[one.canonicalize().unwrap()]);
     std::fs::remove_dir_all(root).unwrap();
 }
 

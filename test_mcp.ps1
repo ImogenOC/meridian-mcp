@@ -300,12 +300,24 @@ $sessionEnvironment = @{
     MERIDIAN_MCP_MODE = $Mode
     MERIDIAN_MCP_ROOTS = [string]::Join([System.IO.Path]::PathSeparator, $workspaceRoots)
 }
-$session = Invoke-McpSession `
-    -BinaryPath $BinaryPath `
-    -WorkingDirectory $repoRoot `
-    -Environment $sessionEnvironment `
-    -Requests $requests `
-    -TimeoutMilliseconds ($TimeoutSeconds * 1000)
+$temporaryStateDirectory = $null
+if ($Mode -eq 'development') {
+    $temporaryStateDirectory = Join-Path ([IO.Path]::GetTempPath()) ('meridian-mcp-smoke-state-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temporaryStateDirectory | Out-Null
+    $sessionEnvironment.MERIDIAN_MCP_STATE_DIR = $temporaryStateDirectory
+}
+try {
+    $session = Invoke-McpSession `
+        -BinaryPath $BinaryPath `
+        -WorkingDirectory $repoRoot `
+        -Environment $sessionEnvironment `
+        -Requests $requests `
+        -TimeoutMilliseconds ($TimeoutSeconds * 1000)
+} finally {
+    if ($temporaryStateDirectory -and (Test-Path -LiteralPath $temporaryStateDirectory)) {
+        Remove-Item -LiteralPath $temporaryStateDirectory -Recurse -Force
+    }
+}
 $sessionExitCode = $session.ExitCode
 if ($sessionExitCode -ne 0) {
     throw "meridian-mcp exited with code $sessionExitCode`n(stderr: $($session.Stderr))"

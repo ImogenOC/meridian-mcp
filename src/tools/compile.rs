@@ -1,15 +1,22 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tracing::info;
 
-use crate::artifact::ArtifactSnapshot;
+use super::ToolExecutionContext;
+use crate::artifact::{ArtifactSnapshot, FileIdentity};
+use crate::build_provenance::{
+    BuildAttempt, BuildAttemptOutcome, BuildInputIdentity, BuildRecord, ProvenanceStatus,
+};
+use crate::fixture_manifest::{FixtureManifest, VerifiedFixtureManifest};
 use crate::mcp::ToolResult;
 use crate::process::{run_contained_process, ProcessSpec, TerminationReason};
+use crate::state::ServerState;
 
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 45_000;
 const MAX_IDLE_TIMEOUT_MS: u64 = 900_000;
@@ -255,7 +262,11 @@ fn compiler_environment() -> Vec<(OsString, OsString)> {
 }
 
 /// Compile a DreamMaker environment
-pub async fn compile(args: Value) -> Result<ToolResult> {
+pub async fn compile(
+    context: &ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
     let dme_path = args
         .get("dme_path")
         .and_then(|v| v.as_str())
@@ -271,6 +282,21 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
         return Ok(ToolResult::error(format!("File not found: {dme_path}")));
     }
     let path = path.canonicalize()?;
+    let snapshot = state.active_snapshot().await;
+    let fixture = args
+        .get("fixture_manifest_path")
+        .and_then(Value::as_str)
+        .map(|path| FixtureManifest::load(context.policy(), Path::new(path)))
+        .transpose()?;
+    if let Some(fixture) = &fixture {
+        if fixture.dme_path != path || fixture.dmb_path != path.with_extension("dmb") {
+            return Ok(ToolResult::structured_error(
+                "fixture_manifest_mismatch",
+                "fixture manifest DME/DMB paths do not match the compile request",
+                "Select the exact manifest for this contained DreamMaker environment.",
+            ));
+        }
+    }
 
     let compiler = args
         .get("compiler_path")
@@ -380,6 +406,24 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
             || artifact_before.modified_unix_ms != artifact_after.modified_unix_ms);
     let timed_out = execution.termination == TerminationReason::WallTimeout;
     let idle = execution.termination == TerminationReason::IdleTimeout;
+    let provenance = record_compile_provenance(
+        context,
+        snapshot.as_deref(),
+        fixture.as_ref(),
+        &path,
+        &compiler,
+        &dmb_path,
+        &artifact_after,
+        success,
+        dmb_updated,
+        if timed_out {
+            "compile_timed_out"
+        } else if idle {
+            "compile_idle_timed_out"
+        } else {
+            "compiler_failed"
+        },
+    )?;
 
     let result = json!({
         "success": success,
@@ -406,7 +450,11 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
         "stderr": stderr,
         "stdout_truncated_bytes": execution.stdout.truncated_bytes,
         "stderr_truncated_bytes": execution.stderr.truncated_bytes,
-        "network_audit": execution.network_audit
+        "network_audit": execution.network_audit,
+        "provenance_status": provenance["status"],
+        "build_record_id": provenance["record_id"],
+        "provenance_reasons": provenance["reasons"],
+        "retained_dmb_sha256": provenance["retained_dmb_sha256"],
     });
 
     if success {
@@ -414,4 +462,155 @@ pub async fn compile(args: Value) -> Result<ToolResult> {
     } else {
         Ok(ToolResult::error(serde_json::to_string_pretty(&result)?))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_compile_provenance(
+    context: &ToolExecutionContext,
+    snapshot: Option<&crate::analysis_snapshot::AnalysisSnapshot>,
+    fixture: Option<&VerifiedFixtureManifest>,
+    dme_path: &Path,
+    compiler: &Path,
+    dmb_path: &Path,
+    artifact_after: &ArtifactSnapshot,
+    success: bool,
+    dmb_updated: bool,
+    failure_code: &str,
+) -> Result<Value> {
+    let Some(store) = context.build_provenance() else {
+        return Ok(json!({
+            "status": "unverified",
+            "record_id": null,
+            "reasons": [{"code": "private_state_unavailable"}],
+            "retained_dmb_sha256": artifact_after.sha256,
+        }));
+    };
+    let matching_snapshot = snapshot.filter(|snapshot| snapshot.environment_path == dme_path);
+    let mut inputs = matching_snapshot
+        .map(|snapshot| collect_build_inputs(snapshot, fixture))
+        .transpose()?
+        .unwrap_or_default();
+    let artifact_key = store.artifact_key(dmb_path)?;
+    let created_at_unix_ms = unix_ms();
+
+    if success && dmb_updated && matching_snapshot.is_some() && artifact_after.exists {
+        let dmb = FileIdentity::capture(dmb_path)?;
+        let rsc_path = fixture
+            .and_then(|fixture| fixture.rsc_path.clone())
+            .unwrap_or_else(|| dme_path.with_extension("rsc"));
+        let rsc = rsc_path
+            .exists()
+            .then(|| FileIdentity::capture(&rsc_path))
+            .transpose()?;
+        if fixture.is_some_and(|fixture| fixture.rsc_path.is_some()) && rsc.is_none() {
+            return Ok(json!({
+                "status": "unverified",
+                "record_id": null,
+                "reasons": [{"code": "required_rsc_missing"}],
+                "retained_dmb_sha256": artifact_after.sha256,
+            }));
+        }
+        inputs.sort_by(|left, right| {
+            (&left.role, &left.relative_path).cmp(&(&right.role, &right.relative_path))
+        });
+        let record_id = random_id()?;
+        let record = BuildRecord {
+            schema: 1,
+            record_id: record_id.clone(),
+            artifact_key: artifact_key.clone(),
+            mcp_build: crate::build_identity::current().clone(),
+            compiler: FileIdentity::capture(compiler)?,
+            project: store.project_identity(dmb_path)?,
+            inputs: inputs.clone(),
+            dmb,
+            rsc,
+            fixture_manifest_sha256: fixture.map(|fixture| fixture.identity_sha256.clone()),
+            created_at_unix_ms,
+        };
+        store.record_success(&record)?;
+        store.record_attempt(&BuildAttempt {
+            schema: 1,
+            attempt_id: random_id()?,
+            artifact_key,
+            outcome: BuildAttemptOutcome::Succeeded,
+            observed_inputs: inputs,
+            retained_dmb_sha256: artifact_after.sha256.clone(),
+            created_at_unix_ms,
+        })?;
+        return Ok(json!({
+            "status": "verified",
+            "record_id": record_id,
+            "reasons": [],
+            "retained_dmb_sha256": artifact_after.sha256,
+        }));
+    }
+
+    if !success && (artifact_after.exists || fixture.is_some()) {
+        store.record_attempt(&BuildAttempt {
+            schema: 1,
+            attempt_id: random_id()?,
+            artifact_key,
+            outcome: BuildAttemptOutcome::Failed {
+                code: failure_code.to_owned(),
+            },
+            observed_inputs: inputs,
+            retained_dmb_sha256: artifact_after.sha256.clone(),
+            created_at_unix_ms,
+        })?;
+        let decision = store.evaluate_launch(dmb_path, false)?;
+        return Ok(json!({
+            "status": match decision.status {
+                ProvenanceStatus::Verified => "verified",
+                ProvenanceStatus::Unverified => "unverified",
+                ProvenanceStatus::Stale => "stale",
+            },
+            "record_id": decision.record_id,
+            "reasons": decision.reasons,
+            "retained_dmb_sha256": artifact_after.sha256,
+        }));
+    }
+
+    Ok(json!({
+        "status": "unverified",
+        "record_id": null,
+        "reasons": [{"code": if matching_snapshot.is_none() {"matching_snapshot_required"} else {"artifact_not_fresh"}}],
+        "retained_dmb_sha256": artifact_after.sha256,
+    }))
+}
+
+fn collect_build_inputs(
+    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
+    fixture: Option<&VerifiedFixtureManifest>,
+) -> Result<Vec<BuildInputIdentity>> {
+    let project_root = snapshot
+        .environment_path
+        .parent()
+        .ok_or_else(|| anyhow!("parsed environment has no project root"))?;
+    let mut roles = BTreeMap::new();
+    for path in snapshot.source_inputs() {
+        roles.insert(path.clone(), "source".to_owned());
+    }
+    if let Some(fixture) = fixture {
+        roles.insert(fixture.manifest_path.clone(), "fixture_manifest".to_owned());
+        for input in &fixture.inputs {
+            roles.insert(input.canonical_path.clone(), input.role.as_str().to_owned());
+        }
+    }
+    roles
+        .into_iter()
+        .map(|(path, role)| BuildInputIdentity::capture(project_root, &path, role))
+        .collect()
+}
+
+fn random_id() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| anyhow!(error.to_string()))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }

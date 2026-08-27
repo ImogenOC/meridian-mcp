@@ -43,6 +43,120 @@ fn ci_builds_embed_the_authoritative_github_revision() {
 }
 
 #[test]
+fn installers_preserve_explicit_repository_and_private_state_configuration() {
+    let configure = fs::read_to_string("scripts/configure-codex-meridian-mcp.ps1").unwrap();
+    let install = fs::read_to_string("scripts/install-meridian-mcp.ps1").unwrap();
+    for required in [
+        "[string[]]$WorkspaceRoots",
+        "[string[]]$RepositoryRoots",
+        "[string]$StateDirectory",
+        "MERIDIAN_MCP_REPOSITORIES",
+        "MERIDIAN_MCP_STATE_DIR",
+        "Test-Path -LiteralPath",
+    ] {
+        assert!(
+            configure.contains(required),
+            "configure script is missing {required}"
+        );
+        assert!(
+            install.contains(required),
+            "installer is missing {required}"
+        );
+    }
+    assert!(!configure.contains("Remove-Item -Recurse"));
+    assert!(!install.contains("Remove-Item -Recurse"));
+    let round_trip = fs::read_to_string("scripts/test-configure-codex-meridian-mcp.ps1").unwrap();
+    for required in [
+        "other",
+        "UNRELATED",
+        "MERIDIAN_MCP_REPOSITORIES",
+        "MERIDIAN_MCP_STATE_DIR",
+    ] {
+        assert!(
+            round_trip.contains(required),
+            "configuration round trip is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn ci_uses_the_exact_locked_portable_gate() {
+    let workflow = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+    for required in [
+        "rustc --version --verbose",
+        "cargo fmt --all -- --check",
+        "cargo clippy --locked --all-targets --all-features -- -D warnings",
+        "cargo test --locked --all-features",
+        "cargo build --locked --release",
+        "native_evidence_readers",
+        "repository_roots",
+        "build_provenance",
+        "runtime_integrity",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "CI workflow is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn development_stdio_smoke_uses_private_temporary_state() {
+    let smoke = fs::read_to_string("test_mcp.ps1").unwrap();
+    for required in [
+        "MERIDIAN_MCP_STATE_DIR",
+        "meridian-mcp-smoke-state-",
+        "if ($Mode -eq 'development')",
+        "Remove-Item -LiteralPath $temporaryStateDirectory",
+    ] {
+        assert!(
+            smoke.contains(required),
+            "development stdio smoke is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn managed_provenance_gate_is_bounded_and_retained() {
+    let script = fs::read_to_string("scripts/run-provenance-integrity-integration.ps1").unwrap();
+    let validator = fs::read_to_string("scripts/test-provenance-evidence-validation.ps1").unwrap();
+    let workflow = fs::read_to_string(".github/workflows/byond-integration.yml").unwrap();
+    for required in [
+        "dm_check_fixture_sync",
+        "dm_compile",
+        "stale_build_artifact",
+        "require_verified_provenance",
+        "source_integrity_warning",
+        "process_stopped",
+        "state_journal_finalized",
+        "owned_processes_remaining",
+    ] {
+        assert!(
+            script.contains(required),
+            "live script is missing {required}"
+        );
+    }
+    for required in ["schema_version", "password", "raw_stdout", "256 KiB"] {
+        assert!(
+            validator.contains(required),
+            "validator is missing {required}"
+        );
+    }
+    for required in [
+        "Run managed provenance and integrity gate",
+        "id: provenance_gate",
+        "integration/evidence/provenance-integrity.json",
+        "if: always()",
+        "PROVENANCE_OUTCOME",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "BYOND workflow is missing {required}"
+        );
+    }
+}
+
+#[test]
 fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
     let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
         .expect("BYOND integration workflow should be readable");

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
@@ -13,6 +13,32 @@ pub struct ArtifactSnapshot {
     pub size: Option<u64>,
     pub modified_unix_ms: Option<u128>,
     pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FileIdentity {
+    pub path: PathBuf,
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl FileIdentity {
+    pub fn capture(path: &Path) -> Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("cannot inspect file identity: {}", path.display()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "file identity requires a regular non-symlink file: {}",
+                path.display()
+            ));
+        }
+        let path = path.canonicalize()?;
+        Ok(Self {
+            path: path.clone(),
+            size: metadata.len(),
+            sha256: hash_file(&path)?,
+        })
+    }
 }
 
 impl ArtifactSnapshot {

@@ -65,6 +65,14 @@ pub(crate) async fn search_context(state: &ServerState, args: Value) -> Result<T
                 ("symbol".to_string(), json!(document.symbol)),
                 ("name".to_string(), json!(document.name)),
                 ("type_path".to_string(), json!(document.type_path)),
+                (
+                    "implementation_owner".to_string(),
+                    json!(document.implementation_owner),
+                ),
+                (
+                    "declaration_owner".to_string(),
+                    json!(document.declaration_owner),
+                ),
                 ("parent".to_string(), json!(document.parent)),
                 ("file".to_string(), json!(document.file)),
                 ("line".to_string(), json!(document.line)),

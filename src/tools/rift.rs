@@ -1,5 +1,9 @@
 use super::ToolExecutionContext;
-use crate::artifact::ArtifactSnapshot;
+use crate::artifact::{ArtifactSnapshot, FileIdentity};
+use crate::build_provenance::{
+    BuildAttempt, BuildAttemptOutcome, BuildInputIdentity, BuildRecord, ProvenanceStatus,
+};
+use crate::fixture_manifest::{FixtureManifest, VerifiedFixtureManifest};
 use crate::mcp::ToolResult;
 use crate::parameters::{RiftCompileParams, RiftNetworkMode};
 use crate::process::{run_contained_process, ProcessOutcome, ProcessSpec, TerminationReason};
@@ -11,6 +15,7 @@ use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -125,6 +130,32 @@ pub async fn compile(
             ));
         }
     };
+    let fixture = match params
+        .fixture_manifest_path
+        .as_deref()
+        .map(|path| FixtureManifest::load(context.policy(), path))
+        .transpose()
+    {
+        Ok(fixture) => fixture,
+        Err(error) => {
+            return Ok(ToolResult::structured_error(
+                "fixture_manifest_invalid",
+                error.to_string(),
+                "Correct the contained declarative fixture manifest and retry.",
+            ));
+        }
+    };
+    if fixture.as_ref().is_some_and(|fixture| {
+        fixture.dme_path != project.dme
+            || fixture.dmb_path != project.dmb
+            || fixture.rsc_path.as_ref() != Some(&project.rsc)
+    }) {
+        return Ok(ToolResult::structured_error(
+            "fixture_manifest_mismatch",
+            "fixture manifest paths do not match the qualified Meridian-Rift build outputs",
+            "Select the exact manifest for this contained project.",
+        ));
+    }
     if state.state_generation().await != generation {
         return Ok(ToolResult::structured_error(
             "state_generation_changed",
@@ -222,6 +253,8 @@ pub async fn compile(
     };
     classify_result(
         context,
+        &snapshot,
+        fixture.as_ref(),
         &profile,
         &project,
         generation,
@@ -402,6 +435,8 @@ fn command_path(path: &Path) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 fn classify_result(
     context: &ToolExecutionContext,
+    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
+    fixture: Option<&VerifiedFixtureManifest>,
     profile: &ProjectProfile,
     project: &ValidatedProject,
     generation: u64,
@@ -445,6 +480,15 @@ fn classify_result(
     };
 
     let recovery = failure_code.map(recovery_for).unwrap_or("");
+    let provenance = record_rift_provenance(
+        context,
+        snapshot,
+        fixture,
+        project,
+        &after,
+        &evidence,
+        failure_code,
+    )?;
     let result = json!({
         "success": failure_code.is_none(),
         "code": failure_code,
@@ -481,6 +525,10 @@ fn classify_result(
         "network_audit": outcome.network_audit,
         "warnings": warnings,
         "recovery": recovery,
+        "provenance_status": provenance["status"],
+        "build_record_id": provenance["record_id"],
+        "provenance_reasons": provenance["reasons"],
+        "retained_dmb_sha256": provenance["retained_dmb_sha256"],
     });
     let text = serde_json::to_string_pretty(&result)?;
     if failure_code.is_some() {
@@ -488,6 +536,130 @@ fn classify_result(
     } else {
         Ok(ToolResult::text(text))
     }
+}
+
+fn record_rift_provenance(
+    context: &ToolExecutionContext,
+    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
+    fixture: Option<&VerifiedFixtureManifest>,
+    project: &ValidatedProject,
+    after: &ArtifactPair,
+    evidence: &BuildEvidence,
+    failure_code: Option<&str>,
+) -> Result<Value> {
+    let Some(store) = context.build_provenance() else {
+        return Ok(json!({
+            "status": "unverified",
+            "record_id": null,
+            "reasons": [{"code": "private_state_unavailable"}],
+            "retained_dmb_sha256": after.dmb.sha256,
+        }));
+    };
+    let mut roles = BTreeMap::new();
+    for path in snapshot.source_inputs() {
+        roles.insert(path.clone(), "source".to_owned());
+    }
+    if let Some(fixture) = fixture {
+        roles.insert(fixture.manifest_path.clone(), "fixture_manifest".to_owned());
+        for input in &fixture.inputs {
+            roles.insert(input.canonical_path.clone(), input.role.as_str().to_owned());
+        }
+    }
+    let mut inputs = roles
+        .into_iter()
+        .map(|(path, role)| BuildInputIdentity::capture(&project.root, &path, role))
+        .collect::<Result<Vec<_>>>()?;
+    inputs.sort_by(|left, right| {
+        (&left.role, &left.relative_path).cmp(&(&right.role, &right.relative_path))
+    });
+    let artifact_key = store.artifact_key(&project.dmb)?;
+    let created_at_unix_ms = rift_unix_ms();
+
+    if matches!(
+        evidence,
+        BuildEvidence::FreshArtifacts | BuildEvidence::ValidCacheHit
+    ) {
+        let record_id = rift_random_id()?;
+        let compiler = context
+            .policy()
+            .compiler_allowlist()
+            .first()
+            .ok_or_else(|| anyhow!("qualified Rift build has no compiler"))?;
+        let record = BuildRecord {
+            schema: 1,
+            record_id: record_id.clone(),
+            artifact_key: artifact_key.clone(),
+            mcp_build: crate::build_identity::current().clone(),
+            compiler: FileIdentity::capture(compiler)?,
+            project: store.project_identity(&project.dmb)?,
+            inputs: inputs.clone(),
+            dmb: FileIdentity::capture(&project.dmb)?,
+            rsc: Some(FileIdentity::capture(&project.rsc)?),
+            fixture_manifest_sha256: fixture.map(|fixture| fixture.identity_sha256.clone()),
+            created_at_unix_ms,
+        };
+        store.record_success(&record)?;
+        store.record_attempt(&BuildAttempt {
+            schema: 1,
+            attempt_id: rift_random_id()?,
+            artifact_key,
+            outcome: BuildAttemptOutcome::Succeeded,
+            observed_inputs: inputs,
+            retained_dmb_sha256: after.dmb.sha256.clone(),
+            created_at_unix_ms,
+        })?;
+        return Ok(json!({
+            "status": "verified",
+            "record_id": record_id,
+            "reasons": [],
+            "retained_dmb_sha256": after.dmb.sha256,
+        }));
+    }
+
+    if after.dmb.exists || fixture.is_some() {
+        store.record_attempt(&BuildAttempt {
+            schema: 1,
+            attempt_id: rift_random_id()?,
+            artifact_key,
+            outcome: BuildAttemptOutcome::Failed {
+                code: failure_code.unwrap_or("insufficient_evidence").to_owned(),
+            },
+            observed_inputs: inputs,
+            retained_dmb_sha256: after.dmb.sha256.clone(),
+            created_at_unix_ms,
+        })?;
+        let decision = store.evaluate_launch(&project.dmb, false)?;
+        return Ok(json!({
+            "status": match decision.status {
+                ProvenanceStatus::Verified => "verified",
+                ProvenanceStatus::Unverified => "unverified",
+                ProvenanceStatus::Stale => "stale",
+            },
+            "record_id": decision.record_id,
+            "reasons": decision.reasons,
+            "retained_dmb_sha256": after.dmb.sha256,
+        }));
+    }
+
+    Ok(json!({
+        "status": "unverified",
+        "record_id": null,
+        "reasons": [{"code": "managed_artifact_missing"}],
+        "retained_dmb_sha256": null,
+    }))
+}
+
+fn rift_random_id() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| anyhow!(error.to_string()))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn rift_unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn valid_artifact(snapshot: &ArtifactSnapshot) -> bool {

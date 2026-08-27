@@ -4,17 +4,20 @@ Run checks from the repository root with PowerShell 7 on Windows or Linux.
 
 ## Rust and contract gates
 
-The checked-in `rust-toolchain.toml` pins Rust 1.95.0 with rustfmt and Clippy, matching CI and the pinned SpacemanDMM workspace MSRV. Do not override that toolchain when reproducing a CI failure; confirm `rustc --version` reports 1.95.0 before trusting a local green result.
+The checked-in `rust-toolchain.toml` pins Rust 1.95.0 with rustfmt and Clippy, matching CI and the pinned SpacemanDMM workspace MSRV. Do not override that toolchain when reproducing a CI failure; confirm the verbose compiler identity before trusting a local green result.
 
 ```powershell
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-cargo build --release
-cargo deny --all-features check
+rustc +1.95.0 --version --verbose
+cargo +1.95.0 fmt --all -- --check
+cargo +1.95.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.95.0 test --locked --all-features
+cargo +1.95.0 build --locked --release
+cargo +1.95.0 deny check
 ```
 
 The suite covers owned DreamMaker and DMM fixtures, parse generations, exact lookup and source excerpts, ranked search, map coordinates and PNG output, path containment, executable allowlisting, overwrite policy, mode inventories, runtime buffering, readiness, `Topic()` framing, generated contract drift, and documentation links.
+
+The repository's checked-in cross-platform text policy is LF, including PowerShell and owned DreamMaker fixtures. Do not rewrite files to CRLF to satisfy a Windows-only observation. Parsers and contract tests that consume external text must accept both LF and CRLF explicitly; use `git diff --check` and the checked-in `.gitattributes` as the repository authority rather than a developer's `core.autocrlf` setting.
 
 ## Tracy native gates
 
@@ -64,6 +67,20 @@ This compiles the purpose-written runtime fixture with DreamMaker. To exercise t
     -MapDmmPath .\tests\fixtures\maps\fixture.dmm
 ```
 
+The managed provenance and runtime-integrity fixture is separate. It compiles only the owned fixture, proves changed-input and failed-compile stale rejection across an MCP restart, restores the original bytes explicitly, then requires a fresh verified launch and reports the tracked runtime mutation without reverting it:
+
+```powershell
+./scripts/run-provenance-integrity-integration.ps1 `
+    -DreamMakerPath 'C:\Program Files (x86)\BYOND\bin\dm.exe' `
+    -BinaryPath ./target/release/meridian-mcp.exe `
+    -EvidencePath ./integration/evidence/local-provenance-integrity.json
+
+./scripts/test-provenance-evidence-validation.ps1 `
+    -EvidencePath ./integration/evidence/local-provenance-integrity.json
+```
+
+The evidence document is schema 1 and bounded to 256 KiB. It omits raw stdout/stderr, absolute profile paths, private-state records, source copies, DMB/RSC files, and player/account identifiers.
+
 The named BYOND 516.1687 workflow separates parser, synthetic runtime, and real Windows product evidence. Verify the parser boundary independently through the release MCP:
 
 ```powershell
@@ -93,6 +110,17 @@ The fixtures are generated in temporary directories and removed after successful
 The hosted workflow uses Ubuntu as the required synthetic BYOND engine lane. Windows synthetic startup remains diagnostic until three consecutive scheduled or manual runs pass. The real Windows Meridian-Rift, auxtools, and Tracy job remains required and has no dependency on the synthetic jobs.
 
 To run the hosted check without opening a pull request, open the repository's **Actions** tab, select **BYOND integration**, choose **Run workflow**, supply the intended Meridian-Rift ref, and start the run. The artifacts are `windows-meridian-compatibility-evidence`, `prototype-parser-windows-evidence`, `prototype-parser-ubuntu-evidence`, `prototype-runtime-windows-evidence`, `prototype-runtime-ubuntu-evidence`, and `tracy-linux-compatibility-evidence`. This environment does not provide the GitHub CLI, so no `gh workflow run` command is asserted here.
+
+Before testing an installation/configuration change, run the parser and private temporary-file round trips:
+
+```powershell
+Get-ChildItem ./scripts -Filter *.ps1 | ForEach-Object {
+    $null = [scriptblock]::Create((Get-Content -LiteralPath $_.FullName -Raw))
+}
+./scripts/test-configure-codex-meridian-mcp.ps1
+./scripts/test-meridian-evidence-validation.ps1
+./scripts/test-provenance-evidence-validation.ps1
+```
 
 ## Meridian-Rift full corpus
 

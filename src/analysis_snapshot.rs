@@ -1,5 +1,6 @@
 use crate::capabilities::SPACEMANDMM_REVISION;
 use crate::index::LanguageIndex;
+use crate::proc_resolution::ProcResolver;
 use crate::search::SearchIndex;
 use crate::spaceman::dmi::{IconReference, IconReferenceResolution};
 use crate::spaceman::language::ReferenceTable;
@@ -113,6 +114,8 @@ pub struct AnalysisBuild {
     pub language_index: LanguageIndex,
     pub reference_table: ReferenceTable,
     pub icon_references: Vec<IconReference>,
+    pub proc_resolver: ProcResolver,
+    pub source_inputs: Vec<PathBuf>,
 }
 
 impl AnalysisBuild {
@@ -149,7 +152,19 @@ impl AnalysisBuild {
                 definition: define.display_with_name(name).to_string(),
             })
             .collect();
-        let language_index = LanguageIndex::build(&extracted_context, &objtree, &macro_definitions);
+        let proc_resolver = ProcResolver::build(&extracted_context, &objtree);
+        let search_index = search_index.with_proc_resolver(&proc_resolver);
+        let source_inputs = build_source_inputs(
+            &extracted_context,
+            &environment_path,
+            project_profile.as_ref(),
+        );
+        let language_index = LanguageIndex::build(
+            &extracted_context,
+            &objtree,
+            &macro_definitions,
+            &proc_resolver,
+        );
         let reference_table = ReferenceTable::build(&objtree);
         let icon_references =
             build_icon_references(&extracted_context, &objtree, &environment_path);
@@ -164,6 +179,8 @@ impl AnalysisBuild {
             language_index,
             reference_table,
             icon_references,
+            proc_resolver,
+            source_inputs,
         }
     }
 }
@@ -179,6 +196,8 @@ pub struct AnalysisSnapshot {
     pub language_index: Arc<LanguageIndex>,
     pub reference_table: Arc<ReferenceTable>,
     pub icon_references: Arc<[IconReference]>,
+    pub proc_resolver: Arc<ProcResolver>,
+    pub source_inputs: Arc<[PathBuf]>,
     pub generation: u64,
     pub spacemandmm_revision: &'static str,
 }
@@ -196,10 +215,44 @@ impl AnalysisSnapshot {
             language_index: Arc::new(build.language_index),
             reference_table: Arc::new(build.reference_table),
             icon_references: Arc::from(build.icon_references),
+            proc_resolver: Arc::new(build.proc_resolver),
+            source_inputs: Arc::from(build.source_inputs),
             generation,
             spacemandmm_revision: SPACEMANDMM_REVISION,
         }
     }
+
+    pub fn proc_resolver(&self) -> &ProcResolver {
+        &self.proc_resolver
+    }
+
+    pub fn source_inputs(&self) -> &[PathBuf] {
+        &self.source_inputs
+    }
+}
+
+fn build_source_inputs(
+    context: &AnalysisContext,
+    environment_path: &Path,
+    profile: Option<&ProjectProfile>,
+) -> Vec<PathBuf> {
+    let project_root = environment_path.parent().unwrap_or_else(|| Path::new("."));
+    let project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_owned());
+    let mut inputs = context.file_paths.values().cloned().collect::<Vec<_>>();
+    inputs.push(environment_path.to_owned());
+    if let Some(config) = profile.and_then(ProjectProfile::spaceman_config) {
+        inputs.push(config.to_owned());
+    }
+    inputs = inputs
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path.is_file() && path.starts_with(&project_root))
+        .collect();
+    inputs.sort();
+    inputs.dedup();
+    inputs
 }
 
 fn build_icon_references(

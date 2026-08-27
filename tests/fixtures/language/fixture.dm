@@ -30,3 +30,21 @@
 
 /datum/fixture_symbol_parent/child/compute(input)
 	return ..(input)
+
+/** Return a parent resolution fixture value.
+ * Arguments:
+ * * value - value to return
+ */
+/datum/proc/meridian_resolution_fixture(value)
+	return "parent [value]"
+
+/datum/meridian_resolution_child
+
+/** Return a child resolution fixture value.
+ * Arguments:
+ * * value - value to return
+ */
+/datum/meridian_resolution_child/meridian_resolution_fixture(value)
+	return "child [value]"
+
+/datum/meridian_resolution_child/grandchild

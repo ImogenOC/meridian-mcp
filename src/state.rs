@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 use tokio::process::Child;
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio::task::JoinHandle;
@@ -13,7 +14,38 @@ pub(crate) const OUTPUT_LOG_CAPACITY: usize = 500;
 pub(crate) const OUTPUT_LINE_MAX_BYTES: usize = 16 * 1024;
 pub(crate) const OUTPUT_LOG_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const OUTPUT_TRUNCATED_SUFFIX: &str = "... [truncated]";
-pub type OutputLog = Arc<StdMutex<VecDeque<String>>>;
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct RuntimeOutputEntry {
+    pub sequence: u64,
+    pub monotonic_offset_ms: u64,
+    pub text: String,
+}
+
+pub struct RuntimeOutputBuffer {
+    pub(crate) entries: VecDeque<RuntimeOutputEntry>,
+    started_at: Instant,
+    next_sequence: u64,
+}
+
+impl Default for RuntimeOutputBuffer {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::with_capacity(OUTPUT_LOG_CAPACITY),
+            started_at: Instant::now(),
+            next_sequence: 1,
+        }
+    }
+}
+
+impl RuntimeOutputBuffer {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.started_at = Instant::now();
+        self.next_sequence = 1;
+    }
+}
+
+pub type OutputLog = Arc<StdMutex<RuntimeOutputBuffer>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,16 +55,42 @@ pub enum RuntimeKind {
 }
 
 pub fn push_output_line(log: &OutputLog, line: String) {
-    let line = truncate_output_line(line);
-    let mut lines = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if lines.len() >= OUTPUT_LOG_CAPACITY {
-        lines.pop_front();
-    }
-    lines.push_back(line);
+    let offset_ms = log
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .started_at
+        .elapsed()
+        .as_millis() as u64;
+    push_output_line_at(log, offset_ms, line);
+}
 
-    while output_log_byte_len(&lines) > OUTPUT_LOG_MAX_BYTES {
-        lines.pop_front();
+pub fn push_output_line_at(log: &OutputLog, monotonic_offset_ms: u64, line: String) {
+    let line = truncate_output_line(line);
+    let mut buffer = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if buffer.entries.len() >= OUTPUT_LOG_CAPACITY {
+        buffer.entries.pop_front();
     }
+    let sequence = buffer.next_sequence;
+    buffer.next_sequence = buffer.next_sequence.saturating_add(1);
+    buffer.entries.push_back(RuntimeOutputEntry {
+        sequence,
+        monotonic_offset_ms,
+        text: line,
+    });
+
+    while output_log_byte_len(&buffer.entries) > OUTPUT_LOG_MAX_BYTES {
+        buffer.entries.pop_front();
+    }
+}
+
+pub fn nearest_output_before(log: &OutputLog, offset_ms: u64) -> Option<RuntimeOutputEntry> {
+    log.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entries
+        .iter()
+        .rev()
+        .find(|entry| entry.monotonic_offset_ms <= offset_ms)
+        .cloned()
 }
 
 fn truncate_output_line(line: String) -> String {
@@ -51,8 +109,8 @@ fn truncate_output_line(line: String) -> String {
     truncated
 }
 
-fn output_log_byte_len(lines: &VecDeque<String>) -> usize {
-    lines.iter().map(|line| line.len()).sum()
+fn output_log_byte_len(lines: &VecDeque<RuntimeOutputEntry>) -> usize {
+    lines.iter().map(|line| line.text.len()).sum()
 }
 
 #[derive(Default)]
@@ -75,6 +133,23 @@ pub struct RuntimeState {
     pub(crate) last_exit_code: Option<i32>,
     pub(crate) kind: Option<RuntimeKind>,
     pub(crate) profiler_port: Option<u16>,
+    pub(crate) launch_provenance: Option<crate::LaunchProvenance>,
+    pub(crate) integrity: Option<Arc<Mutex<crate::runtime_integrity::RuntimeIntegritySession>>>,
+    pub(crate) integrity_stop: Option<tokio::sync::watch::Sender<bool>>,
+    pub(crate) integrity_task: Option<JoinHandle<()>>,
+    pub(crate) integrity_summary: Option<crate::runtime_integrity::RuntimeIntegritySummary>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RuntimeStatus {
+    pub running: bool,
+    pub kind: Option<RuntimeKind>,
+    pub game_port: Option<u16>,
+    pub profiler_port: Option<u16>,
+    pub last_exit_code: Option<i32>,
+    pub recent_output_lines: usize,
+    pub launch_provenance: Option<crate::LaunchProvenance>,
+    pub integrity: Option<crate::runtime_integrity::RuntimeIntegritySummary>,
 }
 
 impl RuntimeState {
@@ -82,20 +157,31 @@ impl RuntimeState {
         Self {
             game_process: None,
             game_port: None,
-            output_log: Arc::new(StdMutex::new(VecDeque::with_capacity(OUTPUT_LOG_CAPACITY))),
+            output_log: OutputLog::default(),
             runtime_output_tasks: Vec::new(),
             last_exit_code: None,
             kind: None,
             profiler_port: None,
+            launch_provenance: None,
+            integrity: None,
+            integrity_stop: None,
+            integrity_task: None,
+            integrity_summary: None,
         }
     }
 
-    pub(crate) fn set_game_process(&mut self, process: Child, port: u16) {
+    pub(crate) fn set_game_process(
+        &mut self,
+        process: Child,
+        port: u16,
+        launch_provenance: crate::LaunchProvenance,
+    ) {
         self.game_process = Some(process);
         self.game_port = Some(port);
         self.last_exit_code = None;
         self.kind = Some(RuntimeKind::Standard);
         self.profiler_port = None;
+        self.launch_provenance = Some(launch_provenance);
     }
 
     pub(crate) fn set_profiled_game_process(
@@ -103,8 +189,9 @@ impl RuntimeState {
         process: Child,
         port: u16,
         profiler_port: u16,
+        launch_provenance: crate::LaunchProvenance,
     ) {
-        self.set_game_process(process, port);
+        self.set_game_process(process, port, launch_provenance);
         self.kind = Some(RuntimeKind::Tracy);
         self.profiler_port = Some(profiler_port);
     }
@@ -138,8 +225,22 @@ impl RuntimeState {
             .output_log
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let start = lines.len().saturating_sub(limit);
-        lines.iter().skip(start).cloned().collect()
+        let start = lines.entries.len().saturating_sub(limit);
+        lines
+            .entries
+            .iter()
+            .skip(start)
+            .map(|entry| entry.text.clone())
+            .collect()
+    }
+
+    pub(crate) fn recent_output_entries(&self, limit: usize) -> Vec<RuntimeOutputEntry> {
+        let lines = self
+            .output_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let start = lines.entries.len().saturating_sub(limit);
+        lines.entries.iter().skip(start).cloned().collect()
     }
 
     pub(crate) fn matches_output(
@@ -177,6 +278,25 @@ impl RuntimeState {
             }
         } else {
             false
+        }
+    }
+
+    pub(crate) fn status_summary(&mut self) -> RuntimeStatus {
+        let running = self.is_game_running();
+        RuntimeStatus {
+            running,
+            kind: self.kind,
+            game_port: self.game_port,
+            profiler_port: self.profiler_port,
+            last_exit_code: self.last_exit_code,
+            recent_output_lines: self
+                .output_log
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .entries
+                .len(),
+            launch_provenance: self.launch_provenance.clone(),
+            integrity: self.integrity_summary.clone(),
         }
     }
 
@@ -354,11 +474,17 @@ mod tests {
 
     #[test]
     fn output_log_evicts_oldest_lines_at_capacity() {
-        let log: OutputLog = Arc::new(StdMutex::new(VecDeque::new()));
+        let log = OutputLog::default();
         for line_number in 0..=OUTPUT_LOG_CAPACITY {
             push_output_line(&log, format!("line {line_number}"));
         }
-        let lines: Vec<String> = log.lock().unwrap().iter().cloned().collect();
+        let lines: Vec<String> = log
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
         assert_eq!(lines.len(), OUTPUT_LOG_CAPACITY);
         assert_eq!(lines.first().map(String::as_str), Some("line 1"));
         assert_eq!(lines.last().map(String::as_str), Some("line 500"));
@@ -366,9 +492,15 @@ mod tests {
 
     #[test]
     fn output_log_truncates_single_lines_to_a_fixed_byte_limit() {
-        let log: OutputLog = Arc::new(StdMutex::new(VecDeque::new()));
+        let log = OutputLog::default();
         push_output_line(&log, "x".repeat(16_384 + 1_000));
-        let lines: Vec<String> = log.lock().unwrap().iter().cloned().collect();
+        let lines: Vec<String> = log
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].len() <= 16_384);
         assert!(lines[0].ends_with("... [truncated]"));
@@ -376,14 +508,17 @@ mod tests {
 
     #[test]
     fn output_log_evicts_oldest_lines_to_keep_total_bytes_bounded() {
-        let log: OutputLog = Arc::new(StdMutex::new(VecDeque::new()));
+        let log = OutputLog::default();
         for line_number in 0..500 {
             push_output_line(&log, format!("{line_number:03}-{}", "x".repeat(4_096)));
         }
         let lines = log.lock().unwrap();
-        let total_bytes: usize = lines.iter().map(|line| line.len()).sum();
+        let total_bytes: usize = lines.entries.iter().map(|line| line.text.len()).sum();
         assert!(total_bytes <= 1_048_576);
-        assert_eq!(lines.back().map(|line| &line[..3]), Some("499"));
+        assert_eq!(
+            lines.entries.back().map(|line| &line.text[..3]),
+            Some("499")
+        );
     }
 
     #[test]
@@ -399,6 +534,16 @@ mod tests {
         );
         assert!(state.matches_output(r"line \d", true).unwrap());
         assert!(state.matches_output("[invalid", true).is_err());
+    }
+
+    #[test]
+    fn nearest_output_uses_monotonic_offsets() {
+        let log = OutputLog::default();
+        push_output_line_at(&log, 100, "phase-start".to_owned());
+        push_output_line_at(&log, 250, "phase-complete".to_owned());
+        let entry = nearest_output_before(&log, 200).unwrap();
+        assert_eq!(entry.sequence, 1);
+        assert_eq!(entry.text, "phase-start");
     }
 
     #[tokio::test]

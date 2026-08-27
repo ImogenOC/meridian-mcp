@@ -1,11 +1,30 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::{EffectiveRoot, RootSource};
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PolicyContext {
+    pub containment_mode: &'static str,
+    pub policy_source: &'static str,
+    pub effective_roots: Vec<EffectiveRoot>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PathPolicyStatus {
+    #[serde(rename = "mode")]
+    pub containment_mode: &'static str,
+    pub policy_source: &'static str,
+    pub effective_roots: Vec<EffectiveRoot>,
+    pub compiler_allowlist: Vec<PathBuf>,
+}
+
 #[derive(Debug)]
 pub struct PolicyError {
     code: &'static str,
     path: PathBuf,
     message: String,
+    context: Box<PolicyContext>,
 }
 
 impl PolicyError {
@@ -14,6 +33,9 @@ impl PolicyError {
     }
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    pub fn context(&self) -> &PolicyContext {
+        &self.context
     }
 }
 
@@ -28,6 +50,7 @@ impl std::error::Error for PolicyError {}
 #[derive(Clone, Debug)]
 pub struct PathPolicy {
     roots: Vec<PathBuf>,
+    effective_roots: Vec<EffectiveRoot>,
     executables: Vec<PathBuf>,
 }
 
@@ -38,10 +61,58 @@ impl PathPolicy {
                 "no_workspace_roots",
                 PathBuf::new(),
                 "no workspace roots configured",
+                empty_context(),
             ));
         }
+        let roots = canonicalize(roots, "invalid_workspace_root")?;
+        let effective_roots = roots
+            .iter()
+            .cloned()
+            .map(|path| EffectiveRoot {
+                path,
+                source: RootSource::ExplicitRoot,
+                repository_identity: None,
+                head_revision: None,
+                dirty: None,
+            })
+            .collect();
         Ok(Self {
-            roots: canonicalize(roots, "invalid_workspace_root")?,
+            roots,
+            effective_roots,
+            executables: canonicalize(executables, "invalid_executable")?,
+        })
+    }
+
+    pub fn from_effective_roots(
+        effective_roots: Vec<EffectiveRoot>,
+        executables: Vec<PathBuf>,
+    ) -> Result<Self, PolicyError> {
+        if effective_roots.is_empty() {
+            return Err(error(
+                "no_workspace_roots",
+                PathBuf::new(),
+                "no workspace roots configured",
+                empty_context(),
+            ));
+        }
+        let mut normalized = Vec::with_capacity(effective_roots.len());
+        for mut root in effective_roots {
+            root.path = root.path.canonicalize().map_err(|source| {
+                error(
+                    "invalid_workspace_root",
+                    root.path.clone(),
+                    format!("cannot resolve {}: {source}", root.path.display()),
+                    empty_context(),
+                )
+            })?;
+            normalized.push(root);
+        }
+        normalized.sort_by(|left, right| left.path.cmp(&right.path));
+        normalized.dedup_by(|left, right| left.path == right.path);
+        let roots = normalized.iter().map(|root| root.path.clone()).collect();
+        Ok(Self {
+            roots,
+            effective_roots: normalized,
             executables: canonicalize(executables, "invalid_executable")?,
         })
     }
@@ -49,7 +120,7 @@ impl PathPolicy {
     pub fn read_path(&self, path: impl AsRef<Path>) -> Result<PathBuf, PolicyError> {
         let input = path.as_ref();
         let canonical = input.canonicalize().map_err(|source| {
-            error(
+            self.error(
                 "path_not_found",
                 input.to_owned(),
                 format!("cannot resolve {}: {source}", input.display()),
@@ -67,7 +138,7 @@ impl PathPolicy {
         if input.exists() {
             let canonical = self.read_path(input)?;
             if !overwrite {
-                return Err(error(
+                return Err(self.error(
                     "output_exists",
                     canonical,
                     "output already exists; set overwrite=true",
@@ -76,21 +147,21 @@ impl PathPolicy {
             return Ok(canonical);
         }
         let parent = input.parent().ok_or_else(|| {
-            error(
+            self.error(
                 "invalid_output_path",
                 input.to_owned(),
                 "output path has no parent",
             )
         })?;
         let parent = parent.canonicalize().map_err(|source| {
-            error(
+            self.error(
                 "output_parent_not_found",
                 parent.to_owned(),
                 format!("cannot resolve output parent: {source}"),
             )
         })?;
         let candidate = parent.join(input.file_name().ok_or_else(|| {
-            error(
+            self.error(
                 "invalid_output_path",
                 input.to_owned(),
                 "output path has no file name",
@@ -102,7 +173,7 @@ impl PathPolicy {
     pub fn executable(&self, path: impl AsRef<Path>) -> Result<PathBuf, PolicyError> {
         let input = path.as_ref();
         let canonical = input.canonicalize().map_err(|_| {
-            error(
+            self.error(
                 "executable_not_allowed",
                 input.to_owned(),
                 "executable is not allowlisted",
@@ -111,7 +182,7 @@ impl PathPolicy {
         if self.executables.contains(&canonical) {
             Ok(canonical)
         } else {
-            Err(error(
+            Err(self.error(
                 "executable_not_allowed",
                 canonical,
                 "executable is not allowlisted",
@@ -131,16 +202,41 @@ impl PathPolicy {
         &self.roots
     }
 
+    pub fn effective_roots(&self) -> &[EffectiveRoot] {
+        &self.effective_roots
+    }
+
+    pub fn status(&self) -> PathPolicyStatus {
+        PathPolicyStatus {
+            containment_mode: "immutable_startup_roots",
+            policy_source: "server_startup_configuration",
+            effective_roots: self.effective_roots.clone(),
+            compiler_allowlist: self.executables.clone(),
+        }
+    }
+
     fn require_contained(&self, path: PathBuf) -> Result<PathBuf, PolicyError> {
         if self.roots.iter().any(|root| path.starts_with(root)) {
             Ok(path)
         } else {
-            Err(error(
+            Err(self.error(
                 "path_outside_workspace",
                 path,
                 "path is outside configured workspace roots",
             ))
         }
+    }
+
+    fn context(&self) -> PolicyContext {
+        PolicyContext {
+            containment_mode: "immutable_startup_roots",
+            policy_source: "server_startup_configuration",
+            effective_roots: self.effective_roots.clone(),
+        }
+    }
+
+    fn error(&self, code: &'static str, path: PathBuf, message: impl Into<String>) -> PolicyError {
+        error(code, path, message, self.context())
     }
 }
 
@@ -153,16 +249,31 @@ fn canonicalize(paths: Vec<PathBuf>, code: &'static str) -> Result<Vec<PathBuf>,
                     code,
                     path.clone(),
                     format!("cannot resolve {}: {source}", path.display()),
+                    empty_context(),
                 )
             })
         })
         .collect()
 }
 
-fn error(code: &'static str, path: PathBuf, message: impl Into<String>) -> PolicyError {
+fn empty_context() -> PolicyContext {
+    PolicyContext {
+        containment_mode: "immutable_startup_roots",
+        policy_source: "server_startup_configuration",
+        effective_roots: Vec::new(),
+    }
+}
+
+fn error(
+    code: &'static str,
+    path: PathBuf,
+    message: impl Into<String>,
+    context: PolicyContext,
+) -> PolicyError {
     PolicyError {
         code,
         path,
         message: message.into(),
+        context: Box::new(context),
     }
 }

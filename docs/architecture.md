@@ -1,6 +1,6 @@
 # Architecture
 
-`main.rs` configures stderr logging and loads immutable `ServerConfig`. `mcp.rs` starts the official `rmcp` stdio transport. `MeridianServer` owns the active mode, canonical `PathPolicy`, and a mutex-protected `ServerState`.
+`main.rs` configures stderr logging and loads immutable `ServerConfig`. `mcp.rs` starts the official `rmcp` stdio transport. `MeridianServer` owns the active mode, canonical `PathPolicy`, and a mutex-protected `ServerState`. Startup expands explicitly configured Git repositories into verified linked-worktree `EffectiveRoot` records before freezing the policy; no tool call can add a root.
 
 The server exposes only contracts active for its startup configuration. Analysis mode contains parsing, indexing, exact lookup, search, diagnostics, and read-only map inspection. Development mode additionally exposes direct compilation, PNG output, DreamDaemon lifecycle, and loopback `Topic()` calls. Windows `rift_compile` is a further conditional contract controlled by the immutable full-build ceiling.
 
@@ -14,9 +14,21 @@ Tool calls cross these boundaries in order:
 
 Direct DreamMaker compilation and Meridian-Rift full builds share bounded output, timeout, process-tree termination, artifact snapshots, and optional observational endpoint auditing. Tool modules retain command construction and acceptance semantics. `dm_compile` runs one allowlisted compiler. `rift_compile` requires a qualified active profile and runs only the canonical `RIFT_BUILD.cmd`, which delegates to the unchanged human build implementation without accepting client-controlled commands.
 
-A successful parse builds the context, object tree, search index, and project profile before replacing state. It then advances `state_generation`. A failed parse retains the complete prior generation and reports `state_preserved: true`.
+Development startup opens one locked private state directory outside every workspace. Successful direct and Rift compilation records the exact repository identity, compiler, parsed source closure, optional declared fixture inputs, and DMB/RSC identities with atomic schema-versioned JSON. Failed attempts are recorded separately and never replace or remove retained artifacts. The shared pre-spawn provenance gate re-hashes the selected DMB and every recorded input: stale managed artifacts are rejected by standard, debugger, and Tracy launchers, while unmanaged artifacts remain explicitly unverified unless the caller requires verification.
+
+`dm_check_fixture_sync` loads a strict contained manifest, reuses the active analysis snapshot only for the exact DME or performs a disposable fixture parse, and checks canonical proc signatures plus tokens in declared text inputs. It performs no build or workspace write.
+
+Native evidence ingestion is a separate read-only pipeline. Explicit format adapters stream or bound-read five fixed artifact kinds into records with independent wall, BYOND-world, and local-index time domains. Timeline assignment never interpolates missing clocks. Redaction runs before technical grouping, statistics use deterministic type-7 percentiles, and comparison re-reads all artifacts and validates managed build/workload identity before calculating metrics.
+
+A successful parse builds the context, object tree, compact proc resolver, canonical language/search indexes, and project profile before replacing state. It then advances `state_generation`. A failed parse retains the complete prior generation and reports `state_preserved: true`.
+
+The proc resolver stores local implementations, declaration locations, and parent links once per parsed type. Resolution walks that immutable snapshot data on demand, selecting the nearest implementation independently from the nearest declaration metadata. Canonical proc records use the implementation owner; response schemas that need declaration provenance carry a separate declaration owner. This avoids both the former child-override/parent-declaration disagreement and a Cartesian cache of every inherited member on every descendant.
+
+`dm_server_status` is an analysis-safe adapter over immutable configuration plus bounded session state. It reports the exact MCP build identity, active optional gates, `immutable_startup_roots` policy, analysis generation and parsed environment when present, and the owned runtime summary. It may refresh a naturally exited child handle, but it does not parse, spawn, stop, write, or contact a Git remote.
 
 Runtime state contains only a DreamDaemon child created by this server, its loopback port, bounded output, reader tasks, and last exit code. Stop and wait operations cannot target arbitrary operating-system processes.
+
+Standard runtime state also owns one private `RuntimeIntegritySession`. Its Git-aware baseline is persisted before spawn; non-Git roots use a bounded manifest fallback. Output observations carry a sequence and monotonic offset, allowing each first-observed mutation to cite the nearest preceding runtime line. A fixed five-second monitor and every explicit lifecycle operation compare against the original baseline. Stop terminates the owned process before finalization, natural exit is finalized by wait/status, and startup inventories unfinished journals without attributing later filesystem state to the dead process.
 
 Tracy is a separately gated runtime kind. Preparation installs a verified x86 hook beside the selected DMB. Launch requires a contained evidence directory, creates a durable integrity journal before starting processes, uses the repository-supported `-params tracy` switch and loopback-only `UTRACY_BIND_*` variables, then starts one schema-2 collector for the runtime lifetime. A drain worker consumes the lossless producer queue; each capture moves through explicit capture-connecting, capturing, validating, and drain-restoring states. One transient handoff is retried within the fixed connection ceiling, capture duration starts only after queue-health readiness, and status exposes the current purpose, retries, queue counters, and hook/prologue validation. The helper reports whether a failed window started and whether draining recovered.
 

@@ -25,8 +25,8 @@ impl MeridianServer {
         let debugger = (config.debugger_access() == crate::DebuggerAccess::Auxtools)
             .then(|| crate::spaceman::debugger::validate_installation(config.compiler_allowlist()))
             .transpose()?;
-        let policy = PathPolicy::new(
-            config.workspace_roots().to_vec(),
+        let policy = PathPolicy::from_effective_roots(
+            config.effective_roots().to_vec(),
             config.compiler_allowlist().to_vec(),
         )?;
         let dmdoc_helper = config
@@ -44,13 +44,20 @@ impl MeridianServer {
                 )
             })
             .transpose()?;
-        let execution = ToolExecutionContext::with_features(
+        let private_state = config
+            .state_directory()
+            .map(|path| {
+                crate::PrivateStateStore::open(path, config.effective_roots()).map(Arc::new)
+            })
+            .transpose()?;
+        let execution = ToolExecutionContext::with_features_and_state(
             config.mode(),
             policy,
             config.rift_build_access(),
             dmdoc_helper,
             debugger,
             tracy,
+            private_state,
         );
         Ok(Self {
             config: Arc::new(config),

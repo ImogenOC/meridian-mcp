@@ -6,6 +6,7 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | --- | --- | --- | --- | ---: | ---: | --- |
 | `dm_audit_icons` | Analysis | Experimental | read | - | 1048576 | Audit parsed icon evidence and duplicate DMI states. |
 | `dm_check_errors` | Analysis | Provisional | memory | - | 1048576 | Run SpacemanDMM DreamChecker diagnostics. |
+| `dm_check_fixture_sync` | Analysis | Experimental | read | - | 1048576 | Validate declared fixture source contracts and build provenance. |
 | `dm_compare_dmi_states` | Analysis | Provisional | read | - | 1048576 | Compare complete DMI states including common lazy changes. |
 | `dm_compile` | Development | Provisional | read, write, process | 1800000 | 1048576 | Run an allowlisted DreamMaker compiler gate. |
 | `dm_debug_control` | Development | Experimental | read, process, loopback | 30000 | 262144 | Pause, continue, or step the active debuggee. |
@@ -38,14 +39,17 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | `dm_list_render_passes` | Analysis | Provisional | memory | - | 262144 | List pinned SpacemanDMM render-pass behavior. |
 | `dm_list_types` | Analysis | Provisional | memory | - | 1048576 | List parsed types under an optional prefix. |
 | `dm_map_info` | Analysis | Provisional | read | - | 1048576 | Read DMM/TGM dimensions and atom statistics. |
+| `dm_native_evidence_compare` | Analysis | Experimental | read | 600000 | 1048576 | Compare identity-compatible native evidence runs. |
+| `dm_native_evidence_summary` | Analysis | Experimental | read | 120000 | 1048576 | Summarize bounded redacted native runtime evidence. |
 | `dm_parse_environment` | Analysis | Provisional | read | - | 1048576 | Parse and atomically index a DreamMaker environment. |
 | `dm_render_map` | Development | Provisional | read, write | - | 262144 | Render a contained DMM/TGM map output. |
 | `dm_render_maps` | Development | Experimental | read, write | - | 1048576 | Render a bounded typed batch of map chunks. |
 | `dm_run` | Development | Provisional | read, write, process, loopback | 300000 | 1048576 | Start a contained DreamDaemon program on loopback. |
 | `dm_search_context` | Analysis | Provisional | read | - | 1048576 | Rank parsed symbols and source context deterministically. |
 | `dm_search_symbols` | Analysis | Provisional | memory | - | 1048576 | Search parsed symbol names. |
-| `dm_status` | Development | Provisional | memory | - | 1048576 | Inspect server-owned DreamDaemon state. |
-| `dm_stop` | Development | Provisional | memory | - | 262144 | Stop the server-owned DreamDaemon process. |
+| `dm_server_status` | Analysis | Provisional | memory | - | 262144 | Report immutable startup policy, build identity, analysis generation, and owned runtime summary. |
+| `dm_status` | Development | Provisional | read, write | - | 1048576 | Inspect server-owned DreamDaemon state. |
+| `dm_stop` | Development | Provisional | read, write | - | 262144 | Stop the server-owned DreamDaemon process. |
 | `dm_topic` | Development | Provisional | loopback | 60000 | 262144 | Call world.Topic on the loopback game server. |
 | `dm_tracy_capture` | Development | Experimental | read, write, process, loopback | 330000 | 1048576 | Rotate the persistent collector for one validated window and publish an atomic `.tracy` plus schema-2 sidecar pair. |
 | `dm_tracy_compare` | Development | Experimental | read, process | 180000 | 1048576 | Compare two traces by proc source identity. |
@@ -57,5 +61,5 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | `dm_tracy_status` | Development | Experimental | memory | - | 262144 | Inspect profiled runtime and capture state. |
 | `dm_tracy_stop` | Development | Experimental | memory | 30000 | 262144 | Stop capture and the profiled DreamDaemon. |
 | `dm_tracy_zone` | Development | Experimental | read, process | 120000 | 1048576 | Inspect one profiled proc across source locations. |
-| `dm_wait_for_output` | Development | Provisional | memory | 300000 | 1048576 | Wait for bounded server-owned DreamDaemon output. |
+| `dm_wait_for_output` | Development | Provisional | read, write | 300000 | 1048576 | Wait for bounded server-owned DreamDaemon output. |
 | `rift_compile` | Development | Provisional | read, write, process, network | 1800000 | 1048576 | Run Meridian-Rift's contained RIFT_BUILD.cmd full-build gate. |

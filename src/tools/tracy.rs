@@ -76,10 +76,23 @@ pub async fn launch(
     state: &crate::state::ServerState,
     args: Value,
 ) -> Result<ToolResult> {
+    let dmb_path = Path::new(required_string(&args, "dmb_path")?);
+    let canonical_dmb = dmb_path.canonicalize()?;
+    let require_verified_provenance = args
+        .get("require_verified_provenance")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let launch_provenance = match super::require_launchable_artifact(
+        context,
+        &canonical_dmb,
+        require_verified_provenance,
+    ) {
+        Ok(provenance) => provenance,
+        Err(result) => return Ok(result),
+    };
     let installation = context
         .tracy()
         .ok_or_else(|| anyhow!("Tracy installation unavailable"))?;
-    let dmb_path = Path::new(required_string(&args, "dmb_path")?);
     let hook_name = installation
         .hook
         .path
@@ -102,7 +115,6 @@ pub async fn launch(
             return Err(anyhow!("an MCP-owned runtime is already active"));
         }
     }
-    let canonical_dmb = dmb_path.canonicalize()?;
     let integrity_root = git_workspace_root(
         canonical_dmb
             .parent()
@@ -158,6 +170,7 @@ pub async fn launch(
         },
         startup_mode: "tracy".to_owned(),
         launch_parameters_sha256,
+        build_record_id: launch_provenance.build_record_id.clone(),
     })?;
     let launch_manifest = ExperimentLaunchManifest {
         schema: 1,
@@ -238,8 +251,9 @@ pub async fn launch(
         .and_then(Value::as_u64)
         .unwrap_or(1337) as u16;
     let runtime_result = super::runtime::run_profiled(
+        context,
         state,
-        json!({"dmb_path":dmb_path,"port":game_port}),
+        json!({"dmb_path":dmb_path,"port":game_port,"require_verified_provenance":require_verified_provenance}),
         profiler_port,
     )
     .await?;
@@ -321,6 +335,7 @@ pub async fn launch(
             "executable_identity":state.tracy_capture().await.experiment.as_ref().map(|experiment| &experiment.executable),
             "integrity_checkpoint":integrity_checkpoint,
             "integrity_journal":state.tracy_capture().await.integrity_journal.as_ref().map(crate::workspace_integrity::IntegrityJournal::summary),
+            "launch_provenance":launch_provenance,
         }),
     ))
 }
@@ -835,7 +850,16 @@ async fn checkpoint_integrity(
 }
 
 pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
-    let (running, kind, game_port, profiler_port, pid, last_exit_code, recent_output) = {
+    let (
+        running,
+        kind,
+        game_port,
+        profiler_port,
+        pid,
+        last_exit_code,
+        recent_output,
+        launch_provenance,
+    ) = {
         let mut runtime = state.runtime().await;
         let running = runtime.is_game_running();
         (
@@ -849,6 +873,7 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
                 .and_then(|process| process.id()),
             runtime.last_exit_code,
             runtime.recent_output(50),
+            runtime.launch_provenance.clone(),
         )
     };
     let mut capture = state.tracy_capture().await;
@@ -883,6 +908,7 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
             "integrity_journal":capture.integrity_journal.as_ref().map(crate::workspace_integrity::IntegrityJournal::summary),
             "collector_stderr_tail":collector_stderr_tail,
             "collector_exit_code":collector_exit_code,
+            "launch_provenance":launch_provenance,
         }),
     ))
 }
@@ -894,6 +920,7 @@ pub async fn stop(
     let pre_stop_checkpoint = checkpoint_integrity(context, state, "pre_stop").await;
     let stop_identities = owned_process_identities(state).await;
     let stop_profiler_port = state.runtime().await.profiler_port;
+    let launch_provenance = state.runtime().await.launch_provenance.clone();
     let mut stop_network_audit = crate::network_audit::NetworkAuditCollector::new(true);
     stop_network_audit.sample(
         &stop_identities
@@ -1038,6 +1065,7 @@ pub async fn stop(
             "pre_stop_integrity_checkpoint":pre_stop_checkpoint.ok().flatten(),
             "post_stop_integrity_checkpoint":post_stop_checkpoint.ok().flatten(),
             "integrity_journal":journal_summary,
+            "launch_provenance":launch_provenance,
         }),
     ))
 }

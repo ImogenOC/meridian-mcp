@@ -226,77 +226,66 @@ pub async fn get_proc(state: &ServerState, args: Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("Missing proc_name argument"))?;
 
-    match objtree.find(type_path) {
-        Some(ty) => {
-            let mut current_type = Some(ty);
-            let mut resolved_type_path = None;
-            while let Some(candidate_type) = current_type {
-                if let Some(proc_entry) = candidate_type.procs.get(proc_name) {
-                    if resolved_type_path.is_none() || proc_entry.declaration.is_some() {
-                        resolved_type_path = Some(candidate_type.path.to_string());
-                    }
-                    if proc_entry.declaration.is_some() {
-                        break;
-                    }
-                }
-                current_type = candidate_type.parent_type();
-            }
-
-            match resolved_type_path {
-                Some(declared_in) => {
-                    let declaring_type = objtree
-                        .find(&declared_in)
-                        .expect("resolved proc owner should remain in the object tree");
-                    let proc = declaring_type
-                        .procs
-                        .get(proc_name)
-                        .expect("resolved proc should remain on its owner");
-                    let values: Vec<Value> = proc.value.iter()
-                        .map(|v| {
-                            let params: Vec<Value> = v.parameters.iter()
-                                .map(|p| {
-                                    json!({
-                                        "name": p.name.to_string(),
-                                        "has_default": p.default.is_some(),
-                                    })
-                                })
-                                .collect();
-
-                            let file_path = get_file_path(context, v.location.file);
-
-                            json!({
-                                "parameters": params,
-                                "documentation": v.docs.text(),
-                                "location": format!("{}:{}:{}",
-                                    file_path,
-                                    v.location.line,
-                                    v.location.column
-                                ),
-                                "has_body": v.code.is_some() || v.body_range.is_some(),
-                                "source": extract_source(
-                                    resolve_source_path(&snapshot, &file_path).to_string_lossy().as_ref(),
-                                    v.location.line,
-                                )
-                            })
-                        })
-                        .collect();
-
-                    let result = json!({
-                        "name": proc_name,
-                        "type_path": type_path,
-                        "declared": declared_in == type_path && proc.declaration.is_some(),
-                        "overrides": values
-                    });
-
-                    Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
-                }
-                None => Ok(ToolResult::error(format!(
-                    "Proc not found: {type_path}/{proc_name}"
-                ))),
-            }
+    let resolution = match snapshot.proc_resolver().resolve(type_path, proc_name) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            return Ok(structured_error(
+                ToolErrorCode::NotFound,
+                error.to_string(),
+                Some("Check the exact type and proc names in the active analysis snapshot.".into()),
+                serde_json::to_value(error)?,
+            ));
         }
-        None => Ok(ToolResult::error(format!("Type not found: {type_path}"))),
+    };
+    let mut values = Vec::with_capacity(resolution.implementations.len());
+    for implementation in &resolution.implementations {
+        let owner = objtree
+            .find(&implementation.owner)
+            .expect("resolved proc owner should remain in the object tree");
+        let proc_ref = owner
+            .iter_self_procs()
+            .find(|proc_ref| {
+                proc_ref.name() == proc_name && proc_ref.index() == implementation.override_index
+            })
+            .expect("resolved proc implementation should remain in the object tree");
+        let value = proc_ref.get();
+        let parameters = value
+            .parameters
+            .iter()
+            .map(|parameter| {
+                json!({
+                    "name": parameter.name.to_string(),
+                    "has_default": parameter.default.is_some(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let file_path = get_file_path(context, value.location.file);
+        values.push(json!({
+            "owner": implementation.owner,
+            "override_index": implementation.override_index,
+            "parameters": parameters,
+            "documentation": value.docs.text(),
+            "location": format!("{}:{}:{}", file_path, value.location.line, value.location.column),
+            "has_body": implementation.has_body,
+            "source": extract_source(
+                resolve_source_path(&snapshot, &file_path).to_string_lossy().as_ref(),
+                value.location.line,
+            ),
+        }));
     }
+
+    let result = json!({
+        "name": proc_name,
+        "type_path": type_path,
+        "requested_type_path": resolution.requested_type_path,
+        "implementation_owner": resolution.implementation_owner,
+        "declaration_owner": resolution.declaration_owner,
+        "resolution_kind": resolution.resolution_kind,
+        "declared": resolution.implementation_owner == type_path,
+        "overrides": values,
+        "resolution_diagnostics": resolution.diagnostics(),
+    });
+    Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
 }
 
 /// Get variable information
@@ -413,6 +402,30 @@ pub async fn search_symbols(state: &ServerState, args: Value) -> Result<ToolResu
         }
     }
 
+    if kind == "all" || kind == "proc" {
+        for resolution in snapshot.proc_resolver().resolutions().filter(|resolution| {
+            resolution.requested_type_path == resolution.implementation_owner
+                && resolution.proc_name.to_lowercase().contains(&query)
+        }) {
+            if results.len() >= limit {
+                break;
+            }
+            let first = resolution
+                .implementations
+                .first()
+                .expect("a resolved procedure has an implementation");
+            results.push(json!({
+                "kind": "proc",
+                "name": resolution.proc_name,
+                "type_path": resolution.implementation_owner,
+                "implementation_owner": resolution.implementation_owner,
+                "declaration_owner": resolution.declaration_owner,
+                "resolution_kind": resolution.resolution_kind,
+                "location": format!("{}:{}", first.location.file, first.location.line),
+            }));
+        }
+    }
+
     for ty in objtree.iter_types() {
         if results.len() >= limit {
             break;
@@ -429,29 +442,6 @@ pub async fn search_symbols(state: &ServerState, args: Value) -> Result<ToolResu
                     ty.location.line
                 )
             }));
-        }
-
-        // Search procs
-        if kind == "all" || kind == "proc" {
-            for (name, proc) in ty.procs.iter() {
-                if results.len() >= limit {
-                    break;
-                }
-                if name.to_lowercase().contains(&query) {
-                    if let Some(first) = proc.value.first() {
-                        let file_path = get_file_path(context, first.location.file);
-                        results.push(json!({
-                            "kind": "proc",
-                            "name": name.to_string(),
-                            "type_path": ty.path.to_string(),
-                            "location": format!("{}:{}",
-                                file_path,
-                                first.location.line
-                            )
-                        }));
-                    }
-                }
-            }
         }
 
         // Search vars

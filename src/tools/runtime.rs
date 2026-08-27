@@ -84,17 +84,22 @@ fn readiness_succeeded(readiness: &Value) -> bool {
 }
 
 /// Start DreamDaemon with a .dmb file
-pub async fn run(state: &ServerState, args: Value) -> Result<ToolResult> {
+pub async fn run(
+    context: &super::ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
     let _lifecycle = state.lifecycle().await;
     if state.debugger().await.is_some() {
         return Err(anyhow!(
             "a debugger session is active; stop it before launching DreamDaemon"
         ));
     }
-    run_internal(state, args, None).await
+    run_internal(context, state, args, None).await
 }
 
 pub(crate) async fn run_profiled(
+    context: &super::ToolExecutionContext,
     state: &ServerState,
     args: Value,
     profiler_port: u16,
@@ -105,14 +110,20 @@ pub(crate) async fn run_profiled(
             "a debugger session is active; stop it before launching Tracy"
         ));
     }
-    run_internal(state, args, Some(profiler_port)).await
+    run_internal(context, state, args, Some(profiler_port)).await
 }
 
 async fn run_internal(
+    context: &super::ToolExecutionContext,
     state: &ServerState,
     args: Value,
     profiler_port: Option<u16>,
 ) -> Result<ToolResult> {
+    let active_snapshot = if profiler_port.is_none() {
+        state.active_snapshot().await
+    } else {
+        None
+    };
     let mut state = state.runtime().await;
     // Check if already running
     if state.is_game_running() {
@@ -172,6 +183,15 @@ async fn run_internal(
         extra_args.extend(["-params".to_owned(), "tracy".to_owned()]);
     }
 
+    let require_verified = args
+        .get("require_verified_provenance")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let launch_provenance =
+        match super::require_launchable_artifact(context, &path, require_verified) {
+            Ok(provenance) => provenance,
+            Err(result) => return Ok(result),
+        };
     let dreamdaemon = find_dreamdaemon()
         .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?;
 
@@ -181,6 +201,7 @@ async fn run_internal(
         port
     );
     state.clear_runtime_diagnostics();
+    state.integrity_summary = None;
 
     // Start DreamDaemon. The DMB path is canonicalized and the daemon runs from its parent so
     // relative config, log, and map paths resolve against the game checkout rather than the MCP
@@ -190,6 +211,24 @@ async fn run_internal(
     let log_start_offset = std::fs::metadata(&log_path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
+    if profiler_port.is_none() {
+        if let Some(store) = context.private_state_arc() {
+            let protected_root = active_snapshot
+                .as_ref()
+                .filter(|snapshot| snapshot.environment_path.with_extension("dmb") == path)
+                .and_then(|snapshot| snapshot.environment_path.parent())
+                .unwrap_or(working_directory)
+                .to_owned();
+            let session = crate::runtime_integrity::RuntimeIntegritySession::create(
+                store,
+                &protected_root,
+                launch_provenance.clone(),
+                Arc::clone(&state.output_log),
+                vec![log_path.clone()],
+            )?;
+            state.integrity = Some(Arc::new(tokio::sync::Mutex::new(session)));
+        }
+    }
     let mut command = Command::new(&dreamdaemon);
     command
         .args(&daemon_args)
@@ -203,16 +242,28 @@ async fn run_internal(
             .env("UTRACY_BIND_ADDRESS", "127.0.0.1")
             .env("UTRACY_BIND_PORT", profiler_port.to_string());
     }
-    let mut child = command.spawn()?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = finalize_standard_integrity(&mut state, "spawn_failed").await;
+            return Err(error.into());
+        }
+    };
 
     let pid = child.id();
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     if let Some(profiler_port) = profiler_port {
-        state.set_profiled_game_process(child, port, profiler_port);
+        state.set_profiled_game_process(child, port, profiler_port, launch_provenance.clone());
     } else {
-        state.set_game_process(child, port);
+        state.set_game_process(child, port, launch_provenance.clone());
+        if let Some(session) = state.integrity.clone() {
+            session.lock().await.set_process_id(pid)?;
+            let (stop, receiver) = tokio::sync::watch::channel(false);
+            state.integrity_stop = Some(stop);
+            state.integrity_task = Some(crate::runtime_integrity::spawn_monitor(session, receiver));
+        }
     }
 
     if let Some(stdout) = stdout {
@@ -244,11 +295,13 @@ async fn run_internal(
 
     // Check if it's actually running
     if !state.is_game_running() {
+        let integrity = finalize_standard_integrity(&mut state, "launch_failed").await?;
         return Ok(ToolResult::error(
             json!({
                 "message": "DreamDaemon process exited immediately. Check the DMB file.",
                 "last_exit_code": state.last_exit_code,
-                "recent_output": state.recent_output(50)
+                "recent_output": state.recent_output(50),
+                "integrity": integrity
             })
             .to_string(),
         ));
@@ -262,6 +315,7 @@ async fn run_internal(
         "working_directory": working_directory.display().to_string(),
         "runtime_kind": if profiler_port.is_some() { "tracy" } else { "standard" },
         "profiler_port": profiler_port,
+        "launch_provenance": launch_provenance,
         "message": format!("DreamDaemon started on port {}", port)
     });
 
@@ -279,11 +333,42 @@ async fn run_internal(
         if !readiness_succeeded(&result["readiness"]) {
             result["success"] = json!(false);
             result["process_stopped"] = json!(state.stop_game_process().await.is_ok());
+            result["integrity"] =
+                json!(finalize_standard_integrity(&mut state, "launch_failed").await?);
             return Ok(ToolResult::error(result.to_string()));
         }
     }
 
+    if let Some(session) = &state.integrity {
+        let summary = session.lock().await.observe_now("launch_ready").await?;
+        state.integrity_summary = Some(summary.clone());
+        result["integrity"] = json!(summary);
+    }
+
     Ok(ToolResult::text(result.to_string()))
+}
+
+async fn finalize_standard_integrity(
+    state: &mut RuntimeState,
+    action: &'static str,
+) -> Result<Option<crate::runtime_integrity::RuntimeIntegritySummary>> {
+    if let Some(summary) = &state.integrity_summary {
+        if summary.status != crate::runtime_integrity::RuntimeIntegrityStatus::Active {
+            return Ok(Some(summary.clone()));
+        }
+    }
+    if let Some(stop) = state.integrity_stop.take() {
+        let _ = stop.send(true);
+    }
+    if let Some(task) = state.integrity_task.take() {
+        let _ = task.await;
+    }
+    let Some(session) = &state.integrity else {
+        return Ok(None);
+    };
+    let summary = session.lock().await.finalize(action).await?;
+    state.integrity_summary = Some(summary.clone());
+    Ok(Some(summary))
 }
 
 async fn capture_output_stream<R>(mut stream: R, output_log: OutputLog)
@@ -474,6 +559,19 @@ pub async fn wait_for_output(state: &ServerState, args: Value) -> Result<ToolRes
         .unwrap_or(DEFAULT_OUTPUT_WAIT_TIMEOUT_MS);
 
     let result = wait_for_output_value(&mut state, pattern, use_regex, timeout_ms).await?;
+    let integrity = if state.is_game_running() {
+        if let Some(session) = &state.integrity {
+            Some(session.lock().await.observe_now("wait_for_output").await?)
+        } else {
+            None
+        }
+    } else {
+        finalize_standard_integrity(&mut state, "natural_exit").await?
+    };
+    let mut result = result;
+    result["integrity"] = json!(integrity);
+    result["launch_provenance"] = json!(state.launch_provenance);
+    result["recent_output_entries"] = json!(state.recent_output_entries(50));
     Ok(ToolResult::text(result.to_string()))
 }
 
@@ -570,7 +668,13 @@ mod tests {
 
         capture_output_stream(&input[..], Arc::clone(&log)).await;
 
-        let lines: Vec<String> = log.lock().unwrap().iter().cloned().collect();
+        let lines: Vec<String> = log
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
         assert_eq!(
             lines,
             vec!["ready".to_string(), "partial without newline".to_string(),]
@@ -584,7 +688,13 @@ mod tests {
 
         capture_output_stream(input.as_bytes(), Arc::clone(&log)).await;
 
-        let lines: Vec<String> = log.lock().unwrap().iter().cloned().collect();
+        let lines: Vec<String> = log
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].len() <= 16_384);
         assert!(lines[0].ends_with("... [truncated]"));
@@ -643,8 +753,9 @@ mod tests {
                 if log
                     .lock()
                     .unwrap()
+                    .entries
                     .iter()
-                    .any(|line| line == "new run ready")
+                    .any(|line| line.text == "new run ready")
                 {
                     break;
                 }
@@ -655,7 +766,12 @@ mod tests {
         .expect("appended log output should be captured");
 
         task.abort();
-        assert!(!log.lock().unwrap().iter().any(|line| line == "old run"));
+        assert!(!log
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|line| line.text == "old run"));
         std::fs::remove_file(path).unwrap();
     }
 }
@@ -663,21 +779,32 @@ mod tests {
 /// Stop the running DreamDaemon instance
 pub async fn stop(state: &ServerState, _args: Value) -> Result<ToolResult> {
     let mut state = state.runtime().await;
-    if !state.is_game_running() {
+    let was_running = state.is_game_running();
+    if !was_running && state.integrity.is_none() {
         return Ok(ToolResult::error("No game instance is currently running."));
     }
 
-    match state.stop_game_process().await {
-        Ok(()) => Ok(ToolResult::text(
-            json!({
-                "success": true,
-                "message": "DreamDaemon stopped"
-            })
-            .to_string(),
-        )),
-        Err(e) => Ok(ToolResult::error(format!(
-            "Failed to stop DreamDaemon: {e}"
-        ))),
+    let process_stopped = if was_running {
+        state.stop_game_process().await.is_ok()
+    } else {
+        false
+    };
+    let integrity = finalize_standard_integrity(&mut state, "stopped").await?;
+    let result = json!({
+        "success": !was_running || process_stopped,
+        "process_stopped": process_stopped,
+        "message": "DreamDaemon stopped",
+        "launch_provenance": state.launch_provenance,
+        "integrity": integrity,
+        "warnings": integrity.as_ref().map(|summary| &summary.warnings).unwrap_or(&Vec::new()),
+    });
+    if integrity
+        .as_ref()
+        .is_some_and(|summary| !summary.violations.is_empty())
+    {
+        Ok(ToolResult::error(result.to_string()))
+    } else {
+        Ok(ToolResult::text(result.to_string()))
     }
 }
 
@@ -685,12 +812,16 @@ pub async fn stop(state: &ServerState, _args: Value) -> Result<ToolResult> {
 pub async fn status(state: &ServerState, _args: Value) -> Result<ToolResult> {
     let mut state = state.runtime().await;
     if !state.is_game_running() {
+        let integrity = finalize_standard_integrity(&mut state, "natural_exit").await?;
         return Ok(ToolResult::text(
             json!({
                 "running": false,
                 "runtime_kind": state.kind,
                 "last_exit_code": state.last_exit_code,
-                "recent_output": state.recent_output(50)
+                "launch_provenance": state.launch_provenance,
+                "integrity": integrity,
+                "recent_output": state.recent_output(50),
+                "recent_output_entries": state.recent_output_entries(50)
             })
             .to_string(),
         ));
@@ -698,6 +829,11 @@ pub async fn status(state: &ServerState, _args: Value) -> Result<ToolResult> {
 
     let port = state.game_port.unwrap_or(0);
     let pid = state.game_process.as_ref().map(|p| p.id());
+    let integrity = if let Some(session) = &state.integrity {
+        Some(session.lock().await.observe_now("status").await?)
+    } else {
+        None
+    };
 
     Ok(ToolResult::text(
         json!({
@@ -706,7 +842,10 @@ pub async fn status(state: &ServerState, _args: Value) -> Result<ToolResult> {
             "port": port,
             "profiler_port": state.profiler_port,
             "pid": pid,
-            "recent_output": state.recent_output(50)
+            "recent_output": state.recent_output(50),
+            "recent_output_entries": state.recent_output_entries(50),
+            "launch_provenance": state.launch_provenance,
+            "integrity": integrity
         })
         .to_string(),
     ))

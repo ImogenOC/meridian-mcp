@@ -54,52 +54,67 @@ pub async fn get_definition(state: &ServerState, args: Value) -> Result<ToolResu
         Some(ty) => {
             if let Some(member) = member_name {
                 let mut current = Some(ty);
+                let mut variable = None;
                 while let Some(t) = current {
                     if let Some(var) = t.vars.get(member) {
                         if var.declaration.is_some() {
-                            let file_path = get_file_path(context, var.value.location.file);
-                            let result = json!({
-                                "kind": "var",
-                                "name": member,
-                                "type_path": type_path,
-                                "defined_in": t.path,
-                                "file": file_path,
-                                "line": var.value.location.line,
-                                "column": var.value.location.column
-                                ,"declaration_kind": "var",
-                                "resolved_type_owner": t.path,
-                                "state_generation": snapshot.generation,
-                                "spacemandmm_revision": snapshot.spacemandmm_revision
-                            });
-                            return Ok(ToolResult::text(serde_json::to_string_pretty(&result)?));
+                            variable = Some((
+                                t.path.to_string(),
+                                get_file_path(context, var.value.location.file),
+                                var.value.location.line,
+                                var.value.location.column,
+                            ));
+                            break;
                         }
                     }
-
-                    if let Some(proc) = t.procs.get(member) {
-                        if proc.declaration.is_some() {
-                            if let Some(first) = proc.value.first() {
-                                let file_path = get_file_path(context, first.location.file);
-                                let result = json!({
-                                    "kind": "proc",
-                                    "name": member,
-                                    "type_path": type_path,
-                                    "defined_in": t.path,
-                                    "file": file_path,
-                                    "line": first.location.line,
-                                    "column": first.location.column
-                                    ,"declaration_kind": "proc",
-                                    "resolved_type_owner": t.path,
-                                    "state_generation": snapshot.generation,
-                                    "spacemandmm_revision": snapshot.spacemandmm_revision
-                                });
-                                return Ok(ToolResult::text(serde_json::to_string_pretty(
-                                    &result,
-                                )?));
-                            }
-                        }
-                    }
-
                     current = t.parent_type();
+                }
+
+                let procedure = snapshot.proc_resolver().resolve(type_path, member).ok();
+                if variable.is_some() && procedure.is_some() {
+                    return Ok(ToolResult::error(format!(
+                        "Ambiguous member {type_path}/{member}: both variable and procedure declarations exist"
+                    )));
+                }
+                if let Some(resolution) = procedure {
+                    let first = resolution
+                        .implementations
+                        .first()
+                        .expect("a resolved procedure has an implementation");
+                    let result = json!({
+                        "kind": "proc",
+                        "name": member,
+                        "type_path": type_path,
+                        "defined_in": resolution.implementation_owner,
+                        "file": first.location.file,
+                        "line": first.location.line,
+                        "column": first.location.column,
+                        "declaration_kind": "proc",
+                        "resolved_type_owner": resolution.implementation_owner,
+                        "implementation_owner": resolution.implementation_owner,
+                        "declaration_owner": resolution.declaration_owner,
+                        "resolution_kind": resolution.resolution_kind,
+                        "resolution_diagnostics": resolution.diagnostics(),
+                        "state_generation": snapshot.generation,
+                        "spacemandmm_revision": snapshot.spacemandmm_revision,
+                    });
+                    return Ok(ToolResult::text(serde_json::to_string_pretty(&result)?));
+                }
+                if let Some((owner, file_path, line, column)) = variable {
+                    let result = json!({
+                        "kind": "var",
+                        "name": member,
+                        "type_path": type_path,
+                        "defined_in": owner,
+                        "file": file_path,
+                        "line": line,
+                        "column": column,
+                        "declaration_kind": "var",
+                        "resolved_type_owner": owner,
+                        "state_generation": snapshot.generation,
+                        "spacemandmm_revision": snapshot.spacemandmm_revision,
+                    });
+                    return Ok(ToolResult::text(serde_json::to_string_pretty(&result)?));
                 }
 
                 Ok(ToolResult::error(format!(

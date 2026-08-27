@@ -1,24 +1,52 @@
 use meridian_mcp::{CapabilityMode, MeridianServer, RiftBuildAccess, ServerConfig};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SERVER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn server(mode: &str, access: RiftBuildAccess) -> MeridianServer {
-    let root =
-        std::env::temp_dir().join(format!("meridian-mcp-mode-{mode}-{}", std::process::id()));
+    let sequence = SERVER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "meridian-mcp-mode-{mode}-{}-{sequence}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&root).unwrap();
+    let state = std::env::temp_dir().join(format!(
+        "meridian-mcp-mode-state-{mode}-{}-{sequence}",
+        std::process::id()
+    ));
+    if mode == "development" {
+        std::fs::create_dir_all(&state).unwrap();
+    }
     let access = match access {
         RiftBuildAccess::Disabled => None,
         RiftBuildAccess::Offline => Some("offline"),
         RiftBuildAccess::Network => Some("network"),
     };
     MeridianServer::new(
-        ServerConfig::from_values_with_rift_build(Some(mode), vec![root], Vec::new(), access)
-            .unwrap(),
+        ServerConfig::from_values_with_rift_build_and_state(
+            Some(mode),
+            vec![root],
+            Vec::new(),
+            access,
+            (mode == "development").then_some(state),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
 
 fn tracy_server() -> MeridianServer {
-    let root = std::env::temp_dir().join(format!("meridian-mcp-tracy-mode-{}", std::process::id()));
+    let sequence = SERVER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "meridian-mcp-tracy-mode-{}-{sequence}",
+        std::process::id()
+    ));
+    let state = std::env::temp_dir().join(format!(
+        "meridian-mcp-tracy-state-{}-{sequence}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&state).unwrap();
     std::fs::create_dir_all(root.join("helpers")).unwrap();
     let server_helper = root.join("helpers/server-helper.exe");
     let hook = root.join("helpers/prof.dll");
@@ -39,13 +67,14 @@ fn tracy_server() -> MeridianServer {
     )
     .unwrap();
     MeridianServer::new(
-        ServerConfig::from_values_with_features(
+        ServerConfig::from_values_with_features_and_state(
             Some("development"),
             vec![root],
             Vec::new(),
             None,
             Some("byond"),
             Some(manifest),
+            Some(state),
         )
         .unwrap(),
     )
@@ -58,8 +87,8 @@ fn mode_inventories_are_exact_and_exclude_removed_protocol() {
     let development = server("development", RiftBuildAccess::Disabled).tool_names();
     let development_offline = server("development", RiftBuildAccess::Offline).tool_names();
     let development_network = server("development", RiftBuildAccess::Network).tool_names();
-    assert_eq!(analysis.len(), 20);
-    assert_eq!(development.len(), 29);
+    assert_eq!(analysis.len(), 24);
+    assert_eq!(development.len(), 33);
     for tool in [
         "dm_document_symbols",
         "dm_find_references",
@@ -70,6 +99,9 @@ fn mode_inventories_are_exact_and_exclude_removed_protocol() {
         "dm_audit_icons",
         "dm_diff_maps",
         "dm_list_render_passes",
+        "dm_check_fixture_sync",
+        "dm_native_evidence_summary",
+        "dm_native_evidence_compare",
     ] {
         assert!(
             analysis.contains(&tool.to_owned()),
@@ -84,6 +116,8 @@ fn mode_inventories_are_exact_and_exclude_removed_protocol() {
         );
     }
     assert!(analysis.contains(&"dm_parse_environment".to_owned()));
+    assert!(analysis.contains(&"dm_server_status".to_owned()));
+    assert!(development.contains(&"dm_server_status".to_owned()));
     assert!(!analysis.contains(&"dm_compile".to_owned()));
     assert!(development.contains(&"dm_compile".to_owned()));
     assert!(!development.contains(&"dm_connect_test".to_owned()));
@@ -124,6 +158,7 @@ fn rift_compile_schema_has_no_caller_controlled_paths_or_commands() {
             "idle_timeout_ms",
             "capture_network",
             "force_rebuild",
+            "fixture_manifest_path",
         ]
         .into_iter()
         .collect()
@@ -218,4 +253,23 @@ fn tracy_inventory_is_opt_in_and_exposes_fixed_command_tools_only() {
         control.input_schema["properties"]["comparison_mode"]["enum"],
         serde_json::json!(["same_experiment_same_phase", "cross_experiment"])
     );
+}
+
+#[test]
+fn all_runtime_launch_schemas_expose_the_same_provenance_override() {
+    let definitions = meridian_mcp::tools::get_tool_definitions();
+    for name in ["dm_run", "dm_debug_launch", "dm_tracy_launch"] {
+        let tool = definitions
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(
+            tool.input_schema["properties"]["require_verified_provenance"]["type"], "boolean",
+            "{name}"
+        );
+        assert_eq!(
+            tool.input_schema["properties"]["require_verified_provenance"]["default"], false,
+            "{name}"
+        );
+    }
 }

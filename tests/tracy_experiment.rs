@@ -27,6 +27,7 @@ fn executable() -> ExecutableIdentity {
         },
         startup_mode: "trusted".into(),
         launch_parameters_sha256: "aa".repeat(32),
+        build_record_id: Some("managed-build".into()),
     })
     .unwrap()
 }
