@@ -129,12 +129,17 @@ pub async fn launch(
             ..Default::default()
         })?;
     }
-    let dreamdaemon = super::runtime::find_dreamdaemon()
-        .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?
-        .canonicalize()?;
+    let dreamdaemon =
+        super::runtime::find_dreamdaemon_for_compilers(context.policy().compiler_allowlist())
+            .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?
+            .canonicalize()?;
+    let readiness_timeout_ms = args
+        .get("startup_timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(60_000);
     let launch_parameters_sha256 = canonical_sha256(&json!({
         "game_port": args.get("game_port").and_then(Value::as_u64).unwrap_or(1337),
-        "startup_timeout_ms": args.get("startup_timeout_ms").and_then(Value::as_u64),
+        "startup_timeout_ms": readiness_timeout_ms,
         "profiler_transport": "loopback_ephemeral",
     }))?;
     let rsc_path = canonical_dmb.with_extension("rsc");
@@ -281,7 +286,10 @@ pub async fn launch(
             return Err(error.into());
         }
     };
-    let readiness = match collector.session_start("127.0.0.1", profiler_port).await {
+    let readiness = match collector
+        .session_start("127.0.0.1", profiler_port, readiness_timeout_ms)
+        .await
+    {
         Ok(readiness) => readiness,
         Err(error) => {
             let stderr_tail = collector.stderr_tail().await;

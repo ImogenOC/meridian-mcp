@@ -50,6 +50,26 @@ pub(crate) fn find_dreamdaemon() -> Option<PathBuf> {
     None
 }
 
+pub(crate) fn find_dreamdaemon_for_compilers(compilers: &[PathBuf]) -> Option<PathBuf> {
+    for compiler in compilers {
+        let Some(directory) = compiler.parent() else {
+            continue;
+        };
+        for executable_name in ["dreamdaemon.exe", "DreamDaemon"] {
+            let candidate = directory.join(executable_name);
+            if candidate.is_file() {
+                return Some(
+                    candidate
+                        .canonicalize()
+                        .map(|path| normalize_spawn_path(&path))
+                        .unwrap_or(candidate),
+                );
+            }
+        }
+    }
+    find_dreamdaemon()
+}
+
 fn build_dreamdaemon_args(dmb_path: &Path, port: u16, extra_args: &[String]) -> Vec<String> {
     let mut arguments = vec![
         dmb_path.display().to_string(),
@@ -192,7 +212,7 @@ async fn run_internal(
             Ok(provenance) => provenance,
             Err(result) => return Ok(result),
         };
-    let dreamdaemon = find_dreamdaemon()
+    let dreamdaemon = find_dreamdaemon_for_compilers(context.policy().compiler_allowlist())
         .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?;
 
     info!(
@@ -601,6 +621,32 @@ mod tests {
             normalize_spawn_path(unc_verbatim),
             PathBuf::from(r"\\server\share\tgstation.dmb")
         );
+    }
+
+    #[test]
+    fn configured_compiler_resolves_its_sibling_dreamdaemon() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "meridian-mcp-byond-installation-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let compiler = root.join("dm.exe");
+        let daemon = root.join("dreamdaemon.exe");
+        std::fs::write(&compiler, b"compiler").unwrap();
+        std::fs::write(&daemon, b"daemon").unwrap();
+
+        assert_eq!(
+            find_dreamdaemon_for_compilers(std::slice::from_ref(&compiler)),
+            Some(daemon.clone())
+        );
+
+        std::fs::remove_file(compiler).unwrap();
+        std::fs::remove_file(daemon).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

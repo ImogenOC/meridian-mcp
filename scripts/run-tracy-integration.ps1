@@ -47,7 +47,7 @@ $requests = @(
 	(ConvertTo-McpJsonLine ([ordered]@{ jsonrpc = '2.0'; method = 'notifications/initialized'; params = [ordered]@{} })),
 	(ConvertTo-McpJsonLine ([ordered]@{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = [ordered]@{} })),
 	(Request 3 'dm_tracy_prepare' @{ dmb_path = $dmb }),
-	(Request 4 'dm_tracy_launch' @{ dmb_path = $dmb; game_port = 14569; experiment_directory = $fixtureRoot }),
+	(Request 4 'dm_tracy_launch' @{ dmb_path = $dmb; game_port = 14569; startup_timeout_ms = 60000; experiment_directory = $fixtureRoot }),
 	(Request 5 'dm_tracy_status' @{}),
 	(Request 6 'dm_tracy_capture' @{ output_path = $traces[0]; duration_ms = $duration_ms; memory_limit_mb = 256; capture_network = $true; phase = 'immediate'; phase_iteration = 1 }),
 	(Request 7 'dm_tracy_capture' @{ output_path = $traces[1]; duration_ms = $duration_ms; memory_limit_mb = 256; capture_network = $true; phase = 'steady_state'; phase_iteration = 1 }),

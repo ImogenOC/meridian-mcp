@@ -126,7 +126,7 @@ jobs:
         id: auxtools_gate
         continue-on-error: true
         shell: pwsh
-        run: ./scripts/run-auxtools-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -EvidencePath ./integration/evidence/auxtools-compatibility.json -DmbPath ./integration/Meridian-Rift/tgstation.dmb -HostMode headless
+        run: ./scripts/run-auxtools-integration.ps1 -DreamMakerPath "$env:RUNNER_TEMP\byond\byond\bin\dm.exe" -BinaryPath ./target/release/meridian-mcp.exe -EvidencePath ./integration/evidence/auxtools-compatibility.json -HostMode headless
       - name: Run live Tracy profiler gate
         id: tracy_gate
         continue-on-error: true

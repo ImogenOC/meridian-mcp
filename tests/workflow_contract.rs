@@ -405,7 +405,6 @@ fn byond_workflow_uses_the_516_1687_runtime_baseline() {
         "ead0906ae8a26c18a7525da7490127a2110f7c58f18293738283e30e97c6ea4b",
         "scripts/run-large-prototype-integration.ps1",
         "scripts/run-auxtools-integration.ps1",
-        "-DmbPath ./integration/Meridian-Rift/tgstation.dmb",
         "cargo clean",
     ] {
         assert!(
@@ -416,6 +415,10 @@ fn byond_workflow_uses_the_516_1687_runtime_baseline() {
     assert!(
         !workflow.contains("Install BYOND 516.1685"),
         "the workflow still names the obsolete BYOND baseline"
+    );
+    assert!(
+        !workflow.contains("-DmbPath ./integration/Meridian-Rift/tgstation.dmb"),
+        "the native debugger gate must not use the full game as its protocol fixture"
     );
 }
 

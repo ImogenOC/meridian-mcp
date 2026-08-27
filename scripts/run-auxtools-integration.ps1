@@ -3,7 +3,7 @@ param(
 	[Parameter(Mandatory)][string]$DreamMakerPath,
 	[Parameter(Mandatory)][string]$BinaryPath,
 	[Parameter(Mandatory)][string]$EvidencePath,
-	[Parameter(Mandatory)][string]$DmbPath,
+	[string]$DmbPath,
 	[ValidateSet('interactive', 'headless')][string]$HostMode = 'headless'
 )
 
@@ -14,7 +14,20 @@ $compiler = (Resolve-Path -LiteralPath $DreamMakerPath).Path
 $binary = (Resolve-Path -LiteralPath $BinaryPath).Path
 Import-Module (Join-Path $PSScriptRoot 'MeridianMcpSession.psm1') -Force
 
-$dmb = (Resolve-Path -LiteralPath $DmbPath).Path
+$ownedFixture = [string]::IsNullOrWhiteSpace($DmbPath)
+$ownedFixtureArtifacts = @()
+if ($ownedFixture) {
+	$fixtureRoot = (Resolve-Path -LiteralPath (Join-Path $mcpRoot 'tests/fixtures/auxtools')).Path
+	& $compiler (Join-Path $fixtureRoot 'auxtools.dme')
+	$dmbCandidate = Join-Path $fixtureRoot 'auxtools.dmb'
+	if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dmbCandidate -PathType Leaf)) {
+		throw 'The owned auxtools fixture did not compile.'
+	}
+	$dmb = (Resolve-Path -LiteralPath $dmbCandidate).Path
+	$ownedFixtureArtifacts = @('auxtools.dmb', 'auxtools.rsc', 'auxtools.pdb', 'auxtools.log') | ForEach-Object { Join-Path $fixtureRoot $_ }
+} else {
+	$dmb = (Resolve-Path -LiteralPath $DmbPath).Path
+}
 $runtimeRoot = (Split-Path -Parent $dmb)
 $hostExecutableName = if ($HostMode -eq 'headless') { 'dreamdaemon.exe' } else { 'dreamseeker.exe' }
 $hostExecutable = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $compiler) $hostExecutableName)).Path
@@ -51,6 +64,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $evidenceFile) | O
 $evidence = [ordered]@{
 	schema_version = 2
 	overall = 'failed'
+	fixture_kind = if ($ownedFixture) { 'owned_protocol_fixture' } else { 'supplied_dmb' }
 	host_mode = $HostMode
 	host_executable = $hostExecutableName
 	host_sha256 = (Get-FileHash -LiteralPath $hostExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -91,4 +105,7 @@ try {
 } finally {
 	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 5) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 	Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
+	foreach ($artifact in $ownedFixtureArtifacts) {
+		Remove-Item -LiteralPath $artifact -Force -ErrorAction SilentlyContinue
+	}
 }

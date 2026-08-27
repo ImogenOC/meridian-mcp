@@ -107,9 +107,21 @@ The parser gate uses a compact flat declaration layout and resolves the first, b
 
 The fixtures are generated in temporary directories and removed after successful gates. DreamDaemon uses an ephemeral port bound to `127.0.0.1`; the synthetic world is never intentionally exposed beyond the runner. A readiness marker is required; a successful DreamMaker compile or live process alone is insufficient. Evidence classifies `passed`, `compile_failure`, `environment_failure`, `boundary_regression`, or `inconclusive_timeout` and retains bounded process metrics, logs, events, version provenance, and cleanup state.
 
-The hosted workflow uses Ubuntu as the required synthetic BYOND engine lane. Windows synthetic startup remains diagnostic until three consecutive scheduled or manual runs pass. The real Windows Meridian-Rift, auxtools, and Tracy job remains required and has no dependency on the synthetic jobs.
+The hosted workflow uses Ubuntu as the required synthetic BYOND engine lane. Windows synthetic startup remains diagnostic until three consecutive scheduled or manual runs pass. The Windows job independently requires real Meridian-Rift compatibility, the owned auxtools protocol fixture, and the owned Tracy live fixture; it has no dependency on the synthetic jobs.
 
-To run the hosted check without opening a pull request, open the repository's **Actions** tab, select **BYOND integration**, choose **Run workflow**, supply the intended Meridian-Rift ref, and start the run. The artifacts are `windows-meridian-compatibility-evidence`, `prototype-parser-windows-evidence`, `prototype-parser-ubuntu-evidence`, `prototype-runtime-windows-evidence`, `prototype-runtime-ubuntu-evidence`, and `tracy-linux-compatibility-evidence`. This environment does not provide the GitHub CLI, so no `gh workflow run` command is asserted here.
+Run the auxtools protocol gate without a full-game boot:
+
+```powershell
+.\scripts\run-auxtools-integration.ps1 `
+    -DreamMakerPath 'C:\path\to\BYOND\bin\dm.exe' `
+    -BinaryPath .\target\release\meridian-mcp.exe `
+    -EvidencePath .\integration\evidence\auxtools-compatibility.json `
+    -HostMode headless
+```
+
+Supplying `-DmbPath` remains an explicit full-game diagnostic. It is not the required native protocol gate because repository initialization time is unrelated to auxtools wire compatibility.
+
+To run the hosted check without opening a pull request, open the repository's **Actions** tab, select **BYOND integration**, choose **Run workflow**, supply the intended Meridian-Rift ref, and start the run. The artifacts are `windows-meridian-compatibility-evidence`, `prototype-parser-windows-evidence`, `prototype-parser-ubuntu-evidence`, `prototype-runtime-windows-evidence`, `prototype-runtime-ubuntu-evidence`, and `tracy-linux-compatibility-evidence`.
 
 Before testing an installation/configuration change, run the parser and private temporary-file round trips:
 

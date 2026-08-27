@@ -233,6 +233,10 @@ fn tracy_inventory_is_opt_in_and_exposes_fixed_command_tools_only() {
         .find(|tool| tool.name == "dm_tracy_launch")
         .unwrap();
     assert!(launch.input_schema["properties"]["experiment_directory"].is_object());
+    assert_eq!(
+        launch.input_schema["properties"]["startup_timeout_ms"]["default"],
+        60_000
+    );
     assert!(launch.input_schema["required"]
         .as_array()
         .unwrap()

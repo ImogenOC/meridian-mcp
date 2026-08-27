@@ -752,7 +752,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ),
         (
             "startup_timeout_ms".into(),
-            json!({"type":"integer","minimum":1000,"maximum":60000}),
+            json!({"type":"integer","minimum":1000,"maximum":60000,"default":60000,"description":"Maximum time for both the Tracy client connection and producer-health readiness."}),
         ),
         (
             "experiment_directory".into(),

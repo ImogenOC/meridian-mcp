@@ -345,16 +345,16 @@ impl TracyCollector {
         })
     }
 
-    pub async fn session_start(&self, host: &str, port: u16) -> Result<Value, TracyProtocolError> {
+    pub async fn session_start(
+        &self,
+        host: &str,
+        port: u16,
+        readiness_timeout_ms: u64,
+    ) -> Result<Value, TracyProtocolError> {
         self.transport
             .request(
                 "session_start",
-                serde_json::json!({
-                    "host": host,
-                    "port": port,
-                    "connect_timeout_ms": 15_000,
-                    "progress_timeout_ms": 15_000,
-                }),
+                session_start_parameters(host, port, readiness_timeout_ms),
             )
             .await
     }
@@ -436,9 +436,28 @@ impl TracyCollector {
     }
 }
 
+fn session_start_parameters(host: &str, port: u16, readiness_timeout_ms: u64) -> Value {
+    serde_json::json!({
+        "host": host,
+        "port": port,
+        "connect_timeout_ms": readiness_timeout_ms,
+        "progress_timeout_ms": readiness_timeout_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_start_parameters_preserve_the_requested_readiness_timeout() {
+        let parameters = session_start_parameters("127.0.0.1", 8086, 60_000);
+
+        assert_eq!(parameters["host"], "127.0.0.1");
+        assert_eq!(parameters["port"], 8086);
+        assert_eq!(parameters["connect_timeout_ms"], 60_000);
+        assert_eq!(parameters["progress_timeout_ms"], 60_000);
+    }
 
     #[test]
     fn helper_error_reports_whether_the_measurement_window_started() {
