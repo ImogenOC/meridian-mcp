@@ -13,7 +13,20 @@ const TEMPORARY_NAME_ATTEMPTS: usize = 32;
 
 pub struct PrivateStateStore {
     root: PathBuf,
-    _lock: File,
+    operation_lock_path: PathBuf,
+}
+
+struct OperationLock {
+    _file: File,
+}
+
+pub(crate) struct PrivateStateReadTransaction<'a> {
+    store: &'a PrivateStateStore,
+    _operation: OperationLock,
+}
+
+pub(crate) struct PrivateStateLivenessLock {
+    _file: File,
 }
 
 impl PrivateStateStore {
@@ -33,12 +46,29 @@ impl PrivateStateStore {
         }
 
         let lock_path = root.join(".meridian-mcp.lock");
+        if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                bail!("private state lock must be a regular file");
+            }
+        }
         let lock = OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&lock_path)
-            .with_context(|| format!("private state directory is locked: {}", root.display()))?;
-        Ok(Self { root, _lock: lock })
+            .with_context(|| {
+                format!("could not open private state lock: {}", lock_path.display())
+            })?;
+        let lock_metadata = std::fs::symlink_metadata(&lock_path)?;
+        if !lock_metadata.is_file() || lock_metadata.file_type().is_symlink() {
+            bail!("private state lock must be a regular file");
+        }
+        drop(lock);
+        Ok(Self {
+            root,
+            operation_lock_path: lock_path,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -46,6 +76,7 @@ impl PrivateStateStore {
     }
 
     pub fn write_json_atomic<T: Serialize>(&self, relative: &str, value: &T) -> Result<PathBuf> {
+        let _operation = self.lock_operation()?;
         let output = self.resolve_record(relative, true)?;
         let bytes = serde_json::to_vec_pretty(value)?;
         if bytes.len() > MAX_RECORD_BYTES {
@@ -60,7 +91,7 @@ impl PrivateStateStore {
             file.sync_all()?;
             drop(file);
             install_temporary(&temporary, &output)?;
-            let installed: serde_json::Value = self.read_json(relative)?;
+            let installed: serde_json::Value = self.read_json_unlocked(relative)?;
             drop(installed);
             Ok(())
         })();
@@ -72,8 +103,28 @@ impl PrivateStateStore {
     }
 
     pub fn read_json<T: DeserializeOwned>(&self, relative: &str) -> Result<T> {
+        self.read_transaction()?.read_json(relative)
+    }
+
+    fn read_json_unlocked<T: DeserializeOwned>(&self, relative: &str) -> Result<T> {
         let path = self.resolve_record(relative, false)?;
-        let metadata = std::fs::symlink_metadata(&path)?;
+        self.read_json_path(&path)
+    }
+
+    fn read_json_optional_unlocked<T: DeserializeOwned>(
+        &self,
+        relative: &str,
+    ) -> Result<Option<T>> {
+        let path = self.resolve_record(relative, false)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => self.read_json_path(&path).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn read_json_path<T: DeserializeOwned>(&self, path: &Path) -> Result<T> {
+        let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             bail!("private state record is not a regular file");
         }
@@ -91,6 +142,7 @@ impl PrivateStateStore {
     }
 
     pub fn list_records(&self, namespace: &str, max_entries: usize) -> Result<Vec<PathBuf>> {
+        let _operation = self.lock_operation()?;
         let maximum = max_entries.min(MAX_RECORDS);
         let directory = self.resolve_record(namespace, false)?;
         if !directory.is_dir() {
@@ -117,6 +169,86 @@ impl PrivateStateStore {
         }
         records.sort();
         Ok(records)
+    }
+
+    pub(crate) fn read_transaction(&self) -> Result<PrivateStateReadTransaction<'_>> {
+        Ok(PrivateStateReadTransaction {
+            store: self,
+            _operation: self.lock_operation()?,
+        })
+    }
+
+    pub(crate) fn acquire_liveness_lock(&self, relative: &str) -> Result<PrivateStateLivenessLock> {
+        let file = self.open_liveness_file(relative)?;
+        file.lock().with_context(|| {
+            format!("could not acquire private state liveness lock: {relative}")
+        })?;
+        Ok(PrivateStateLivenessLock { _file: file })
+    }
+
+    pub(crate) fn try_acquire_liveness_lock(
+        &self,
+        relative: &str,
+    ) -> Result<Option<PrivateStateLivenessLock>> {
+        let file = self.open_liveness_file(relative)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(PrivateStateLivenessLock { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error).with_context(|| {
+                format!("could not acquire private state liveness lock: {relative}")
+            }),
+        }
+    }
+
+    fn open_liveness_file(&self, relative: &str) -> Result<File> {
+        let _operation = self.lock_operation()?;
+        let path = self.resolve_record(relative, true)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                bail!("private state liveness lock must be a regular file");
+            }
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "could not open private state liveness lock: {}",
+                    path.display()
+                )
+            })?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("private state liveness lock must be a regular file");
+        }
+        Ok(file)
+    }
+
+    fn lock_operation(&self) -> Result<OperationLock> {
+        let metadata = std::fs::symlink_metadata(&self.operation_lock_path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("private state lock must be a regular file");
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.operation_lock_path)
+            .with_context(|| {
+                format!(
+                    "could not open private state lock: {}",
+                    self.operation_lock_path.display()
+                )
+            })?;
+        let metadata = std::fs::symlink_metadata(&self.operation_lock_path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("private state lock must be a regular file");
+        }
+        file.lock()
+            .with_context(|| format!("could not lock private state: {}", self.root.display()))?;
+        Ok(OperationLock { _file: file })
     }
 
     fn resolve_record(&self, relative: &str, create_parent: bool) -> Result<PathBuf> {
@@ -150,9 +282,16 @@ impl PrivateStateStore {
     }
 }
 
-impl Drop for PrivateStateStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.root.join(".meridian-mcp.lock"));
+impl PrivateStateReadTransaction<'_> {
+    pub(crate) fn read_json<T: DeserializeOwned>(&self, relative: &str) -> Result<T> {
+        self.store.read_json_unlocked(relative)
+    }
+
+    pub(crate) fn read_json_optional<T: DeserializeOwned>(
+        &self,
+        relative: &str,
+    ) -> Result<Option<T>> {
+        self.store.read_json_optional_unlocked(relative)
     }
 }
 

@@ -184,20 +184,23 @@ impl BuildProvenanceStore {
             )
         };
         let location_path = format!("locations/{}.json", location_key(&dmb_path)?);
-        let location_file = self.state.root().join(&location_path);
-        if !location_file.is_file() {
+        let transaction = self.state.read_transaction()?;
+        let Some(location): Option<ArtifactLocation> =
+            transaction.read_json_optional(&location_path)?
+        else {
             return Ok(unverified(require_verified));
-        }
-        let location: ArtifactLocation = self.state.read_json(&location_path)?;
+        };
         if location.schema != 1 || location.artifact_key.len() != 64 {
             bail!("managed artifact location record is invalid");
         }
-        let record: BuildRecord = self
-            .state
-            .read_json(&format!("builds/{}.json", location.artifact_key))?;
+        let record: BuildRecord =
+            transaction.read_json(&format!("builds/{}.json", location.artifact_key))?;
         if record.schema != 1 {
             bail!("managed build record schema is unsupported");
         }
+        let attempt: Option<BuildAttempt> =
+            transaction.read_json_optional(&format!("attempts/{}.json", record.artifact_key))?;
+        drop(transaction);
 
         let mut reasons = Vec::new();
         let current_project = self.project_identity(&dmb_path)?;
@@ -236,9 +239,7 @@ impl BuildProvenanceStore {
             compare_output(rsc, "rsc_changed", "the managed RSC changed", &mut reasons);
         }
 
-        let attempt_path = format!("attempts/{}.json", record.artifact_key);
-        if self.state.root().join(&attempt_path).is_file() {
-            let attempt: BuildAttempt = self.state.read_json(&attempt_path)?;
+        if let Some(attempt) = attempt {
             if attempt.created_at_unix_ms > record.created_at_unix_ms
                 && matches!(attempt.outcome, BuildAttemptOutcome::Failed { .. })
             {

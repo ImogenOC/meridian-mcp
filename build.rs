@@ -8,6 +8,15 @@ fn main() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
+    for path in git_paths(&[
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
     let revision = std::env::var("MERIDIAN_BUILD_REVISION")
         .ok()
         .or_else(|| git_output(&["rev-parse", "HEAD"]))
@@ -37,4 +46,19 @@ fn git_output(arguments: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_paths(arguments: &[&str]) -> Vec<std::path::PathBuf> {
+    let Ok(output) = Command::new("git").args(arguments).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| std::path::PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .collect()
 }

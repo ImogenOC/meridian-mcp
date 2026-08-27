@@ -1,6 +1,9 @@
 use meridian_mcp::{EffectiveRoot, PrivateStateStore, RootSource};
 use serde_json::{json, Value};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 
 struct StateFixture {
     base: PathBuf,
@@ -70,4 +73,53 @@ fn atomic_records_survive_reopen_and_reject_traversal() {
         1
     );
     assert_eq!(reopened.list_records("builds", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn multiple_store_instances_share_one_private_state_directory() {
+    let fixture = StateFixture::new("concurrent-open");
+    let first = PrivateStateStore::open(&fixture.state, &fixture.roots()).unwrap();
+    let second = PrivateStateStore::open(&fixture.state, &fixture.roots()).unwrap();
+
+    first
+        .write_json_atomic("builds/first.json", &json!({"writer": "first"}))
+        .unwrap();
+    second
+        .write_json_atomic("builds/second.json", &json!({"writer": "second"}))
+        .unwrap();
+
+    assert_eq!(
+        second.read_json::<Value>("builds/first.json").unwrap()["writer"],
+        "first"
+    );
+    assert_eq!(first.list_records("builds", 10).unwrap().len(), 2);
+}
+
+#[test]
+fn write_waits_for_the_cross_process_operation_lock() {
+    let fixture = StateFixture::new("operation-lock");
+    let lock_path = fixture.state.join(".meridian-mcp.lock");
+    let external_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .unwrap();
+    external_lock.lock().unwrap();
+    let store = PrivateStateStore::open(&fixture.state, &fixture.roots()).unwrap();
+    let (sender, receiver) = mpsc::channel();
+
+    let writer = std::thread::spawn(move || {
+        let result = store.write_json_atomic("builds/blocked.json", &json!({"complete": true}));
+        sender.send(result).unwrap();
+    });
+
+    assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+    external_lock.unlock().unwrap();
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    writer.join().unwrap();
 }

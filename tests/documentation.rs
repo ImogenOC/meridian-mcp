@@ -168,7 +168,7 @@ fn release_operations_document_provenance_and_private_state_boundaries() {
     }
     for required in [
         "Managed build provenance",
-        "exclusive process lock",
+        "operation-scoped cross-process locks",
         "known-stale",
     ] {
         assert!(

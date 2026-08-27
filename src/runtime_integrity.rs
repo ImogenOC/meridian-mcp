@@ -1,9 +1,10 @@
+use crate::private_state::PrivateStateLivenessLock;
 use crate::state::{nearest_output_before, OutputLog, RuntimeOutputEntry};
 use crate::workspace_integrity::{
     compare_snapshots, FileIdentity, MutationKind, WorkspaceSnapshot,
 };
 use crate::{LaunchProvenance, PrivateStateStore};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,7 @@ pub struct RuntimeIntegritySummary {
 pub struct RuntimeIntegritySession {
     store: Arc<PrivateStateStore>,
     record_name: String,
+    _liveness: PrivateStateLivenessLock,
     output_log: OutputLog,
     owned_paths: Vec<PathBuf>,
     started_at: Instant,
@@ -83,6 +85,7 @@ impl RuntimeIntegritySession {
         let baseline = WorkspaceSnapshot::capture(protected_root)?;
         let session_id = random_id()?;
         let record_name = format!("runtime-integrity/{session_id}.json");
+        let liveness = store.acquire_liveness_lock(&liveness_record_name(&session_id)?)?;
         let document = RuntimeIntegrityJournal {
             schema: 1,
             session_id,
@@ -98,6 +101,7 @@ impl RuntimeIntegritySession {
         Ok(Self {
             store,
             record_name,
+            _liveness: liveness,
             output_log,
             owned_paths,
             started_at: Instant::now(),
@@ -227,6 +231,15 @@ pub fn recover_unfinished(
         if document.status != RuntimeIntegrityStatus::Active {
             continue;
         }
+        let Some(_liveness) =
+            store.try_acquire_liveness_lock(&liveness_record_name(&document.session_id)?)?
+        else {
+            continue;
+        };
+        document = store.read_json(&relative)?;
+        if document.status != RuntimeIntegrityStatus::Active {
+            continue;
+        }
         if !effective_roots
             .iter()
             .any(|root| document.protected_root.starts_with(&root.path))
@@ -240,6 +253,17 @@ pub fn recover_unfinished(
         summaries.push(summary_from_document(&document));
     }
     Ok(summaries)
+}
+
+fn liveness_record_name(session_id: &str) -> Result<String> {
+    if session_id.len() != 32
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("runtime integrity session ID is invalid");
+    }
+    Ok(format!("runtime-integrity-locks/{session_id}.lock"))
 }
 
 fn summary_from_document(document: &RuntimeIntegrityJournal) -> RuntimeIntegritySummary {
