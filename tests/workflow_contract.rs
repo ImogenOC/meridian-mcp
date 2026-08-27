@@ -114,7 +114,7 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
         "workflow_dispatch:",
         "meridian_ref:",
         "schedule:",
-        "runs-on: windows-2025",
+        "runs-on: windows-2022",
         "actions/checkout@v7",
         "AphelionDevelopment/Meridian-Rift",
         "path: integration/Meridian-Rift",
