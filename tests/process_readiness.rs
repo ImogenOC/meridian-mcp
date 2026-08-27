@@ -161,8 +161,9 @@ fn readiness_marker_can_arrive_after_the_launcher_exits() {
         format!(
             r#"$ErrorActionPreference = 'Stop'
 Import-Module -Force '{}'
-$markerWriter = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoLogo', '-NoProfile', '-File', '{}', '{}') -PassThru
 $launcher = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 100') -PassThru
+$launcher.WaitForExit()
+$markerWriter = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoLogo', '-NoProfile', '-File', '{}', '{}') -PassThru
 try {{
 	$result = Wait-ProcessReadiness -Process $launcher -MarkerPath '{}' -ExpectedMarker 'READY' -TimeoutSeconds 3
 	if ($result.status -ne 'ready') {{ throw "Unexpected status: $($result.status)" }}
