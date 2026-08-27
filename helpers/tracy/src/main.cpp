@@ -160,7 +160,7 @@ int run_single_request()
 	}
 	catch(const ProtocolError& error)
 	{
-		write_response(error_response(id, error.code(), error.what()), output_mutex);
+		write_response(error_response(id, error.code(), error.what(), error.details()), output_mutex);
 		return 2;
 	}
 	catch(const std::exception& error)
@@ -215,6 +215,8 @@ int run_session()
 						{
 							auto response = error_response(id, "invalid_capture", "Capture failed mandatory validation.");
 							response["error"]["details"] = validation_json(result.capture.validation);
+							response["error"]["details"]["window_started"] = true;
+							response["error"]["details"]["collector_recovered"] = result.status.phase == SessionPhase::Draining;
 							write_response(response, output_mutex);
 						}
 						else
@@ -222,7 +224,7 @@ int run_session()
 							write_response(success_response(id, capture_result_json(result)), output_mutex);
 						}
 					}
-					catch(const ProtocolError& error) { write_response(error_response(id, error.code(), error.what()), output_mutex); }
+					catch(const ProtocolError& error) { write_response(error_response(id, error.code(), error.what(), error.details()), output_mutex); }
 					catch(const std::exception& error) { write_response(error_response(id, "tracy_failure", error.what()), output_mutex); }
 				});
 				break;
@@ -233,7 +235,7 @@ int run_session()
 			default: write_response(success_response(id, dispatch_offline(request)), output_mutex); break;
 			}
 		}
-		catch(const ProtocolError& error) { write_response(error_response(id, error.code(), error.what()), output_mutex); }
+		catch(const ProtocolError& error) { write_response(error_response(id, error.code(), error.what(), error.details()), output_mutex); }
 		catch(const std::exception& error) { write_response(error_response(id, "tracy_failure", error.what()), output_mutex); }
 	}
 	try { static_cast<void>(session.stop()); } catch(...) {}

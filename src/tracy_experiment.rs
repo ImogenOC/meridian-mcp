@@ -75,12 +75,14 @@ pub struct ExperimentIdentity {
 pub struct ExperimentLaunchManifest {
     pub schema: u32,
     pub experiment_name: Option<String>,
+    pub meridian_mcp_build: crate::build_identity::BuildIdentity,
     pub executable: ExecutableIdentity,
     pub workload_draft: WorkloadInput,
 }
 
 #[derive(Clone, Debug)]
 pub struct ExperimentState {
+    pub directory: std::path::PathBuf,
     pub launch_manifest_sha256: String,
     pub launch_manifest_path: std::path::PathBuf,
     pub identity_manifest_path: std::path::PathBuf,

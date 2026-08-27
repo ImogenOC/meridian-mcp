@@ -15,6 +15,33 @@ use tokio::sync::{oneshot, Mutex};
 pub const MAX_TRACY_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_TRACY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
+pub(crate) fn capture_window_started(error: &TracyProtocolError) -> bool {
+    matches!(
+        error,
+        TracyProtocolError::Helper { details, .. }
+            if details["window_started"].as_bool() == Some(true)
+    )
+}
+
+pub(crate) fn capture_failure_code(error: &TracyProtocolError) -> crate::result::ToolErrorCode {
+    match error {
+        TracyProtocolError::Helper { code, .. }
+            if !capture_window_started(error)
+                && matches!(
+                    code.as_str(),
+                    "connect_timeout"
+                        | "handshake_dropped"
+                        | "client_disconnected"
+                        | "profiler_busy"
+                        | "health_timeout"
+                ) =>
+        {
+            crate::result::ToolErrorCode::CaptureNotReady
+        }
+        _ => crate::result::ToolErrorCode::HelperFailure,
+    }
+}
+
 type PendingResult = Result<Value, String>;
 
 pub struct CollectorTransport<W> {
@@ -234,6 +261,7 @@ pub enum TracySessionPhase {
     CaptureActive,
     ProducerStalled,
     Saturated,
+    RecoveryRequired,
     Stopping,
     Stopped,
 }
@@ -405,5 +433,37 @@ impl TracyCollector {
 
     pub async fn exit_code(&self) -> Option<i32> {
         *self.exit_code.lock().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_error_reports_whether_the_measurement_window_started() {
+        let started = TracyProtocolError::Helper {
+            code: "client_disconnected".to_owned(),
+            message: "disconnected".to_owned(),
+            details: serde_json::json!({"window_started": true}),
+        };
+        let not_started = TracyProtocolError::Helper {
+            code: "connect_timeout".to_owned(),
+            message: "timeout".to_owned(),
+            details: serde_json::json!({"window_started": false}),
+        };
+        assert!(capture_window_started(&started));
+        assert!(!capture_window_started(&not_started));
+        assert!(!capture_window_started(&TracyProtocolError::Timeout {
+            id: 1
+        }));
+        assert_eq!(
+            capture_failure_code(&not_started),
+            crate::result::ToolErrorCode::CaptureNotReady
+        );
+        assert_eq!(
+            capture_failure_code(&started),
+            crate::result::ToolErrorCode::HelperFailure
+        );
     }
 }

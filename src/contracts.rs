@@ -332,7 +332,7 @@ static CONTRACTS: &[ToolContract] = &[
     ),
     contract!(
         "dm_debug_launch",
-        "Launch one owned DreamSeeker auxtools session.",
+        "Launch one owned interactive or headless auxtools session.",
         Development,
         DEBUG,
         Experimental,

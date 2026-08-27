@@ -1,5 +1,9 @@
 name: Rust and MCP checks
 
+env:
+  MERIDIAN_BUILD_REVISION: ${{ github.sha }}
+  MERIDIAN_BUILD_DIRTY: "false"
+
 on:
   push:
   pull_request:

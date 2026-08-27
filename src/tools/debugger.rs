@@ -4,7 +4,8 @@ use crate::process::ProcessContainment;
 use crate::result::{json_success, ToolMetadata};
 use crate::spaceman::debugger::{
     AuxConnection, AuxRequest, AuxResponse, BreakpointReason, ContinueKind, DebuggerEventRecord,
-    DebuggerLifecycle, DebuggerSession, InstructionRef, ProcRef, VariablesRef,
+    DebuggerInstallation, DebuggerLifecycle, DebuggerSession, InstructionRef, ProcRef,
+    VariablesRef,
 };
 use crate::state::ServerState;
 use crate::tools::ToolExecutionContext;
@@ -53,7 +54,11 @@ pub async fn launch(
     }
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let port = listener.local_addr()?.port();
-    let dreamseeker = normalize_spawn_path(&installation.dreamseeker);
+    let host_mode = args
+        .get("host_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("interactive");
+    let debugger_host = normalize_spawn_path(&debugger_host_executable(&args, installation)?);
     let dmb_spawn_path = normalize_spawn_path(&dmb_path);
     let working_directory = normalize_spawn_path(
         dmb_path
@@ -61,7 +66,7 @@ pub async fn launch(
             .ok_or_else(|| anyhow!("DMB path has no parent"))?,
     );
     let debugger_dll = normalize_spawn_path(&installation.debug_server_dll);
-    let mut command = Command::new(dreamseeker);
+    let mut command = Command::new(debugger_host);
     command
         .arg(dmb_spawn_path)
         .arg("-trusted")
@@ -79,7 +84,7 @@ pub async fn launch(
     let mut process = command.spawn()?;
     if let Err(error) = containment.assign(process.id().unwrap_or_default()) {
         let _ = process.kill().await;
-        return Err(error.context("refusing to run DreamSeeker outside process containment"));
+        return Err(error.context("refusing to run the debugger host outside process containment"));
     }
     let limits = ServerLimits::default();
     let accepted = tokio::time::timeout(
@@ -92,7 +97,7 @@ pub async fn launch(
         async {
             tokio::select! {
                 accepted = listener.accept() => accepted.map_err(anyhow::Error::from),
-                status = process.wait() => Err(anyhow!("DreamSeeker exited before the debugger connected: {}", status?)),
+                status = process.wait() => Err(anyhow!("debugger host exited before connecting: {}", status?)),
             }
         },
     )
@@ -147,8 +152,22 @@ pub async fn launch(
     });
     Ok(json_success(
         ToolMetadata::complete(Some(generation)),
-        json!({"lifecycle":"running","port":port,"dmb_path":dmb_path,"dll_sha256":installation.dll_sha256}),
+        json!({"lifecycle":"running","host_mode":host_mode,"port":port,"dmb_path":dmb_path,"dll_sha256":installation.dll_sha256}),
     ))
+}
+
+fn debugger_host_executable(args: &Value, installation: &DebuggerInstallation) -> Result<PathBuf> {
+    match args
+        .get("host_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("interactive")
+    {
+        "interactive" => Ok(installation.dreamseeker.clone()),
+        "headless" => Ok(installation.dreamdaemon.clone()),
+        mode => Err(anyhow!(
+            "unsupported host_mode {mode:?}; expected interactive or headless"
+        )),
+    }
 }
 
 fn normalize_spawn_path(path: &Path) -> PathBuf {
@@ -713,6 +732,45 @@ fn optional_string(args: &Value, key: &str, maximum: usize) -> Result<Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn debugger_installation_fixture() -> DebuggerInstallation {
+        DebuggerInstallation {
+            dreamseeker: PathBuf::from("dreamseeker.exe"),
+            dreamdaemon: PathBuf::from("dreamdaemon.exe"),
+            debug_server_dll: PathBuf::from("debug_server.dll"),
+            dll_sha256: "fixture".to_owned(),
+        }
+    }
+
+    #[test]
+    fn debugger_host_defaults_to_interactive_dreamseeker() {
+        let executable = debugger_host_executable(&json!({}), &debugger_installation_fixture())
+            .expect("the default debugger host should be valid");
+
+        assert_eq!(executable, PathBuf::from("dreamseeker.exe"));
+    }
+
+    #[test]
+    fn debugger_host_supports_headless_dreamdaemon() {
+        let executable = debugger_host_executable(
+            &json!({"host_mode":"headless"}),
+            &debugger_installation_fixture(),
+        )
+        .expect("the headless debugger host should be valid");
+
+        assert_eq!(executable, PathBuf::from("dreamdaemon.exe"));
+    }
+
+    #[test]
+    fn debugger_host_rejects_unknown_modes() {
+        let error = debugger_host_executable(
+            &json!({"host_mode":"detached"}),
+            &debugger_installation_fixture(),
+        )
+        .expect_err("unknown debugger host modes must fail closed");
+
+        assert!(error.to_string().contains("host_mode"));
+    }
 
     #[test]
     fn dreamseeker_environment_retains_system_runtime_without_credentials() {

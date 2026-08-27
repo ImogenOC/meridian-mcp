@@ -2,6 +2,109 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
+fn workflow_job_block<'a>(workflow: &'a str, job_name: &str) -> &'a str {
+    let header = format!("  {job_name}:");
+    let start = workflow
+        .match_indices(&header)
+        .find_map(|(offset, _)| {
+            (offset == 0 || workflow.as_bytes()[offset - 1] == b'\n').then_some(offset)
+        })
+        .unwrap_or_else(|| panic!("workflow is missing job {job_name}"));
+    let body_start = start + header.len();
+    let mut cursor = body_start;
+    for line in workflow[body_start..].split_inclusive('\n') {
+        if line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':') {
+            return &workflow[start..cursor];
+        }
+        cursor += line.len();
+    }
+    &workflow[start..]
+}
+
+#[test]
+fn workflow_job_block_accepts_crlf() {
+    let workflow = "jobs:\r\n  example:\r\n    runs-on: windows-2025\r\n  following:\r\n    runs-on: ubuntu-24.04\r\n";
+    let block = workflow_job_block(workflow, "example");
+
+    assert!(block.contains("runs-on: windows-2025"));
+    assert!(!block.contains("following:"));
+}
+
+#[test]
+fn ci_builds_embed_the_authoritative_github_revision() {
+    for path in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/byond-integration.yml",
+    ] {
+        let workflow = fs::read_to_string(path).unwrap();
+        assert!(workflow.contains("MERIDIAN_BUILD_REVISION: ${{ github.sha }}"));
+        assert!(workflow.contains("MERIDIAN_BUILD_DIRTY: \"false\""));
+    }
+}
+
+#[test]
+fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
+    let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
+        .expect("BYOND integration workflow should be readable");
+
+    let windows = workflow_job_block(&workflow, "windows-meridian-compatibility");
+    assert!(
+        windows.contains("runs-on: windows-2022"),
+        "legacy x86 BYOND hooks require the pinned Windows Server 2022 runner"
+    );
+    assert!(
+        !windows.contains("runs-on: windows-2025"),
+        "the live BYOND hook job must not follow the Windows Server 2025/VS 2026 image"
+    );
+    for required in [
+        "scripts/run-byond-integration.ps1",
+        "scripts/run-auxtools-integration.ps1",
+        "scripts/run-tracy-integration.ps1",
+    ] {
+        assert!(
+            windows.contains(required),
+            "Windows product job is missing {required}"
+        );
+    }
+    assert!(
+        !windows.contains("needs:"),
+        "Windows product evidence must not depend on a synthetic gate"
+    );
+    assert!(windows.contains("id: auxtools_gate"));
+    assert!(windows.contains("id: tracy_gate"));
+    assert!(windows.contains("-HostMode headless"));
+    assert!(windows.contains("AUXTOOLS_OUTCOME: ${{ steps.auxtools_gate.outcome }}"));
+    assert!(windows.contains("TRACY_OUTCOME: ${{ steps.tracy_gate.outcome }}"));
+    assert!(windows.contains("$env:AUXTOOLS_OUTCOME -eq 'failure'"));
+    assert!(windows.contains("$env:TRACY_OUTCOME -eq 'failure'"));
+
+    let parser = workflow_job_block(&workflow, "prototype-parser-compatibility");
+    assert!(parser.contains("windows-2025"));
+    assert!(parser.contains("ubuntu-24.04"));
+    assert!(parser.contains("scripts/run-large-prototype-parser-integration.ps1"));
+
+    let runtime = workflow_job_block(&workflow, "prototype-runtime-compatibility");
+    assert!(runtime.contains("os: ubuntu-24.04"));
+    assert!(runtime.contains("required: true"));
+    assert!(runtime.contains("os: windows-2025"));
+    assert!(runtime.contains("required: false"));
+    assert!(runtime.contains("continue-on-error: ${{ !matrix.required }}"));
+    assert!(runtime.contains("id: control_runtime"));
+    assert!(runtime
+        .contains("if: ${{ matrix.required || steps.control_runtime.outcome == 'success' }}"));
+    assert!(
+        runtime.contains("::warning::Windows prototype runtime diagnostic did not reach readiness")
+    );
+    assert!(runtime
+        .contains("prototype-runtime/${{ matrix.artifact }}/prerequisites/byond-runtime.json"));
+    assert!(runtime.contains("-PrerequisiteEvidencePath $prerequisiteEvidence"));
+    assert_eq!(
+        runtime.matches("-ExpectedByondVersion 516.1687").count(),
+        2,
+        "both runtime cases must declare the verified BYOND version"
+    );
+}
+
 #[test]
 fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
     let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
@@ -11,7 +114,7 @@ fn byond_workflow_runs_the_versioned_meridian_compatibility_gate() {
         "workflow_dispatch:",
         "meridian_ref:",
         "schedule:",
-        "runs-on: windows-2025",
+        "runs-on: windows-2022",
         "actions/checkout@v7",
         "AphelionDevelopment/Meridian-Rift",
         "path: integration/Meridian-Rift",
@@ -71,17 +174,23 @@ fn tracy_gates_require_persistent_rotation_and_independent_native_platforms() {
     let native = std::fs::read_to_string(root.join("scripts/run-tracy-native-tests.ps1")).unwrap();
     let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
     for required in [
-        "delayed-first-capture marker",
+        "immediate-capture-complete marker",
         "$delay_seconds = 120",
         "Start-Sleep -Seconds $delay_seconds",
         "duration_ms = 30000",
         "delayed_first_capture_seconds = $delay_seconds",
         "capture_duration_ms = $duration_ms",
-        "capture_count = 3",
+        "capture_count = 4",
+        "experiment_directory = $fixtureRoot",
         ".tracy.meridian.json",
+        "meridian_mcp_build.executable_sha256",
+        ".meridian-tracy-session.json",
+        "complete_frames -lt 3",
         "queue.saturation_count",
         "queue.dropped_events",
         "repository_integrity",
+        "$traces += @(1..3 | ForEach-Object",
+        "Restored Tracy status omitted ready drain-worker queue health.",
     ] {
         assert!(
             live.contains(required),
@@ -113,6 +222,8 @@ fn tracy_experiment_runner_is_bounded_and_raw_traces_are_not_uploaded() {
         "control-stats.json",
         "evidence-index.json",
         "raw_traces_local_only",
+        ".meridian-tracy-session.json",
+        "meridian_mcp_build",
     ] {
         assert!(
             runner.contains(required),
@@ -126,6 +237,7 @@ fn tracy_experiment_runner_is_bounded_and_raw_traces_are_not_uploaded() {
         "collector",
         "network_isolation_confirmed",
         "capture_complete",
+        "meridian_mcp_build.build_id",
     ] {
         assert!(
             validator.contains(required),
@@ -205,8 +317,8 @@ fn byond_runtime_and_large_prototype_failures_retain_diagnostics() {
         .expect("BYOND integration workflow should be readable");
     for required in [
         "if: always()",
-        "large-prototype-evidence",
-        "integration/evidence/**",
+        "prototype-runtime-${{ matrix.artifact }}-evidence",
+        "integration/evidence/prototype-runtime/${{ matrix.artifact }}/**",
     ] {
         assert!(
             workflow.contains(required),

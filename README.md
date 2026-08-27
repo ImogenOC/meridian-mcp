@@ -20,7 +20,7 @@ The default capability mode is read-only analysis. Development mode must be enab
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Parse, lookup, definitions, and search | Provisional | Unit-tested with purpose-written fixtures; full-corpus evidence is recorded separately. |
+| Parse, lookup, definitions, and search | Provisional | Unit-tested with purpose-written fixtures; the named matrix separately verifies freshly built MCP/SpacemanDMM parsing above 64K declared leaves on Windows and Ubuntu. |
 | DreamChecker diagnostics | Provisional | SpacemanDMM analysis, not DreamMaker acceptance. |
 | DMI profiling, extraction, duplicate detection, and icon audit | Experimental | Pixel/metadata analysis is bounded and non-mutating; hotspot parsing remains incomplete upstream. |
 | DMM/TGM information, differences, search, and rendering | Provisional | Parser-backed dimensions, models, coordinates, render passes, bounds, and typed batches. |
@@ -81,11 +81,11 @@ Analysis mode exposes the read-only tools below. Development mode adds the activ
 
 ### Auxtools debugger
 
-When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, Meridian-MCP exposes a restricted debugger adapter over the pinned auxtools protocol. The Windows debug server is 32-bit and requires the x86 Microsoft Visual C++ runtime even when Meridian-MCP runs as a 64-bit process; CI installs and verifies that prerequisite before launching DreamSeeker.
+When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the fixed DLL installation validates, Meridian-MCP exposes a restricted debugger adapter over the pinned auxtools protocol. The Windows debug server is 32-bit and requires the x86 Microsoft Visual C++ runtime even when Meridian-MCP runs as a 64-bit process; CI installs and verifies that prerequisite before launching the selected BYOND host.
 
 | Tool | Description |
 | --- | --- |
-| `dm_debug_launch` | Launch one contained DMB through the `dreamseeker.exe` beside the single allowlisted `dm.exe`. Meridian-MCP injects only the fixed hash-verified debugger DLL, opens an ephemeral loopback listener, owns the process tree, retains the debugger-provided `stddef.dm`, and refuses to start while a normal or Tracy DreamDaemon runtime is active. |
+| `dm_debug_launch` | Launch one contained DMB through a BYOND executable beside the single allowlisted `dm.exe`. `host_mode: "interactive"` (the default) uses `dreamseeker.exe` for developer sessions; `host_mode: "headless"` uses `dreamdaemon.exe` for non-desktop environments such as CI. Meridian-MCP injects only the fixed hash-verified debugger DLL, opens an ephemeral loopback listener, owns the process tree, retains the debugger-provided `stddef.dm`, and refuses to start while a normal or Tracy DreamDaemon runtime is active. |
 | `dm_debug_set_breakpoints` | Replace the complete source-breakpoint set with lines from one contained file in the active parsed generation. Each line must resolve inside a parsed procedure; optional bounded conditions are passed to auxtools. Reparse invalidates this source mapping, so stop and relaunch the debugger after source changes. |
 | `dm_debug_set_function_breakpoints` | Replace the complete breakpoint set using canonical DreamMaker procedure paths, with optional override identifiers, instruction offsets, and bounded conditions. Use this when the exact procedure identity is known or source-line mapping is inappropriate. |
 | `dm_debug_set_exception_breakpoints` | Enable or disable breaking when DreamMaker reports a runtime exception. This controls only the active owned debugger session. |
@@ -98,12 +98,12 @@ When `MERIDIAN_MCP_DEBUGGER=auxtools` is enabled under development mode and the 
 | `dm_debug_exception_info` | Return the most recently retained runtime-exception message and current event sequence from the active session. It is not a historical exception log. |
 | `dm_debug_source` | Read the retained debugger-provided `stddef.dm` only through source reference `1`, which is issued by the active adapter. It accepts no caller-selected file path or URL. |
 | `dm_debug_wait_for_event` | Wait for the first bounded breakpoint, step, pause, runtime, output, or termination event after an optional sequence number. Calls can filter event kinds and wait for at most 300 seconds; results report queue eviction when older events were dropped. |
-| `dm_debug_stop` | Disconnect the debugger and terminate only the DreamSeeker process tree owned by this Meridian-MCP session. It never detaches and never accepts a PID. |
+| `dm_debug_stop` | Disconnect the debugger and terminate only the selected BYOND host process tree owned by this Meridian-MCP session. It never detaches and never accepts a PID. |
 
 #### Debugger workflow
 
 1. Compile the target DMB and call `dm_parse_environment` for its matching DME before using source-oriented breakpoints.
-2. Call `dm_debug_launch` with the contained DMB. Only one debugger session may exist, and it is mutually exclusive with standard and Tracy runtimes.
+2. Call `dm_debug_launch` with the contained DMB. Keep the default interactive host for normal debugging, or select `host_mode: "headless"` where no desktop session is available. Only one debugger session may exist, and it is mutually exclusive with standard and Tracy runtimes.
 3. Configure source, function, and/or runtime-exception breakpoints. Each breakpoint-setting call replaces the relevant active set; send the complete desired list.
 4. Use `dm_debug_control` to continue or step, then `dm_debug_wait_for_event` with the last observed sequence to avoid replaying an older event.
 5. On a stop event, inspect `dm_debug_threads`, `dm_debug_stack_trace`, `dm_debug_scopes`, and `dm_debug_variables`. Use `dm_debug_exception_info` for the latest runtime and `dm_debug_source` only for an issued standard-definition reference.
@@ -119,10 +119,10 @@ When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both nativ
 | Tool | Description |
 | --- | --- |
 | `dm_tracy_prepare` | Copy the exact hash-verified x86 byond-tracy hook beside a contained DMB. A matching hook is idempotent; replacing a different file requires `overwrite=true`. |
-| `dm_tracy_launch` | Start one MCP-owned DreamDaemon and persistent collector, validate producer readiness, and retain a drain worker on the private loopback profiler endpoint. |
-| `dm_tracy_capture` | Rotate to a fresh bounded capture worker, reopen and validate the trace, resume draining, and atomically publish `.tracy` plus `.tracy.meridian.json`. Network evidence is best effort and scoped to owned loopback observations. |
-| `dm_tracy_status` | Report DreamDaemon and collector state, profiler endpoint, worker generation, producer/queue health, capture activity, and the last structured error. |
-| `dm_tracy_stop` | Cancel an active window, stop the persistent collector, then terminate only the MCP-owned Tracy DreamDaemon. It does not target a standard runtime or unrelated process. |
+| `dm_tracy_launch` | Require an existing contained experiment directory, create its durable integrity journal, start one MCP-owned DreamDaemon and persistent collector, validate producer readiness, and retain a drain worker on the private loopback profiler endpoint. Launch evidence includes the exact MCP build identity. |
+| `dm_tracy_capture` | Use a bounded transient reconnect retry to rotate to a fresh capture worker, begin timing only after queue-health readiness, reopen and validate the trace, resume draining, and atomically publish `.tracy` plus `.tracy.meridian.json`. Invalid traces are retained only as non-authoritative diagnostics and never enter statistics. Network evidence is best effort and scoped to owned loopback observations. |
+| `dm_tracy_status` | Report DreamDaemon and collector state, profiler endpoint, transition/worker purpose, retry count, queue and hook health, capture activity, integrity-journal state, and the last structured error. |
+| `dm_tracy_stop` | Record shutdown integrity, cancel an active window, stop the persistent collector, then terminate only the MCP-owned Tracy DreamDaemon and finalize the journal after the final clean checkpoint. It does not target a standard runtime, unrelated process, or repair source changes. |
 | `dm_tracy_hotspots` | Load a contained trace and return a bounded, deterministic proc/file/line ranking by inclusive time, self time, call count, or maximum duration. |
 | `dm_tracy_zone` | Return bounded aggregate statistics for an exact profiled proc name across its recorded file/line identities. |
 | `dm_tracy_frame_stats` | Summarize the trace's base `ServerTick` frame series with count, span, mean, extrema, and p50/p95/p99 durations. |
@@ -168,8 +168,9 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 | `scripts/install-meridian-mcp.ps1` | Atomically install a release binary, manifest-selected dmdoc/Tracy helpers, and the verified auxtools DLL into a destination root. `-EnableTracy` requires both native Tracy manifest identities. The script does not edit Codex configuration. |
 | `scripts/configure-codex-meridian-mcp.ps1` | Update one named Meridian-MCP server entry in an existing Codex TOML configuration with the installed binary and helper manifest. `-EnableTracy` writes the explicit Tracy opt-in; existing roots, compiler, mode, and build ceiling remain untouched. |
 | `scripts/run-byond-integration.ps1` | Compile the owned BYOND fixtures used by the runtime integration gate. |
-| `scripts/new-large-prototype-fixture.ps1` | Generate a temporary technical DreamMaker environment containing more than 65,536 unique prototype paths. It creates no game content. |
-| `scripts/run-large-prototype-integration.ps1` | Compile and start the generated over-64K prototype world with the pinned BYOND runtime, require its readiness marker, and write machine-readable compatibility evidence. |
+| `scripts/new-large-prototype-fixture.ps1` | Generate a temporary technical DreamMaker environment containing a requested number of unique prototype paths. Flat layout stresses the MCP parser; bucketed layout keeps each parent below DreamMaker's direct-child ceiling for BYOND runtime testing. It creates no game content. |
+| `scripts/run-large-prototype-parser-integration.ps1` | Generate a bounded technical type corpus, parse it through the selected Meridian-MCP binary, resolve its first, boundary, and last declared type paths, and write parser/provenance evidence. It does not start BYOND. |
+| `scripts/run-large-prototype-integration.ps1` | Compile and start a generated control or over-64K world with pinned BYOND, require its readiness marker, sample bounded process progress, classify failures, verify cleanup, and write machine-readable runtime evidence. |
 | `scripts/run-auxtools-integration.ps1` | Drive a supplied, already-compiled debug-capable DMB through auxtools launch, inventory/query, exception-breakpoint configuration, and clean stop, writing machine-readable evidence. The BYOND CI passes Meridian-Rift's `tgstation.dmb`; the tiny owned compile fixture is intentionally not treated as a DreamSeeker-hosted world. |
 | `scripts/run-tracy-integration.ps1` | Compile the technical profiling fixture and drive prepare, launch, capture, hotspot/zone/frame queries, comparison, status, and stop through the installed MCP, writing machine-readable evidence. |
 | `scripts/run-meridian-analysis-compatibility.ps1` | Run the versioned read-only parse, lookup, definition, search, diagnostics, DMI, map, render, and documentation compatibility manifest against a real Meridian-Rift checkout. |
@@ -244,7 +245,7 @@ Active operations are available only in development mode. `dm_compile` invokes D
 | Platform | Status |
 | --- | --- |
 | Windows | Verified only for evidence listed in [compatibility](docs/compatibility.md) |
-| Linux | Provisional Ubuntu 24.04 CI gate for Rust, the release binary, stdio MCP, and owned-fixture parse/search; no BYOND claim |
+| Linux | Provisional Ubuntu 24.04 gates for Rust, release stdio MCP, over-64K parser compatibility, required synthetic BYOND startup, and independent live Tracy evidence |
 | macOS | Unsupported and untested |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md) for development and verification guidance.

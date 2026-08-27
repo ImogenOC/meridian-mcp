@@ -1,4 +1,6 @@
-use serde::Serialize;
+use crate::atomic_output::{write_atomic, AtomicOutputError};
+use crate::PathPolicy;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -15,7 +17,7 @@ pub struct IntegrityBaseline {
     pub preexisting_changes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IntegrityCheckpoint {
     pub action: String,
     pub baseline_digest: String,
@@ -26,6 +28,38 @@ pub struct IntegrityCheckpoint {
     pub owned_paths: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityJournalStatus {
+    Active,
+    Finalized,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct IntegrityJournalDocument {
+    schema: u32,
+    journal_id: String,
+    status: IntegrityJournalStatus,
+    baseline_digest: String,
+    preexisting_change_count: usize,
+    last_action: String,
+    checkpoints: Vec<IntegrityCheckpoint>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IntegrityJournal {
+    path: PathBuf,
+    document: IntegrityJournalDocument,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IntegrityJournalSummary {
+    pub journal_id: String,
+    pub status: IntegrityJournalStatus,
+    pub last_action: String,
+    pub checkpoint_count: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum IntegrityError {
     #[error(transparent)]
@@ -34,6 +68,97 @@ pub enum IntegrityError {
     ScopeTooLarge,
     #[error("workspace integrity violation: {0:?}")]
     Violation(Vec<String>),
+    #[error("an unfinished Tracy integrity journal requires recovery after {last_action}")]
+    RecoveryRequired { last_action: String },
+    #[error(transparent)]
+    Atomic(#[from] AtomicOutputError),
+    #[error(transparent)]
+    Serialize(#[from] serde_json::Error),
+}
+
+impl IntegrityJournal {
+    pub fn create(
+        policy: &PathPolicy,
+        evidence_directory: &Path,
+        baseline: &IntegrityBaseline,
+    ) -> Result<Self, IntegrityError> {
+        let path = evidence_directory.join(".meridian-tracy-session.json");
+        let overwrite = if path.is_file() {
+            let existing: IntegrityJournalDocument =
+                serde_json::from_slice(&std::fs::read(&path)?)?;
+            if existing.status != IntegrityJournalStatus::Finalized {
+                return Err(IntegrityError::RecoveryRequired {
+                    last_action: existing.last_action,
+                });
+            }
+            true
+        } else {
+            false
+        };
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let document = IntegrityJournalDocument {
+            schema: 1,
+            journal_id: random.iter().map(|byte| format!("{byte:02x}")).collect(),
+            status: IntegrityJournalStatus::Active,
+            baseline_digest: baseline.digest.clone(),
+            preexisting_change_count: baseline.preexisting_changes.len(),
+            last_action: "baseline_captured".to_owned(),
+            checkpoints: Vec::new(),
+        };
+        let path = persist_journal(policy, &path, overwrite, &document)?;
+        Ok(Self { path, document })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn status(&self) -> IntegrityJournalStatus {
+        self.document.status
+    }
+
+    pub fn summary(&self) -> IntegrityJournalSummary {
+        IntegrityJournalSummary {
+            journal_id: self.document.journal_id.clone(),
+            status: self.document.status,
+            last_action: self.document.last_action.clone(),
+            checkpoint_count: self.document.checkpoints.len(),
+        }
+    }
+
+    pub fn record(
+        &mut self,
+        policy: &PathPolicy,
+        checkpoint: IntegrityCheckpoint,
+    ) -> Result<(), IntegrityError> {
+        self.document.last_action = checkpoint.action.clone();
+        self.document.checkpoints.push(checkpoint);
+        self.path = persist_journal(policy, &self.path, true, &self.document)?;
+        Ok(())
+    }
+
+    pub fn finalize(&mut self, policy: &PathPolicy) -> Result<(), IntegrityError> {
+        self.document.status = IntegrityJournalStatus::Finalized;
+        self.document.last_action = "finalized".to_owned();
+        self.path = persist_journal(policy, &self.path, true, &self.document)?;
+        Ok(())
+    }
+}
+
+fn persist_journal(
+    policy: &PathPolicy,
+    path: &Path,
+    overwrite: bool,
+    document: &IntegrityJournalDocument,
+) -> Result<PathBuf, IntegrityError> {
+    let bytes = serde_json::to_vec_pretty(document)?;
+    let artifact = write_atomic(policy, path, overwrite, |output| {
+        std::io::Write::write_all(output, &bytes)?;
+        std::io::Write::write_all(output, b"\n")?;
+        Ok(())
+    })?;
+    Ok(artifact.path)
 }
 
 impl IntegrityBaseline {

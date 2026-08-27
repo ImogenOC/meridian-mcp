@@ -3,6 +3,13 @@
 namespace meridian::tracy
 {
 
+namespace
+{
+
+nlohmann::json queue_health_json(const QueueHealth& health);
+
+}
+
 const char* phase_name(const SessionPhase phase) noexcept
 {
 	switch(phase)
@@ -10,8 +17,10 @@ const char* phase_name(const SessionPhase phase) noexcept
 	case SessionPhase::Stopped: return "stopped";
 	case SessionPhase::Starting: return "starting";
 	case SessionPhase::Draining: return "draining";
+	case SessionPhase::CaptureConnecting: return "capture_connecting";
 	case SessionPhase::Capturing: return "capturing";
 	case SessionPhase::Validating: return "validating";
+	case SessionPhase::DrainRestoring: return "drain_restoring";
 	case SessionPhase::Stopping: return "stopping";
 	case SessionPhase::Failed: return "failed";
 	}
@@ -20,12 +29,19 @@ const char* phase_name(const SessionPhase phase) noexcept
 
 nlohmann::json session_status_json(const SessionStatus& status)
 {
-	return {
+	auto output = nlohmann::json {
 		{"state", phase_name(status.phase)},
 		{"worker_generation", status.worker_generation},
 		{"producer_progress", status.producer_progress},
 		{"capture_count", status.capture_count},
+		{"worker_attached", status.worker_attached},
+		{"worker_purpose", status.worker_attached ? nlohmann::json(status.worker_purpose == WorkerPurpose::Drain ? "drain" : "capture") : nlohmann::json(nullptr)},
+		{"transition_retry_count", status.transition_retry_count},
+		{"last_transition_error", status.last_transition_error.empty() ? nlohmann::json(nullptr) : nlohmann::json(status.last_transition_error)},
+		{"recovery_required", status.recovery_required},
+		{"queue_health", status.queue_health.has_value() ? queue_health_json(*status.queue_health) : nlohmann::json(nullptr)},
 	};
+	return output;
 }
 
 namespace
