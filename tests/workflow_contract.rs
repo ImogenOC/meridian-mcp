@@ -48,6 +48,14 @@ fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
         .expect("BYOND integration workflow should be readable");
 
     let windows = workflow_job_block(&workflow, "windows-meridian-compatibility");
+    assert!(
+        windows.contains("runs-on: windows-2022"),
+        "legacy x86 BYOND hooks require the pinned Windows Server 2022 runner"
+    );
+    assert!(
+        !windows.contains("runs-on: windows-2025"),
+        "the live BYOND hook job must not follow the Windows Server 2025/VS 2026 image"
+    );
     for required in [
         "scripts/run-byond-integration.ps1",
         "scripts/run-auxtools-integration.ps1",
