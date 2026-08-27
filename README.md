@@ -1,23 +1,107 @@
 # Meridian-MCP
 
-Meridian-MCP is a DreamMaker analysis and controlled-development server for Model Context Protocol clients. It uses SpacemanDMM for parsing, indexing, DreamChecker diagnostics, and DMM inspection; DreamMaker remains authoritative for compilation and BYOND remains authoritative for runtime behavior.
+> DreamMaker and SS13 MCP server for code search, diagnostics, maps, DMI analysis, controlled BYOND builds, debugging, and Tracy profiling.
 
-The default capability mode is read-only analysis. Development mode must be enabled when the server launches and adds bounded compiler, map-output, DreamDaemon, and loopback `Topic()` operations. Neither mode replaces a target repository's build or test entry point.
+Meridian-MCP gives MCP clients structured access to large DreamMaker repositories. It combines SpacemanDMM-backed source analysis with tightly contained development operations, so an agent can move from repository-scale discovery to exact symbol inspection, compiler evidence, runtime debugging, and performance analysis without receiving a general shell or arbitrary filesystem access.
 
-## Trust documents
+Analysis mode is the default and is read-only. Development mode is an explicit startup choice that adds bounded compiler, generated-output, DreamDaemon, auxtools, and Tracy operations. Neither mode replaces the target repository's own build, test, or release process.
 
-- [Provenance and inherited code](docs/provenance.md)
-- [Source authority](docs/source-authority.md)
-- [Compatibility and evidence](docs/compatibility.md)
-- [Dependency policy](docs/dependency-policy.md)
-- [Security policy](SECURITY.md)
-- [Detailed security model](docs/security.md)
-- [Architecture](docs/architecture.md)
-- [Native evidence analysis](docs/native-evidence.md)
-- [Tool contracts](docs/tool-contracts.md)
-- [Testing](TESTING.md)
+## What it is for
 
-## Capability status
+- Navigate large SS13 codebases through ranked context search, exact type/proc/var lookup, definitions, implementations, references, document symbols, and DreamChecker diagnostics.
+- Inspect DMI metadata and pixels, extract states, find cross-file exact and common lazy-change duplicates, audit static icon references, and compare images without modifying source assets.
+- Inspect, diff, search, and render DMM/TGM maps through the pinned SpacemanDMM implementation.
+- Run a direct DreamMaker compile or Meridian-Rift's separate agent-owned full-build wrapper with bounded output and local provenance records.
+- Start and control one owned loopback BYOND runtime, exercise project-provided `world.Topic()` test hooks, debug through auxtools, or capture and analyze Tracy profiles.
+- Produce hash-bound native evidence summaries and comparisons while keeping raw profiling artifacts local.
+
+Meridian-MCP is intended for repository analysis and engineering support. It is not a general command runner, a source-control client, an asset editor, or an autonomous substitute for human review.
+
+## Authority and safety boundaries
+
+The tools report different kinds of evidence; they do not make them interchangeable:
+
+1. SpacemanDMM parsing and DreamChecker establish parser and static-analysis results.
+2. DreamMaker establishes whether the `.dme` compiles.
+3. A repository's documented build and test entry points establish project acceptance.
+4. BYOND runtime behavior establishes what actually happens in a running world.
+
+A green result at one layer is useful evidence, not proof that the later layers pass. `dm_compile` invokes DreamMaker directly and is not a tgstation-style full build. Meridian-Rift's `rift_compile` uses the contained `RIFT_BUILD.cmd`; it deliberately does not alter or replace the human-authored `BUILD.cmd`.
+
+All paths are checked against immutable startup roots. Development executables are allowlisted at startup, runtime endpoints are loopback-only, and active processes must be owned by the current server. Managed build records detect stale inputs and outputs before launch. Runtime-integrity journals report workspace mutations but never revert, repair, stage, delete, or rewrite source files.
+
+## Five-minute analysis setup
+
+This is the smallest useful local setup for Codex on Windows. It provides source, DMI, and map analysis; it does not authorize compilation or runtime control.
+
+1. Build the release binary with the repository-pinned Rust toolchain:
+
+   ```powershell
+   cargo +1.95.0 build --locked --release
+   ```
+
+2. Add a server entry to the existing Codex configuration. Replace the two example paths with absolute local paths:
+
+   ```toml
+   [mcp_servers.meridian-mcp]
+   command = 'C:\path\to\meridian-mcp\target\release\meridian-mcp.exe'
+
+   [mcp_servers.meridian-mcp.env]
+   MERIDIAN_MCP_MODE = 'analysis'
+   MERIDIAN_MCP_ROOTS = 'C:\path\to\Meridian-Rift'
+   ```
+
+3. Restart Codex, call `dm_server_status`, then call `dm_parse_environment` with the contained `.dme` path. Parse again after source changes.
+
+Analysis mode needs no BYOND installation. `dm_generate_docs` is advertised only when an exact, hash-verified dmdoc helper and manifest are also packaged and configured.
+
+## Development setup
+
+Development mode should use the repository's installer and configuration updater because they validate the binary, helper manifest, auxtools DLL, authorized roots, and private state layout as one unit. Prerequisites depend on the tools you enable:
+
+| Capability | Additional prerequisite |
+| --- | --- |
+| Direct compilation and normal runtime | An allowlisted BYOND installation containing `dm.exe` and its sibling runtime executables |
+| Meridian-Rift full build | Windows, an authorized Meridian-Rift checkout, and `MERIDIAN_MCP_RIFT_BUILD=offline` or `network` |
+| HTML documentation | Exact dmdoc helper recorded by the helper manifest |
+| Auxtools debugging | Packaged auxtools v2.3.7 DLL and the x86 Microsoft Visual C++ runtime |
+| Tracy profiling | Manifest-verified host helper and x86 byond-tracy hook for the supported BYOND baseline |
+
+The complete packaging example is in [Operator and contributor reference](#operator-and-contributor-reference). At minimum, development configuration sets `MERIDIAN_MCP_MODE=development`, supplies one or more roots, allowlists the compiler, and points `MERIDIAN_MCP_STATE_DIR` to an existing writable directory outside every workspace root. Restart the MCP client after changing startup authorization.
+
+## Common workflows
+
+### Analyze code
+
+1. `dm_parse_environment` loads one contained `.dme` into an atomic analysis snapshot.
+2. `dm_search_context` performs repository-scale discovery. `dm_search_symbols` is useful for direct partial-name lookup.
+3. Verify candidates with `dm_get_type`, `dm_get_proc`, `dm_get_var`, or `dm_get_definition`.
+4. Use `dm_find_references`, `dm_find_implementations`, `dm_document_symbols`, and `dm_check_errors` for impact analysis.
+5. Reparse after any source change. Parser success is not compiler success.
+
+Procedure results distinguish the implementation owner, which supplies the nearest executable body, from the declaration owner, which supplies declaration metadata. Exact lookup, definitions, searches, document symbols, and implementation queries use the same snapshot-owned resolver.
+
+### Compile and exercise a world
+
+Use `dm_compile` for a direct compiler gate. Use `rift_compile` only for the contained Meridian-Rift full-build workflow. A successful managed compile records the compiler, repository identity, parsed source closure, fixture inputs, and DMB/RSC hashes. A later failed compile or changed input/output makes that managed artifact stale.
+
+After a successful build, `dm_run` starts one owned loopback DreamDaemon. Use `dm_wait_for_output` for readiness, `dm_topic` for a project-provided test endpoint, `dm_status` for process and integrity evidence, and `dm_stop` for cleanup. Unmanaged human-built DMBs are reported as `unverified` unless verified provenance is required explicitly.
+
+### Inspect icons and maps
+
+Use `dm_dmi_info` before comparing or extracting DMI states. `dm_find_dmi_duplicates` looks across contained scopes for exact matches plus cropped, palette-only, mirrored, rotated, and scaled copies. `dm_audit_icons` checks statically resolvable inherited `icon` and `icon_state` references. Generated PNGs are written only by the explicit development tools and only to contained paths.
+
+For maps, use `dm_map_info` for structure, `dm_find_on_map` for type-path occurrences, `dm_diff_maps` for coordinate-model differences, and `dm_list_render_passes` before `dm_render_map` or `dm_render_maps`.
+
+### Debug with auxtools
+
+Compile and parse matching source, launch the contained DMB with `dm_debug_launch`, configure breakpoints, continue or step, and inspect threads, frames, scopes, and variables after a stop event. The adapter owns one Windows BYOND host and does not attach to arbitrary processes. See the [detailed debugger workflow](#debugger-workflow) and the per-tool descriptions below.
+
+### Profile with Tracy
+
+Prepare the verified hook, launch an owned profiling runtime, capture one or more bounded windows, and inspect hotspots, zones, frames, comparisons, and repeated controls offline. Each accepted trace is paired with an identity and queue-health sidecar. See the [Tracy profiler](#tracy-profiler) reference and [native evidence analysis](docs/native-evidence.md).
+
+## Capability and platform status
 
 | Area | Status | Notes |
 | --- | --- | --- |
@@ -35,7 +119,13 @@ The default capability mode is read-only analysis. Development mode must be enab
 
 Support labels are defined in [compatibility](docs/compatibility.md). A passing SpacemanDMM check is useful evidence, not proof that DreamMaker or a repository's full validation suite passes.
 
-## Available tools
+| Platform | Status |
+| --- | --- |
+| Windows | Verified only for evidence listed in [compatibility](docs/compatibility.md) |
+| Linux | Provisional Ubuntu 24.04 gates for Rust, release stdio MCP, over-64K parser compatibility, required synthetic BYOND startup, and independent live Tracy evidence |
+| macOS | Unsupported and untested |
+
+## Complete tool reference
 
 Analysis mode exposes the read-only tools below. Development mode adds the active compiler, rendering, documentation, and runtime tools. `rift_compile`, the auxtools debugger, and Tracy profiling have separate immutable startup gates; gated tools are not advertised or callable when their prerequisites are absent. See [tool contracts](docs/tool-contracts.md) for the generated capability mode, support level, side effects, timeout, and output limit of every tool.
 
@@ -136,18 +226,18 @@ When `MERIDIAN_MCP_TRACY=byond` is enabled under development mode and both nativ
 
 Offline analysis works without a parsed environment. When one is active, matching trace file/line records receive additive source-correlation metadata; profiler measurements are not rewritten.
 
-## Build and operator commands
+## Operator and contributor reference
 
 ### Rust build and verification
 
 The repository pins Rust 1.95.0 with rustfmt and Clippy to match CI. BYOND integration gates additionally require the project-pinned BYOND version.
 
 ```powershell
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-cargo build --locked --release
-cargo deny check
+cargo +1.95.0 fmt --all -- --check
+cargo +1.95.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.95.0 test --locked --all-features
+cargo +1.95.0 build --locked --release
+cargo +1.95.0 deny check
 ```
 
 The release binary is `target\release\meridian-mcp.exe` on Windows and `target/release/meridian-mcp` on Linux.
@@ -159,6 +249,7 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 | Command | Purpose |
 | --- | --- |
 | `test_mcp.ps1` | Build or exercise an installed Meridian-MCP binary over real stdio JSON-RPC. It validates initialization, exact tool inventories and schemas, bounded errors, optional DME parse/search, compile, runtime, Topic, and map behavior. Use `-SkipBuild` with `-BinaryPath`/`-ServerPath` to test an exact release artifact. |
+| `test_parse.ps1` | Run the parse-focused subset of `test_mcp.ps1` for one required DME, with optional exact type, proc, and search probes. It preserves the selected debug/release configuration, binary override, timeout, and `-SkipBuild` behavior. |
 | `scripts/audit-spacemandmm-capabilities.ps1` | Compare the checked-in SpacemanDMM capability registry with its declared coverage; `-Check` is the non-mutating CI audit. An exact upstream checkout can be supplied for source-aware auditing. |
 | `scripts/build-spacemandmm-helpers.ps1` | Build dmdoc from the pinned local SpacemanDMM checkout, copy the platform helper, hash it, and write or merge the helper manifest. It does not select an arbitrary revision. |
 | `scripts/build-tracy-helpers.ps1` | Copy exact clean Tracy/byond-tracy revisions into private build sources, verify and apply ordered clock/queue-health patches, build x64 helper and x86 hook, run all CTests, copy licenses, hash patches/artifacts, and merge schema-v2 manifest entries. It performs no source download or vendor-checkout edit. |
@@ -170,6 +261,7 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 | `scripts/install-auxtools-runtime.ps1` | Verify the x86 MSVC runtime required by the pinned auxtools DLL and, on Windows CI, install it from the runner's bundled `vc_redist.x86.exe` when missing. It performs no network download. |
 | `scripts/install-byond.ps1` | Install the pinned Windows BYOND archive for CI/integration use through verified download and archive checks. This is test infrastructure, not a project build command. |
 | `scripts/install-byond-linux.ps1` | Install the pinned Linux BYOND archive for the Ubuntu live-integration job after verifying the exact archive hash and compiler artifact. |
+| `scripts/install-byond-runtime.ps1` | Verify or provision the pinned x86 Windows runtime prerequisites used by BYOND integration. It checks the required VC runtime files and installs the fixed-hash application-local DirectX DLL; `-CheckOnly` performs no installation. |
 | `scripts/install-meridian-mcp.ps1` | Atomically install a release binary, manifest-selected dmdoc/Tracy helpers, and the verified auxtools DLL into a destination root. Optional workspace/repository roots are validated and returned as configuration values; development mode creates only the exact private state directory after proving it is outside workspace roots. `-EnableTracy` requires both native Tracy manifest identities. The script does not edit Codex configuration. |
 | `scripts/configure-codex-meridian-mcp.ps1` | Update one named Meridian-MCP server entry in an existing Codex TOML configuration. It preserves unrelated servers and environment keys while setting explicitly supplied workspace roots, repository roots, development state, helper manifest, and Tracy opt-in. All supplied directories must exist, and private state must be outside workspace roots. |
 | `scripts/test-configure-codex-meridian-mcp.ps1` | Exercise configuration on private temporary TOML and directory fixtures, proving an unrelated server and unrelated selected-server key survive while root and state values round-trip. |
@@ -178,14 +270,14 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 | `scripts/run-large-prototype-parser-integration.ps1` | Generate a bounded technical type corpus, parse it through the selected Meridian-MCP binary, resolve its first, boundary, and last declared type paths, and write parser/provenance evidence. It does not start BYOND. |
 | `scripts/run-large-prototype-integration.ps1` | Compile and start a generated control or over-64K world with pinned BYOND, require its readiness marker, sample bounded process progress, classify failures, verify cleanup, and write machine-readable runtime evidence. |
 | `scripts/run-auxtools-integration.ps1` | Drive a supplied, already-compiled debug-capable DMB through auxtools launch, inventory/query, exception-breakpoint configuration, and clean stop, writing machine-readable evidence. The BYOND CI passes Meridian-Rift's `tgstation.dmb`; the tiny owned compile fixture is intentionally not treated as a DreamSeeker-hosted world. |
-| `scripts/run-tracy-integration.ps1` | Compile the technical profiling fixture and drive prepare, launch, capture, hotspot/zone/frame queries, comparison, status, and stop through the installed MCP, writing machine-readable evidence. |
 | `scripts/run-meridian-analysis-compatibility.ps1` | Run the versioned read-only parse, lookup, definition, search, diagnostics, DMI, map, render, and documentation compatibility manifest against a real Meridian-Rift checkout. |
 | `scripts/run-meridian-compatibility.ps1` | Run the named Windows Meridian-Rift compatibility sequence, including direct compile, network and offline `rift_compile`, the warm authoritative human build, negative-policy sessions, and evidence output. Use only with a disposable integration checkout as described in `TESTING.md`. |
 | `scripts/run-provenance-integrity-integration.ps1` | Run the owned BYOND 516.1687 managed-build fixture: sync, compile, verified launch, tracked mutation reporting, stale rejection after source change and failed compile, persistence across restart, exact-byte restoration, fresh recompile, and clean stop. It writes bounded schema-1 evidence and never invokes a downstream human build script. |
 | `scripts/test-provenance-evidence-validation.ps1` | Validate managed provenance evidence size, schema, and privacy boundaries and run built-in malicious-document rejection cases without launching BYOND. |
+| `scripts/test-meridian-evidence-validation.ps1` | Parse and exercise the compatibility harness's evidence validator, proving legitimate null fields are accepted, forbidden sensitive keys are rejected, and failed-reparse assertions use structured error details. |
 | `scripts/test_unsupported_rift_compile.ps1` | Verify the stable non-Windows `unsupported_platform` response without installing BYOND or invoking a Windows build wrapper. |
 
-`scripts/MeridianMcpSession.psm1` is the shared stdio-session module used by integration scripts; it is not a standalone command. Exact parameters, fixtures, destructive-gate warnings, and CI-equivalent invocations are documented in [TESTING.md](TESTING.md).
+`scripts/MeridianMcpSession.psm1` is the shared stdio JSON-RPC session module used by integration scripts. `scripts/process-readiness.psm1` provides bounded process-readiness sampling, BYOND identity checks, and stable runtime classifications for the large-prototype gates. They are imported modules, not standalone commands. Files under `tests/fixtures/` are owned test inputs rather than operator entry points. Exact parameters, fixtures, destructive-gate warnings, and CI-equivalent invocations are documented in [TESTING.md](TESTING.md).
 
 ### Packaging and configuration example
 
@@ -220,7 +312,7 @@ Run these PowerShell entry points from the repository root. Scripts that accept 
 
 Add `-EnableTracy` to both installation and configuration only when the combined manifest contains the verified Tracy helper and hook. Restart Codex after changing its MCP configuration.
 
-## Configuration
+### Startup configuration
 
 The server reads immutable startup configuration:
 
@@ -238,23 +330,25 @@ Every configured root and repository must already exist. An explicit root is rec
 
 Client tool calls cannot change the mode, effective roots, executable allowlist, or full-build ceiling. Restart Meridian-MCP after changing any startup authorization. Use `dm_server_status` to inspect the effective policy; path-policy failures return the same containment mode, policy source, effective roots, and recovery context. `rift_compile` defaults to `network_mode=offline`; `network_mode=allow` is accepted only under the startup value `network`. Offline mode is cooperative preflight and strict process-local package-manager configuration, not an operating-system firewall.
 
-```json
-{
-  "mcpServers": {
-    "meridian-mcp": {
-      "command": "C:\\path\\to\\meridian-mcp.exe",
-      "env": {
-        "MERIDIAN_MCP_MODE": "analysis",
-        "MERIDIAN_MCP_ROOTS": "C:\\path\\to\\workspace"
-      }
-    }
-  }
-}
+The configuration updater expects the named server and environment tables to exist already. It updates the installed binary, manifest, roots, mode, state, debugger, and Tracy settings while preserving unrelated servers and existing keys such as the compiler allowlist and Rift build ceiling. A complete Windows development table can therefore look like this before or after the updater runs:
+
+```toml
+[mcp_servers.meridian-mcp]
+command = 'C:\path\to\installed-meridian-mcp\meridian-mcp.exe'
+
+[mcp_servers.meridian-mcp.env]
+MERIDIAN_MCP_MODE = 'development'
+MERIDIAN_MCP_ROOTS = 'C:\path\to\Meridian-Rift'
+MERIDIAN_MCP_REPOSITORIES = 'C:\path\to\Meridian-Rift'
+MERIDIAN_MCP_COMPILERS = 'C:\Program Files (x86)\BYOND\bin\dm.exe'
+MERIDIAN_MCP_STATE_DIR = 'C:\path\to\private-meridian-state'
+MERIDIAN_MCP_RIFT_BUILD = 'offline'
+MERIDIAN_MCP_HELPER_MANIFEST = 'C:\path\to\installed-meridian-mcp\helpers\manifest.json'
+MERIDIAN_MCP_DEBUGGER = 'auxtools'
+MERIDIAN_MCP_TRACY = 'disabled'
 ```
 
-## Workflow
-
-Call `dm_parse_environment` before source analysis. Use `dm_search_context` for repository-scale discovery, then verify candidates with `dm_get_type`, `dm_get_proc`, `dm_get_var`, or `dm_get_definition`. Reparse after source changes. Procedure results distinguish the implementation owner, which supplies the nearest executable body, from the declaration owner, which supplies the declaration metadata; exact lookup, definitions, searches, document symbols, and implementation queries use the same snapshot-owned resolver.
+## Operational details
 
 AphelionDMM uses the versioned compatibility declaration at `tests/compatibility/aphelion-dmm.json`. Its adapter is limited to `dm_parse_environment`, `dm_map_info`, and `dm_check_errors`, resolves repository identities through trusted startup configuration, and records the negotiated Meridian-MCP version plus the parsed state generation. It is not a generic MCP proxy and accepts no client-selected executable, method name, repository root, or filesystem path.
 
@@ -266,15 +360,21 @@ Standard runtime integrity journals live under `runtime-integrity/` in private s
 
 Each non-owned runtime mutation is returned with the stable `source_integrity_warning` code. Native cumulative snapshots captured before the declared game-start boundary are classified `pre_game_cumulative` and are not presented as in-game interval measurements.
 
-## Platform support
-
-| Platform | Status |
-| --- | --- |
-| Windows | Verified only for evidence listed in [compatibility](docs/compatibility.md) |
-| Linux | Provisional Ubuntu 24.04 gates for Rust, release stdio MCP, over-64K parser compatibility, required synthetic BYOND startup, and independent live Tracy evidence |
-| macOS | Unsupported and untested |
-
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md) for development and verification guidance.
+
+## Trust, design, and policy documents
+
+- [Provenance and inherited code](docs/provenance.md)
+- [Source authority](docs/source-authority.md)
+- [Compatibility and evidence](docs/compatibility.md)
+- [Dependency policy](docs/dependency-policy.md)
+- [Security policy](SECURITY.md)
+- [Detailed security model](docs/security.md)
+- [Architecture](docs/architecture.md)
+- [Native evidence analysis](docs/native-evidence.md)
+- [Tracy profiling](docs/tracy-profiling.md)
+- [Tool contracts](docs/tool-contracts.md)
+- [Testing](TESTING.md)
 
 ## License
 
