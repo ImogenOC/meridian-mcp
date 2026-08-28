@@ -80,6 +80,8 @@ pub struct ExperimentLaunchManifest {
     pub meridian_mcp_build: crate::build_identity::BuildIdentity,
     pub executable: ExecutableIdentity,
     pub workload_draft: WorkloadInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_configuration: Option<crate::tracy_runtime_config::RuntimeConfigurationIdentity>,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +93,8 @@ pub struct ExperimentState {
     pub final_manifest_path: std::path::PathBuf,
     pub executable: ExecutableIdentity,
     pub workload_draft: WorkloadInput,
+    pub runtime_configuration: Option<crate::tracy_runtime_config::RuntimeConfigurationIdentity>,
+    pub runtime_wake: Option<serde_json::Value>,
     pub locked_identity: Option<ExperimentIdentity>,
 }
 

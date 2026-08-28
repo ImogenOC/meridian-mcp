@@ -48,6 +48,7 @@ struct QueueHealth
 	std::uint64_t capacity;
 	std::uint64_t depth;
 	std::uint64_t high_water;
+	std::uint64_t tail_refresh_count;
 	std::uint64_t saturation_count;
 	std::uint64_t dropped_events;
 	std::uint64_t produced_events;
@@ -88,12 +89,17 @@ struct CaptureValidation
 	std::int64_t trace_end_ns;
 	double nanoseconds_per_tick;
 	double wall_span_seconds;
+	double requested_wall_seconds;
+	double measured_wall_seconds;
+	double wall_tolerance_seconds;
+	double producer_progress_shortfall_seconds;
 	std::uint64_t complete_frames;
 	std::uint64_t partial_frames;
 	std::uint64_t zones;
 	std::uint64_t source_files;
 	QueueHealth queue;
 	std::vector<std::string> error_codes;
+	std::vector<std::string> warning_codes;
 };
 
 [[nodiscard]] std::optional<FrameClass> classify_frame(

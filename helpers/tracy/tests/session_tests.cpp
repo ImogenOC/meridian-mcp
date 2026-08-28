@@ -68,7 +68,7 @@ public:
 	std::optional<QueueHealth> health() override
 	{
 		if(!health_ready.load()) return std::nullopt;
-		return QueueHealth {1024, 4, 12, 0, 0, progress.load(), progress.load() - 1, progress.load(), true, true, "516.1687", "fixture-offsets"};
+		return QueueHealth {1024, 4, 12, 7, 0, 0, progress.load(), progress.load() - 1, progress.load(), true, true, "516.1687", "fixture-offsets"};
 	}
 
 	CaptureResult capture(const CaptureWindowOptions&, const std::atomic_bool& cancelled, std::atomic_bool& window_started) override
@@ -91,6 +91,11 @@ public:
 	{
 		std::scoped_lock lock(mutex);
 		return attachments;
+	}
+
+	void advance_progress(const std::uint64_t amount)
+	{
+		progress += amount;
 	}
 
 	std::atomic_bool block_capture {false};
@@ -131,8 +136,14 @@ int main()
 	assert(started_json.at("worker_generation") == 1);
 	assert(started_json.at("worker_attached") == true);
 	assert(started_json.at("queue_health").at("capacity") == 1024);
+	assert(started_json.at("queue_health").at("tail_refresh_count") == 7);
 	assert(started_json.at("queue_health").at("hook_installed") == true);
 	assert(started_json.at("queue_health").at("prologue_validated") == true);
+	fake->advance_progress(5);
+	const auto refreshed = session.status();
+	assert(refreshed.producer_progress == started.producer_progress + 5);
+	assert(refreshed.queue_health.has_value());
+	assert(refreshed.queue_health->last_producer_progress_raw == refreshed.producer_progress);
 	expect_protocol_error([&] { static_cast<void>(session.start({"127.0.0.1", 8086, 100, 100})); }, "session_already_started");
 
 	for(std::uint64_t capture = 1; capture <= 3; ++capture)

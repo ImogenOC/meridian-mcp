@@ -36,6 +36,30 @@ fn detects_non_owned_changes_and_ignores_exact_owned_outputs() {
 }
 
 #[test]
+fn exact_owned_outputs_outside_the_snapshot_scope_are_ignored_not_exempted() {
+    let root = fixture();
+    let source = root.join("source.dm");
+    std::fs::write(&source, "before").unwrap();
+    let outside = root.with_extension("evidence");
+    std::fs::create_dir_all(&outside).unwrap();
+    let trace = outside.join("capture.tracy");
+    std::fs::write(&trace, "trace").unwrap();
+    let baseline = IntegrityBaseline::capture(&root).unwrap();
+
+    assert!(baseline
+        .checkpoint("external_output", std::slice::from_ref(&trace))
+        .is_ok());
+    std::fs::write(&source, "after").unwrap();
+    assert!(matches!(
+        baseline.checkpoint("workspace_change", &[trace]),
+        Err(IntegrityError::Violation(_))
+    ));
+
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
 fn checkpoint_serialization_contains_only_relative_paths() {
     let root = fixture();
     std::fs::write(root.join("source.dm"), "stable").unwrap();

@@ -76,10 +76,19 @@ $evidence = [ordered]@{
 	mcp_exit_code = $null
 	mcp_stderr = $null
 	response_timings_ms = $null
+	failure_stage = $null
+	failure_message = $null
+	host_log = $null
 	runner_image = [Environment]::GetEnvironmentVariable('ImageOS')
 	runner_image_version = [Environment]::GetEnvironmentVariable('ImageVersion')
 	os_version = [Environment]::OSVersion.VersionString
 	failure = $null
+}
+$currentStage = 'debugger_session'
+$diagnosticRedactions = @{
+	$mcpRoot = '<mcp-root>'
+	$fixtureRoot = '<fixture-root>'
+	$stateDirectory = '<state-directory>'
 }
 try {
 	$session = Invoke-McpSession -BinaryPath $binary -WorkingDirectory $mcpRoot -Environment $environment -Requests $requests -TimeoutMilliseconds 120000
@@ -100,9 +109,15 @@ try {
 	if ($tools -notcontains 'dm_debug_launch' -or $tools -notcontains 'dm_debug_stop') { throw 'Debugger tools were not advertised.' }
 	$evidence.overall = 'passed'
 } catch {
-	$evidence.failure = $_.Exception.Message
+	$evidence.failure_stage = $currentStage
+	$evidence.failure_message = ConvertTo-BoundedDiagnostic -Text $_.Exception.Message -Redactions $diagnosticRedactions
+	$evidence.failure = $evidence.failure_message
 	throw
 } finally {
+	$hostLogPath = [IO.Path]::ChangeExtension($dmb, '.log')
+	if (Test-Path -LiteralPath $hostLogPath -PathType Leaf) {
+		$evidence.host_log = ConvertTo-BoundedDiagnostic -Text (Get-Content -LiteralPath $hostLogPath -Raw) -Redactions $diagnosticRedactions
+	}
 	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 5) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 	Remove-Item -LiteralPath $stateDirectory -Recurse -Force -ErrorAction SilentlyContinue
 	foreach ($artifact in $ownedFixtureArtifacts) {

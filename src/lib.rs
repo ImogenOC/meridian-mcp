@@ -35,6 +35,7 @@ pub mod tracy_artifact;
 pub mod tracy_collector;
 pub mod tracy_experiment;
 pub mod tracy_protocol;
+pub mod tracy_runtime_config;
 pub mod tracy_statistics;
 pub mod workspace_integrity;
 

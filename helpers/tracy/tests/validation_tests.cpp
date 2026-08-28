@@ -17,6 +17,11 @@ bool has_error(const CaptureValidation& validation, const std::string& code)
 	return std::find(validation.error_codes.begin(), validation.error_codes.end(), code) != validation.error_codes.end();
 }
 
+bool has_warning(const CaptureValidation& validation, const std::string& code)
+{
+	return std::find(validation.warning_codes.begin(), validation.warning_codes.end(), code) != validation.warning_codes.end();
+}
+
 CaptureObservation valid_observation()
 {
 	return {
@@ -34,8 +39,8 @@ CaptureObservation valid_observation()
 		4096,
 		1024,
 		true,
-		{1024, 8, 12, 0, 0, 20, 18, 90, true, true, "516.1687", "offsets-516.1687"},
-		{1024, 4, 12, 0, 0, 120, 118, 1'000'000, true, true, "516.1687", "offsets-516.1687"},
+		{1024, 8, 12, 0, 0, 0, 20, 18, 90, true, true, "516.1687", "offsets-516.1687"},
+		{1024, 4, 12, 0, 0, 0, 120, 118, 1'000'000, true, true, "516.1687", "offsets-516.1687"},
 	};
 }
 
@@ -73,9 +78,32 @@ int main()
 	const auto valid = validate_capture(valid_observation());
 	assert(valid.valid);
 	assert(valid.error_codes.empty());
+	assert(valid.warning_codes.empty());
 	assert(valid.complete_frames == 2);
 	assert(valid.partial_frames == 0);
 	assert(valid.wall_span_seconds == 1.0);
+
+	auto refreshed_tail = valid_observation();
+	refreshed_tail.queue_end.tail_refresh_count = 206;
+	const auto refreshed_tail_result = validate_capture(refreshed_tail);
+	assert(refreshed_tail_result.valid);
+	assert(!has_error(refreshed_tail_result, "queue_saturated"));
+	assert(!has_warning(refreshed_tail_result, "queue_saturated"));
+
+	auto saturated = valid_observation();
+	saturated.queue_end.saturation_count = 1;
+	const auto saturated_result = validate_capture(saturated);
+	assert(saturated_result.valid);
+	assert(!has_error(saturated_result, "queue_saturated"));
+	assert(has_warning(saturated_result, "queue_saturated"));
+
+	auto producer_shortfall = valid_observation();
+	producer_shortfall.measured_wall_seconds = 10.0;
+	const auto producer_shortfall_result = validate_capture(producer_shortfall);
+	assert(!producer_shortfall_result.valid);
+	assert(has_error(producer_shortfall_result, "wall_span_mismatch"));
+	assert(has_error(producer_shortfall_result, "producer_progress_shortfall"));
+	assert(producer_shortfall_result.producer_progress_shortfall_seconds == 9.0);
 
 	auto boundary = valid_observation();
 	boundary.frames = {{0, 200}, {200, 1'100'000}, {0, 1'100'000}, {300, 300}};
@@ -116,7 +144,6 @@ int main()
 		"zero_source_files",
 		"trace_too_small",
 		"trace_reopen_failed",
-		"queue_saturated",
 		"queue_dropped_events",
 		"queue_depth_invalid",
 		"hook_not_installed",
@@ -125,6 +152,7 @@ int main()
 	{
 		assert(has_error(invalid_result, code));
 	}
+	assert(has_warning(invalid_result, "queue_saturated"));
 
 	auto clock_frequency = valid_observation();
 	clock_frequency.nanoseconds_per_tick = -1.0;

@@ -222,6 +222,7 @@ QueueHealth extract_queue_health(::tracy::Worker& worker)
 		metric("meridian.queue.capacity"),
 		metric("meridian.queue.depth"),
 		metric("meridian.queue.high_water"),
+		metric("meridian.queue.tail_refresh_count"),
 		metric("meridian.queue.saturation_count"),
 		metric("meridian.queue.dropped_events"),
 		metric("meridian.queue.produced_events"),

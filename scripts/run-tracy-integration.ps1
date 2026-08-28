@@ -30,9 +30,6 @@ $ownedArtifacts = @('tracy.dmb', 'tracy.rsc', 'tracy.pdb', 'tracy.log', 'prof.dl
 foreach ($artifact in $ownedArtifacts) {
 	Remove-Item -LiteralPath (Join-Path $fixtureRoot $artifact) -Force -ErrorAction SilentlyContinue
 }
-
-& $compiler (Join-Path $fixtureRoot 'tracy.dme')
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dmb -PathType Leaf)) { throw 'The Tracy fixture did not compile.' }
 $systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $stateDirectory = Join-Path $systemTemporaryRoot ('.meridian-tracy-state-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stateDirectory | Out-Null
@@ -69,8 +66,32 @@ $environment = @{
 	MERIDIAN_MCP_TRACY = 'byond'
 	PATH = ([IO.Path]::GetDirectoryName($compiler) + [IO.Path]::PathSeparator + $env:PATH)
 }
+$evidenceFile = [IO.Path]::GetFullPath($EvidencePath)
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $evidenceFile) | Out-Null
+$evidence = [ordered]@{
+	schema_version = 3
+	overall = 'failed'
+	byond = '516.1687'
+	tracy_protocol = 82
+	delayed_first_capture_seconds = $delay_seconds
+	capture_duration_ms = $duration_ms
+	capture_count = 4
+	failure_stage = $null
+	failure_message = $null
+	response_timings_ms = $null
+	mcp_stderr = $null
+}
+$currentStage = 'fixture_compile'
+$diagnosticRedactions = @{
+	$mcpRoot = '<mcp-root>'
+	$fixtureRoot = '<fixture-root>'
+	$stateDirectory = '<state-directory>'
+}
 
 try {
+	& $compiler (Join-Path $fixtureRoot 'tracy.dme')
+	if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dmb -PathType Leaf)) { throw 'The Tracy fixture did not compile.' }
+	$currentStage = 'mcp_session'
 	$afterResponse = {
 		param($request, $response)
 		if ($request.id -eq 6) {
@@ -79,6 +100,8 @@ try {
 		}
 	}
 	$session = Invoke-McpSession -BinaryPath $binary -WorkingDirectory $mcpRoot -Environment $environment -Requests $requests -TimeoutMilliseconds 480000 -AfterResponse $afterResponse
+	$evidence.response_timings_ms = $session.ResponseTimingsMilliseconds
+	$evidence.mcp_stderr = ConvertTo-BoundedDiagnostic -Text $session.Stderr -Redactions $diagnosticRedactions
 	if ($session.ExitCode -ne 0) { throw "Tracy MCP session exited with $($session.ExitCode)." }
 	$failures = @()
 	foreach ($id in 1..15) {
@@ -123,11 +146,20 @@ try {
 	if (@($comparison.items | Where-Object { $_.inclusive_delta_ns -ne 0 -or $_.self_delta_ns -ne 0 -or $_.count_delta -ne 0 }).Count -ne 0) { throw 'A trace compared with itself produced non-zero deltas.' }
 	$journal = Get-Content -LiteralPath (Join-Path $fixtureRoot '.meridian-tracy-session.json') -Raw | ConvertFrom-Json
 	if ($journal.status -ne 'finalized' -or $journal.last_action -ne 'finalized') { throw 'Tracy integrity journal was not finalized after stop.' }
-	$evidence = [ordered]@{ schema_version = 3; overall = 'passed'; byond = '516.1687'; tracy_protocol = 82; delayed_first_capture_seconds = $delay_seconds; capture_duration_ms = $duration_ms; capture_count = 4; immediate_capture = $true; meridian_mcp_build_id = $metadata.meridian_mcp_build.build_id; captures = @($traces | ForEach-Object { [ordered]@{ trace_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant(); trace_bytes = (Get-Item -LiteralPath $_).Length } }); known_proc = $true; frame_count = $frames.frame_count; repository_integrity = 'verified_by_mcp'; integrity_journal = 'finalized' }
-	$evidenceFile = [IO.Path]::GetFullPath($EvidencePath)
-	New-Item -ItemType Directory -Force -Path (Split-Path -Parent $evidenceFile) | Out-Null
-	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 5) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+	$evidence.overall = 'passed'
+	$evidence.immediate_capture = $true
+	$evidence.meridian_mcp_build_id = $metadata.meridian_mcp_build.build_id
+	$evidence.captures = @($traces | ForEach-Object { [ordered]@{ trace_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant(); trace_bytes = (Get-Item -LiteralPath $_).Length } })
+	$evidence.known_proc = $true
+	$evidence.frame_count = $frames.frame_count
+	$evidence.repository_integrity = 'verified_by_mcp'
+	$evidence.integrity_journal = 'finalized'
+} catch {
+	$evidence.failure_stage = $currentStage
+	$evidence.failure_message = ConvertTo-BoundedDiagnostic -Text $_.Exception.Message -Redactions $diagnosticRedactions
+	throw
 } finally {
+	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 8) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 	foreach ($artifact in $ownedArtifacts) {
 		Remove-Item -LiteralPath (Join-Path $fixtureRoot $artifact) -Force -ErrorAction SilentlyContinue
 	}

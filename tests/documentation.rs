@@ -244,6 +244,15 @@ fn tracy_evidence_semantics_and_honesty_are_documented() {
         "coefficient of variation exceeds `0.10`",
         "`max(1,000,000 ns, 0.20 * median)`",
         "Raw `.tracy` files remain local",
+        "`world.sleep_offline = TRUE`",
+        "`RESUME_AFTER_INITIALIZATIONS` alone is insufficient",
+        "`wake_sleeping_world`",
+        "`initialization_timeout_ms`",
+        "post-initialization Topic",
+        "process-contained loopback guest",
+        "sustained producer progress",
+        "`queue_saturated` is a warning",
+        "`queue_dropped_events` remains fatal",
         "Experimental",
     ] {
         assert!(

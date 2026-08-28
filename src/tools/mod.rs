@@ -759,6 +759,18 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             json!({"type":"string","description":"Existing contained directory for immutable experiment manifests, recovery journals, and diagnostics."}),
         ),
         (
+            "config_directory".into(),
+            json!({"type":"string","description":"Optional contained profiling configuration directory. It must contain config.txt and explicitly enable RESUME_AFTER_INITIALIZATIONS in config.txt or dev_overrides.txt; its full contents are hash-bound into launch identity. The flag requires a post-initialization wake before it can take effect on a headless world."}),
+        ),
+        (
+            "wake_sleeping_world".into(),
+            json!({"type":"boolean","default":true,"description":"When config_directory is supplied, wait for Meridian-Rift initialization, try bounded loopback Topic wakes, and if necessary hold one fixed MCP-owned loopback DreamSeeker guest connection until stop. Set false for a deliberately sleeping control run."}),
+        ),
+        (
+            "initialization_timeout_ms".into(),
+            json!({"type":"integer","minimum":1,"maximum":300000,"default":180000,"description":"Maximum wait for the fixed Meridian-Rift initialization-complete marker before the post-initialization wake request."}),
+        ),
+        (
             "experiment_name".into(),
             json!({"type":"string","maxLength":512}),
         ),
@@ -767,7 +779,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             json!({"type":"boolean","default":false}),
         ),
     ]));
-    tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters, an immutable executable/workload draft, and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":launch_properties,"required":["dmb_path","experiment_directory"]}) });
+    tools.push(ToolDefinition { name: "dm_tracy_launch".into(), description: "Launch an MCP-owned DreamDaemon with fixed Tracy parameters, an optional hash-bound post-initialization wake configuration, an immutable executable/workload draft, and a private loopback profiler endpoint.".into(), input_schema: json!({"type":"object","properties":launch_properties,"required":["dmb_path","experiment_directory"]}) });
     let mut capture_properties = workload_properties.as_object().cloned().unwrap_or_default();
     capture_properties.remove("experiment_name");
     capture_properties.extend(serde_json::Map::from_iter([

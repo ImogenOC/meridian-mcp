@@ -105,7 +105,7 @@ public:
 
 	[[nodiscard]] SessionStatus start(const SessionStartOptions& options);
 	[[nodiscard]] CaptureWindowResult capture(const CaptureWindowOptions& options);
-	[[nodiscard]] SessionStatus status() const;
+	[[nodiscard]] SessionStatus status();
 	[[nodiscard]] SessionStatus cancel();
 	[[nodiscard]] SessionStatus stop();
 

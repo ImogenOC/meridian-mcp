@@ -231,3 +231,17 @@ fn comparison_requires_identity_compatibility_before_native_analysis() {
         !compare_metadata(&baseline, &different_mcp, ComparisonMode::CrossExperiment).compatible
     );
 }
+
+#[test]
+fn saturation_without_data_loss_does_not_disqualify_a_control_capture() {
+    let mut saturated = metadata("experiment-a", "executable", "workload", "steady_state");
+    saturated.queue_saturated = true;
+    assert!(meridian_mcp::tracy_artifact::is_complete_control_capture(
+        &saturated
+    ));
+
+    saturated.capture_valid = false;
+    assert!(!meridian_mcp::tracy_artifact::is_complete_control_capture(
+        &saturated
+    ));
+}

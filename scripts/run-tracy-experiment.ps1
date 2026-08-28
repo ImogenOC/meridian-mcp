@@ -17,7 +17,11 @@ param(
 	[Parameter(Mandatory)] [string] $BinaryPath,
 	[Parameter(Mandatory)] [string] $HelperManifestPath,
 	[Parameter(Mandatory)] [string] $DreamMakerPath,
-	[Parameter(Mandatory)] [string] $EvidenceDirectory
+	[Parameter(Mandatory)] [string] $EvidenceDirectory,
+	[string] $ConfigDirectory,
+	[switch] $OverwritePreparedHook,
+	[switch] $DoNotWakeSleepingWorld,
+	[ValidateRange(1, 300)] [int] $InitializationTimeoutSeconds = 180
 )
 
 Set-StrictMode -Version 2.0
@@ -46,13 +50,20 @@ function Request([int]$Id, [string]$Name, [hashtable]$Arguments) {
 
 $traces = 1..$ControlCount | ForEach-Object { Join-Path $evidence ("control-{0:D2}.tracy" -f $_) }
 $launch = @{ dmb_path = $dmb; experiment_name = $ExperimentName; experiment_directory = $evidence; feature_set = $FeatureSet; annotations = $Annotations }
+$config = $null
+if (-not [string]::IsNullOrWhiteSpace($ConfigDirectory)) {
+	$config = (Resolve-Path -LiteralPath $ConfigDirectory).Path
+	$launch.config_directory = $config
+	$launch.wake_sleeping_world = -not $DoNotWakeSleepingWorld
+	$launch.initialization_timeout_ms = $InitializationTimeoutSeconds * 1000
+}
 foreach ($pair in @(@('map',$Map), @('seed',$Seed), @('configuration_profile',$ConfigurationProfile), @('scenario',$Scenario), @('external_run_id',$ExternalRunId))) {
 	if (-not [string]::IsNullOrWhiteSpace($pair[1])) { $launch[$pair[0]] = $pair[1] }
 }
 $requests = @(
 	(ConvertTo-McpJsonLine ([ordered]@{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = [ordered]@{ protocolVersion = '2024-11-05'; capabilities = [ordered]@{}; clientInfo = [ordered]@{ name = 'meridian-tracy-experiment'; version = '1.0' } } })),
 	(ConvertTo-McpJsonLine ([ordered]@{ jsonrpc = '2.0'; method = 'notifications/initialized'; params = [ordered]@{} })),
-	(Request 2 'dm_tracy_prepare' @{ dmb_path = $dmb }),
+	(Request 2 'dm_tracy_prepare' @{ dmb_path = $dmb; overwrite = [bool]$OverwritePreparedHook }),
 	(Request 3 'dm_tracy_launch' $launch),
 	(Request 4 'dm_tracy_status' @{})
 )
@@ -73,7 +84,9 @@ $nextId++
 $stopId = $nextId
 $requests += Request $stopId 'dm_tracy_stop' @{}
 
-$environment = @{ MERIDIAN_MCP_MODE = 'development'; MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, @($root, $evidence, (Split-Path -Parent $dmb))); MERIDIAN_MCP_HELPER_MANIFEST = $manifest; MERIDIAN_MCP_TRACY = 'byond'; MERIDIAN_MCP_COMPILERS = $dreamMaker; MERIDIAN_MCP_STATE_DIR = $stateDirectory; PATH = ((Split-Path -Parent $dreamMaker) + [IO.Path]::PathSeparator + $env:PATH) }
+$authorizedRoots = @($root, $evidence, (Split-Path -Parent $dmb))
+if ($config) { $authorizedRoots += $config }
+$environment = @{ MERIDIAN_MCP_MODE = 'development'; MERIDIAN_MCP_ROOTS = [string]::Join([IO.Path]::PathSeparator, $authorizedRoots); MERIDIAN_MCP_HELPER_MANIFEST = $manifest; MERIDIAN_MCP_TRACY = 'byond'; MERIDIAN_MCP_COMPILERS = $dreamMaker; MERIDIAN_MCP_STATE_DIR = $stateDirectory; PATH = ((Split-Path -Parent $dreamMaker) + [IO.Path]::PathSeparator + $env:PATH) }
 $status = 'failed'
 $failure = $null
 $completedSteps = [Collections.Generic.List[string]]::new()

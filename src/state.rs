@@ -336,6 +336,12 @@ pub struct TracyCaptureState {
     pub(crate) capture_records: Vec<serde_json::Value>,
     pub(crate) diagnostic_records: Vec<serde_json::Value>,
     pub(crate) network_records: Vec<serde_json::Value>,
+    pub(crate) wake_client: Option<TracyWakeClient>,
+}
+
+pub(crate) struct TracyWakeClient {
+    pub(crate) process: Child,
+    pub(crate) containment: crate::process::ProcessContainment,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

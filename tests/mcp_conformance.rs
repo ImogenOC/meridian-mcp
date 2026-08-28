@@ -237,6 +237,22 @@ fn tracy_inventory_is_opt_in_and_exposes_fixed_command_tools_only() {
         launch.input_schema["properties"]["startup_timeout_ms"]["default"],
         60_000
     );
+    assert_eq!(
+        launch.input_schema["properties"]["config_directory"]["type"],
+        "string"
+    );
+    assert_eq!(
+        launch.input_schema["properties"]["wake_sleeping_world"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        launch.input_schema["properties"]["wake_sleeping_world"]["default"],
+        true
+    );
+    assert_eq!(
+        launch.input_schema["properties"]["initialization_timeout_ms"]["maximum"],
+        300_000
+    );
     assert!(launch.input_schema["required"]
         .as_array()
         .unwrap()

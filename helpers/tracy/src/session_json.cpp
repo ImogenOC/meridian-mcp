@@ -53,6 +53,7 @@ nlohmann::json queue_health_json(const QueueHealth& health)
 		{"capacity", health.capacity},
 		{"depth", health.depth},
 		{"high_water", health.high_water},
+		{"tail_refresh_count", health.tail_refresh_count},
 		{"saturation_count", health.saturation_count},
 		{"dropped_events", health.dropped_events},
 		{"produced_events", health.produced_events},
@@ -77,12 +78,17 @@ nlohmann::json validation_json(const CaptureValidation& validation)
 		{"trace_end_ns", validation.trace_end_ns},
 		{"nanoseconds_per_tick", validation.nanoseconds_per_tick},
 		{"wall_span_seconds", validation.wall_span_seconds},
+		{"requested_wall_seconds", validation.requested_wall_seconds},
+		{"measured_wall_seconds", validation.measured_wall_seconds},
+		{"wall_tolerance_seconds", validation.wall_tolerance_seconds},
+		{"producer_progress_shortfall_seconds", validation.producer_progress_shortfall_seconds},
 		{"complete_frames", validation.complete_frames},
 		{"partial_frames", validation.partial_frames},
 		{"zones", validation.zones},
 		{"source_files", validation.source_files},
 		{"queue", queue_health_json(validation.queue)},
 		{"error_codes", validation.error_codes},
+		{"warning_codes", validation.warning_codes},
 	};
 }
 

@@ -51,9 +51,19 @@ $evidence = [ordered]@{
 	fixture_id = 'owned-provenance-fixture'
 	byond_version = $ExpectedByondVersion
 	mcp_build_id = $null
+	failure_stage = $null
+	failure_message = $null
+	response_timings_ms = [ordered]@{}
+	mcp_stderr = $null
 	steps = [System.Collections.Generic.List[object]]::new()
 	state_journal_finalized = $false
 	owned_processes_remaining = 0
+}
+$currentStage = 'fixture_setup'
+$lastSession = $null
+$diagnosticRedactions = @{
+	$mcpRoot = '<mcp-root>'
+	$temporaryRoot = '<temporary-root>'
 }
 
 try {
@@ -71,6 +81,7 @@ try {
 	$dmb = Join-Path $fixtureRoot 'fixture.dmb'
 	$manifest = Join-Path $fixtureRoot 'fixture-manifest.json'
 
+	$currentStage = 'fresh_compile_launch'
 	$initial = Invoke-FixtureSession @(
 		(New-Call 2 'dm_server_status' @{}),
 		(New-Call 3 'dm_parse_environment' @{ dme_path = $dme }),
@@ -80,6 +91,8 @@ try {
 		(New-Call 7 'dm_wait_for_output' @{ pattern = 'MERIDIAN_INTEGRITY_PHASE_COMPLETE'; timeout_ms = 60000 }),
 		(New-Call 8 'dm_stop' @{})
 	) $fixtureRoot $stateRoot
+	$lastSession = $initial
+	$evidence.response_timings_ms[$currentStage] = $initial.ResponseTimingsMilliseconds
 	foreach ($id in 2..8) {
 		$payload = Get-ToolPayload $initial $id
 		if ($payload.is_error) { throw "Initial fixture request $id failed: $($payload.text)" }
@@ -94,23 +107,30 @@ try {
 	$evidence.state_journal_finalized = ([string]$stop.integrity.status).StartsWith('finalized_')
 
 	[IO.File]::WriteAllText((Join-Path $fixtureRoot 'generated_bindings.dm'), "this is not valid DreamMaker source`n", [Text.UTF8Encoding]::new($false))
+	$currentStage = 'changed_input'
 	$stale = Invoke-FixtureSession @(
 		(New-Call 2 'dm_parse_environment' @{ dme_path = $dme }),
 		(New-Call 3 'dm_check_fixture_sync' @{ fixture_manifest_path = $manifest }),
 		(New-Call 4 'dm_run' @{ dmb_path = $dmb; require_verified_provenance = $true }),
 		(New-Call 5 'dm_compile' @{ dme_path = $dme; compiler_path = $dreamMaker; fixture_manifest_path = $manifest })
 	) $fixtureRoot $stateRoot
+	$lastSession = $stale
+	$evidence.response_timings_ms[$currentStage] = $stale.ResponseTimingsMilliseconds
 	$staleText = $stale.Responses | ConvertTo-Json -Depth 30 -Compress
 	if ($staleText -notmatch 'stale_build_artifact') { throw 'Changed input did not produce stale_build_artifact.' }
 	if ($staleText -notmatch 'dmb_updated') { throw 'Failed compile did not report dmb_updated.' }
 	$evidence.steps.Add([ordered]@{ id = 'changed_input'; classification = 'stale_build_artifact'; dmb_updated = $false })
 
+	$currentStage = 'restart_stale_retention'
 	$restart = Invoke-FixtureSession @((New-Call 2 'dm_run' @{ dmb_path = $dmb; require_verified_provenance = $true })) $fixtureRoot $stateRoot
+	$lastSession = $restart
+	$evidence.response_timings_ms[$currentStage] = $restart.ResponseTimingsMilliseconds
 	if (($restart.Responses | ConvertTo-Json -Depth 20 -Compress) -notmatch 'stale_build_artifact') { throw 'Restart did not retain stale build rejection.' }
 	$evidence.steps.Add([ordered]@{ id = 'restart_stale_retention'; classification = 'stale_build_artifact' })
 
 	[IO.File]::WriteAllBytes((Join-Path $fixtureRoot 'generated_bindings.dm'), $originalBindings)
 	[IO.File]::WriteAllText((Join-Path $fixtureRoot 'tracked-runtime-artifact.txt'), "unchanged before runtime`n", [Text.UTF8Encoding]::new($false))
+	$currentStage = 'restored_compile_launch'
 	$restored = Invoke-FixtureSession @(
 		(New-Call 2 'dm_parse_environment' @{ dme_path = $dme }),
 		(New-Call 3 'dm_check_fixture_sync' @{ fixture_manifest_path = $manifest }),
@@ -119,6 +139,8 @@ try {
 		(New-Call 6 'dm_wait_for_output' @{ pattern = 'MERIDIAN_INTEGRITY_PHASE_COMPLETE'; timeout_ms = 60000 }),
 		(New-Call 7 'dm_stop' @{})
 	) $fixtureRoot $stateRoot
+	$lastSession = $restored
+	$evidence.response_timings_ms[$currentStage] = $restored.ResponseTimingsMilliseconds
 	foreach ($id in 2..7) {
 		$payload = Get-ToolPayload $restored $id
 		if ($payload.is_error) { throw "Restored fixture request $id failed: $($payload.text)" }
@@ -128,7 +150,12 @@ try {
 	$evidence.state_journal_finalized = $evidence.state_journal_finalized -and ([string]$restoredStop.integrity.status).StartsWith('finalized_')
 	$evidence.overall = 'passed'
 } catch {
-	$evidence.steps.Add([ordered]@{ id = 'failure'; classification = 'failed'; code = $_.Exception.GetType().Name })
+	$evidence.failure_stage = $currentStage
+	$evidence.failure_message = ConvertTo-BoundedDiagnostic -Text $_.Exception.Message -Redactions $diagnosticRedactions
+	if ($null -ne $lastSession) {
+		$evidence.mcp_stderr = ConvertTo-BoundedDiagnostic -Text $lastSession.Stderr -Redactions $diagnosticRedactions
+	}
+	$evidence.steps.Add([ordered]@{ id = 'failure'; classification = 'failed'; code = $_.Exception.GetType().Name; stage = $currentStage })
 	throw
 } finally {
 	[IO.File]::WriteAllText($evidenceFile, (($evidence | ConvertTo-Json -Depth 12) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))

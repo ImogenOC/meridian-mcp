@@ -6,6 +6,31 @@ function ConvertTo-McpJsonLine {
 	return ($Request | ConvertTo-Json -Compress -Depth 20)
 }
 
+function ConvertTo-BoundedDiagnostic {
+	param(
+		[AllowNull()][string]$Text,
+		[hashtable]$Redactions = @{},
+		[ValidateRange(256, 65536)][int]$MaximumLength = 8192
+	)
+
+	if ([string]::IsNullOrWhiteSpace($Text)) {
+		return $null
+	}
+	$value = [regex]::Replace($Text, "`e\[[0-9;]*[A-Za-z]", '')
+	foreach ($entry in @($Redactions.GetEnumerator() | Sort-Object { ([string]$_.Key).Length } -Descending)) {
+		$key = [string]$entry.Key
+		if (-not [string]::IsNullOrWhiteSpace($key)) {
+			$value = $value.Replace($key, [string]$entry.Value)
+		}
+	}
+	$value = [regex]::Replace($value, '(?i)[A-Z]:\\Users\\[^\\\r\n]+', '<user-profile>')
+	$value = [regex]::Replace($value, '/(?:home|Users)/[^/\r\n]+', '<user-profile>')
+	if ($value.Length -gt $MaximumLength) {
+		$value = $value.Substring(0, $MaximumLength - 15) + '... [truncated]'
+	}
+	return $value
+}
+
 function Invoke-McpSession {
 	[CmdletBinding()]
 	param(
@@ -113,4 +138,4 @@ function Get-McpResponse {
 	return $response[0]
 }
 
-Export-ModuleMember -Function ConvertTo-McpJsonLine, Invoke-McpSession, Get-McpResponse
+Export-ModuleMember -Function ConvertTo-McpJsonLine, ConvertTo-BoundedDiagnostic, Invoke-McpSession, Get-McpResponse

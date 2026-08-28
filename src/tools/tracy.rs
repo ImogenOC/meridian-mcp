@@ -17,10 +17,69 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::Read;
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Command as TokioCommand;
+
+fn wake_client_executable(dreamdaemon: &Path) -> Result<PathBuf> {
+    let parent = dreamdaemon
+        .parent()
+        .ok_or_else(|| anyhow!("DreamDaemon has no installation directory"))?;
+    let client_name = if cfg!(windows) {
+        "dreamseeker.exe"
+    } else {
+        "DreamSeeker"
+    };
+    let client = parent.join(client_name);
+    if !client.is_file() {
+        return Err(anyhow!(
+            "DreamSeeker sibling not found beside the allowlisted DreamDaemon"
+        ));
+    }
+    Ok(client.canonicalize()?)
+}
+
+async fn spawn_wake_client(
+    executable: &Path,
+    working_directory: &Path,
+    game_port: u16,
+) -> Result<crate::state::TracyWakeClient> {
+    let mut command = TokioCommand::new(executable);
+    command
+        .arg(crate::tracy_runtime_config::wake_client_url(game_port))
+        .current_dir(working_directory)
+        .env_clear()
+        .envs(crate::process_environment::minimal_runtime_environment())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let containment = crate::process::ProcessContainment::new()?;
+    let mut process = command.spawn()?;
+    if let Err(error) = containment.assign(process.id().unwrap_or_default()) {
+        let _ = process.kill().await;
+        return Err(
+            error.context("refusing to run the Tracy wake client outside process containment")
+        );
+    }
+    Ok(crate::state::TracyWakeClient {
+        process,
+        containment,
+    })
+}
+
+async fn stop_wake_client(mut client: crate::state::TracyWakeClient) {
+    let _ = client.containment.terminate(1);
+    if tokio::time::timeout(Duration::from_secs(5), client.process.wait())
+        .await
+        .is_err()
+    {
+        let _ = client.process.kill().await;
+        let _ = client.process.wait().await;
+    }
+}
 
 pub async fn prepare(context: &ToolExecutionContext, args: Value) -> Result<ToolResult> {
     let installation = context
@@ -137,10 +196,39 @@ pub async fn launch(
         .get("startup_timeout_ms")
         .and_then(Value::as_u64)
         .unwrap_or(60_000);
+    let runtime_configuration = optional_string(&args, "config_directory")?
+        .map(|path| context.policy().read_path(path))
+        .transpose()?
+        .map(|path| crate::tracy_runtime_config::inspect_runtime_configuration(&path))
+        .transpose()?;
+    let wake_sleeping_world = runtime_configuration.is_some()
+        && args
+            .get("wake_sleeping_world")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+    let wake_client = wake_sleeping_world
+        .then(|| wake_client_executable(&dreamdaemon))
+        .transpose()?;
+    let wake_client_sha256 = wake_client
+        .as_ref()
+        .map(|path| hash_file(path))
+        .transpose()?;
+    let initialization_timeout_ms = args
+        .get("initialization_timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(180_000)
+        .min(300_000);
     let launch_parameters_sha256 = canonical_sha256(&json!({
         "game_port": args.get("game_port").and_then(Value::as_u64).unwrap_or(1337),
         "startup_timeout_ms": readiness_timeout_ms,
         "profiler_transport": "loopback_ephemeral",
+        "runtime_configuration": runtime_configuration.as_ref().map(|configuration| &configuration.identity),
+        "wake_sleeping_world": wake_sleeping_world,
+        "wake_fallback": wake_client_sha256.as_ref().map(|sha256| json!({
+            "strategy":"owned_loopback_dreamseeker",
+            "sha256":sha256,
+        })),
+        "initialization_timeout_ms": initialization_timeout_ms,
     }))?;
     let rsc_path = canonical_dmb.with_extension("rsc");
     let executable = finalize_executable(ExecutableIdentity {
@@ -183,6 +271,9 @@ pub async fn launch(
         meridian_mcp_build: crate::build_identity::current().clone(),
         executable: executable.clone(),
         workload_draft: workload_draft.clone(),
+        runtime_configuration: runtime_configuration
+            .as_ref()
+            .map(|configuration| configuration.identity.clone()),
     };
     let experiment_directory = context
         .policy()
@@ -241,6 +332,10 @@ pub async fn launch(
             final_manifest_path,
             executable,
             workload_draft,
+            runtime_configuration: runtime_configuration
+                .as_ref()
+                .map(|configuration| configuration.identity.clone()),
+            runtime_wake: None,
             locked_identity: None,
         });
         capture.used_phases.clear();
@@ -255,10 +350,14 @@ pub async fn launch(
         .get("game_port")
         .and_then(Value::as_u64)
         .unwrap_or(1337) as u16;
+    let daemon_args = runtime_configuration
+        .as_ref()
+        .map(|configuration| vec!["-params".to_owned(), configuration.world_parameter()])
+        .unwrap_or_default();
     let runtime_result = super::runtime::run_profiled(
         context,
         state,
-        json!({"dmb_path":dmb_path,"port":game_port,"require_verified_provenance":require_verified_provenance}),
+        json!({"dmb_path":dmb_path,"port":game_port,"require_verified_provenance":require_verified_provenance,"daemon_args":daemon_args}),
         profiler_port,
     )
     .await?;
@@ -302,10 +401,207 @@ pub async fn launch(
     };
     {
         let mut capture = state.tracy_capture().await;
-        capture.collector = Some(collector);
+        capture.collector = Some(Arc::clone(&collector));
         capture.phase = Some(TracySessionPhase::HealthyIdle);
         capture.last_status = Some(readiness);
     }
+    let runtime_wake = if wake_sleeping_world {
+        let initialization = super::runtime::wait_for_literal_output(
+            state,
+            "Initializations complete within",
+            initialization_timeout_ms,
+        )
+        .await?;
+        if initialization["matched"].as_bool() != Some(true) {
+            let _ = stop(context, state).await;
+            return Ok(structured_error(
+                ToolErrorCode::TimedOut,
+                "Meridian-Rift did not reach the fixed initialization-complete marker before the wake deadline.",
+                Some("Inspect recent DreamDaemon output, correct initialization failures, and relaunch the profiling session.".to_owned()),
+                json!({"initialization":initialization,"cleanup_attempted":true}),
+            ));
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let address = format!("127.0.0.1:{game_port}");
+        let mut attempts = Vec::new();
+        let mut accepted = None;
+        for attempt in 1..=3 {
+            let before = collector
+                .status()
+                .await
+                .ok()
+                .and_then(|status| status["producer_progress"].as_u64())
+                .unwrap_or(0);
+            match super::runtime::send_topic(&address, "meridian_profiler_wake=1", 10_000).await {
+                Ok(response) => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let wake_observed = collector
+                        .status()
+                        .await
+                        .ok()
+                        .and_then(|status| status["producer_progress"].as_u64())
+                        .unwrap_or(0);
+                    tokio::time::sleep(Duration::from_millis(1_500)).await;
+                    let sustained = collector
+                        .status()
+                        .await
+                        .ok()
+                        .and_then(|status| status["producer_progress"].as_u64())
+                        .unwrap_or(0);
+                    let continued = crate::tracy_runtime_config::sustained_scheduler_progress(
+                        before,
+                        wake_observed,
+                        sustained,
+                    );
+                    attempts.push(json!({
+                        "attempt":attempt,
+                        "topic_processed":true,
+                        "response_bytes":response.len(),
+                        "producer_progress_before":before,
+                        "producer_progress_after_wake":wake_observed,
+                        "producer_progress_sustained":sustained,
+                        "sustained":continued,
+                    }));
+                    if continued {
+                        accepted = Some(sustained);
+                        break;
+                    }
+                }
+                Err(error) => attempts.push(json!({
+                    "attempt":attempt,
+                    "topic_processed":false,
+                    "error":error.to_string(),
+                    "producer_progress_before":before,
+                    "sustained":false,
+                })),
+            }
+        }
+        let mut strategy = "post_initialization_topic";
+        let mut wake_client_evidence = None;
+        if accepted.is_none() {
+            strategy = "owned_loopback_dreamseeker";
+            let executable = wake_client
+                .as_ref()
+                .expect("wake client was qualified before launch");
+            let client = match spawn_wake_client(
+                executable,
+                canonical_dmb
+                    .parent()
+                    .expect("canonical DMB has a parent directory"),
+                game_port,
+            )
+            .await
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    let runtime_wake = json!({
+                        "strategy":strategy,
+                        "initialization_marker":"Initializations complete within",
+                        "attempts":attempts,
+                        "topic_processed":true,
+                        "sustained_producer_progress":false,
+                        "wake_client_error":error.to_string(),
+                    });
+                    state
+                        .tracy_capture()
+                        .await
+                        .experiment
+                        .as_mut()
+                        .expect("launch initialized experiment state")
+                        .runtime_wake = Some(runtime_wake.clone());
+                    let _ = stop(context, state).await;
+                    return Ok(structured_error(
+                        ToolErrorCode::ExternalToolFailure,
+                        "DreamSeeker could not be started to keep the initialized headless world awake.",
+                        Some("Verify the fixed DreamSeeker sibling installation and that the Windows session can launch a local BYOND client, then relaunch profiling.".to_owned()),
+                        json!({"runtime_wake":runtime_wake,"cleanup_attempted":true}),
+                    ));
+                }
+            };
+            let client_pid = client.process.id();
+            state.tracy_capture().await.wake_client = Some(client);
+            let before = collector
+                .status()
+                .await
+                .ok()
+                .and_then(|status| status["producer_progress"].as_u64())
+                .unwrap_or(0);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            let mut observed = None;
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let progress = collector
+                    .status()
+                    .await
+                    .ok()
+                    .and_then(|status| status["producer_progress"].as_u64())
+                    .unwrap_or(0);
+                match observed {
+                    None if progress > before => observed = Some(progress),
+                    Some(first) if progress > first => {
+                        accepted = Some(progress);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            wake_client_evidence = Some(json!({
+                "pid":client_pid,
+                "sha256":wake_client_sha256,
+                "producer_progress_before":before,
+                "producer_progress_after_connect":observed,
+                "producer_progress_sustained":accepted,
+                "sustained":accepted.is_some(),
+                "timeout_ms":60_000,
+            }));
+        }
+        let Some(producer_progress) = accepted else {
+            let runtime_wake = json!({
+                "strategy":strategy,
+                "initialization_marker":"Initializations complete within",
+                "initialization_timeout_ms":initialization_timeout_ms,
+                "settle_ms":5_000,
+                "attempts":attempts,
+                "wake_client":wake_client_evidence,
+                "topic_processed":true,
+                "sustained_producer_progress":false,
+            });
+            state
+                .tracy_capture()
+                .await
+                .experiment
+                .as_mut()
+                .expect("launch initialized experiment state")
+                .runtime_wake = Some(runtime_wake.clone());
+            let _ = stop(context, state).await;
+            return Ok(structured_error(
+                ToolErrorCode::ExternalToolFailure,
+                "DreamDaemon did not sustain producer progress after the bounded post-initialization wake sequence.",
+                Some("Inspect runtime_wake evidence for the Topic attempts and owned DreamSeeker connection, then correct the BYOND runtime or configuration before relaunching.".to_owned()),
+                json!({"runtime_wake":runtime_wake,"cleanup_attempted":true}),
+            ));
+        };
+        Some(json!({
+            "strategy":strategy,
+            "initialization_marker":"Initializations complete within",
+            "initialization_timeout_ms":initialization_timeout_ms,
+            "settle_ms":5_000,
+            "attempts":attempts,
+            "wake_client":wake_client_evidence,
+            "topic_processed":true,
+            "sustained_producer_progress":true,
+            "producer_progress":producer_progress,
+        }))
+    } else {
+        None
+    };
+    state
+        .tracy_capture()
+        .await
+        .experiment
+        .as_mut()
+        .expect("launch initialized experiment state")
+        .runtime_wake = runtime_wake.clone();
     let process_identities = owned_process_identities(state).await;
     let experiment_started_at = tokio::time::Instant::now();
     let (memory_series, memory_stop, memory_task) =
@@ -341,6 +637,8 @@ pub async fn launch(
             "profiler_port":profiler_port,
             "collector":state.tracy_capture().await.last_status,
             "executable_identity":state.tracy_capture().await.experiment.as_ref().map(|experiment| &experiment.executable),
+            "runtime_configuration":state.tracy_capture().await.experiment.as_ref().and_then(|experiment| experiment.runtime_configuration.as_ref()),
+            "runtime_wake":runtime_wake,
             "integrity_checkpoint":integrity_checkpoint,
             "integrity_journal":state.tracy_capture().await.integrity_journal.as_ref().map(crate::workspace_integrity::IntegrityJournal::summary),
             "launch_provenance":launch_provenance,
@@ -427,7 +725,13 @@ pub async fn capture(
         .map(|identity| identity.pid)
         .collect::<Vec<_>>();
     network_audit.sample(&owned_process_ids, 0);
-    let (experiment, launch_manifest_sha256, experiment_manifest_sha256, experiment_directory) = {
+    let (
+        experiment,
+        launch_manifest_sha256,
+        experiment_manifest_sha256,
+        experiment_directory,
+        runtime_wake,
+    ) = {
         let mut capture = state.tracy_capture().await;
         let (result, new_owned_path) = {
             let experiment = capture
@@ -465,6 +769,7 @@ pub async fn capture(
                     experiment.launch_manifest_sha256.clone(),
                     manifest_sha256,
                     experiment.directory.clone(),
+                    experiment.runtime_wake.clone(),
                 ),
                 new_owned_path,
             )
@@ -720,6 +1025,7 @@ pub async fn capture(
         "meridian_mcp_build":crate::build_identity::current(),
         "launch_manifest_sha256":launch_manifest_sha256,
         "experiment_manifest_sha256":experiment_manifest_sha256,
+        "runtime_wake":runtime_wake,
     });
     let artifacts = reserved.promote(&sidecar)?;
     {
@@ -913,6 +1219,7 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
             "last_capture_error":capture.last_error,
             "collector_phase":capture.phase,
             "collector_status":capture.last_status,
+            "runtime_wake":capture.experiment.as_ref().and_then(|experiment| experiment.runtime_wake.as_ref()),
             "integrity_journal":capture.integrity_journal.as_ref().map(crate::workspace_integrity::IntegrityJournal::summary),
             "collector_stderr_tail":collector_stderr_tail,
             "collector_exit_code":collector_exit_code,
@@ -947,6 +1254,9 @@ pub async fn stop(
     }
     if let Some(collector) = state.tracy_capture().await.collector.take() {
         let _ = collector.stop(Duration::from_secs(10)).await;
+    }
+    if let Some(client) = state.tracy_capture().await.wake_client.take() {
+        stop_wake_client(client).await;
     }
     let mut runtime = state.runtime().await;
     let runtime_was_running = runtime.is_game_running();
@@ -1003,6 +1313,8 @@ pub async fn stop(
         let document = json!({
             "schema": 2,
             "experiment_identity": experiment.locked_identity,
+            "runtime_configuration": experiment.runtime_configuration,
+            "runtime_wake": experiment.runtime_wake,
             "meridian_mcp_build": crate::build_identity::current(),
             "launch_manifest_sha256": experiment.launch_manifest_sha256,
             "captures": capture_records,
@@ -1299,7 +1611,7 @@ pub async fn control_stats(
     };
     let incomplete_count = metadata
         .iter()
-        .filter(|item| !item.capture_valid || item.queue_saturated || item.complete_frames < 3)
+        .filter(|item| !crate::tracy_artifact::is_complete_control_capture(item))
         .count();
     let mut compatibility = crate::tracy_artifact::ComparisonCompatibility {
         compatible: true,
@@ -1308,6 +1620,11 @@ pub async fn control_stats(
         mismatches: Vec::new(),
         warnings: Vec::new(),
     };
+    if metadata.iter().any(|item| item.queue_saturated) {
+        compatibility
+            .warnings
+            .push("queue_saturation_observed_without_data_loss".to_owned());
+    }
     for current in metadata.iter().skip(1) {
         let result =
             crate::tracy_artifact::compare_metadata(&metadata[0], current, comparison_mode);
@@ -1645,7 +1962,16 @@ fn valid_phase(phase: &str) -> bool {
 async fn owned_process_identities(
     state: &crate::state::ServerState,
 ) -> Vec<crate::process_metrics::ProcessIdentity> {
-    let collector = state.tracy_capture().await.collector.clone();
+    let (collector, wake_client_pid) = {
+        let capture = state.tracy_capture().await;
+        (
+            capture.collector.clone(),
+            capture
+                .wake_client
+                .as_ref()
+                .and_then(|client| client.process.id()),
+        )
+    };
     let collector_pid = match collector {
         Some(collector) => collector.process_id().await,
         None => None,
@@ -1658,6 +1984,10 @@ async fn owned_process_identities(
         .and_then(|process| process.id());
     [
         (game_pid, crate::process_metrics::ProcessRole::DreamDaemon),
+        (
+            wake_client_pid,
+            crate::process_metrics::ProcessRole::DreamSeeker,
+        ),
         (
             collector_pid,
             crate::process_metrics::ProcessRole::Collector,

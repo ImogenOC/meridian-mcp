@@ -19,10 +19,12 @@ fn tracy_builder_is_pinned_dual_arch_and_offline_with_owned_native_tests() {
         "byond-tracy-health.patch",
         "tracy-clock-access.patch",
         "git apply --check",
+        "--directory=$sourcePrefix",
         "patch_sha256",
         "queue_capacity",
         "queue_depth",
         "queue_high_water",
+        "queue_tail_refresh_count",
         "queue_saturation_count",
         "queue_dropped_events",
         "produced_events",
@@ -43,6 +45,19 @@ fn tracy_builder_is_pinned_dual_arch_and_offline_with_owned_native_tests() {
             "builder must not fetch sources: {forbidden}"
         );
     }
+}
+
+#[test]
+fn owned_patch_files_are_forced_to_lf_with_unified_diff_whitespace_rules() {
+    let attributes =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".gitattributes"))
+            .expect(".gitattributes should exist");
+    assert!(
+        attributes
+            .lines()
+            .any(|line| line == "*.patch text eol=lf whitespace=-space-before-tab"),
+        "owned patches must remain LF and permit unified-diff context markers before tab indentation"
+    );
 }
 
 #[test]

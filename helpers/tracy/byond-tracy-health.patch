@@ -49,7 +49,7 @@ index cdf495e..7543660 100644
  struct event {
  	char unsigned type;
  	union {
-@@ -1267,9 +1288,33 @@ struct event {
+@@ -1267,9 +1288,34 @@ struct event {
  		struct event_zone_end zone_end;
  		struct event_zone_color zone_color;
  		struct event_frame_mark frame_mark;
@@ -68,6 +68,7 @@ index cdf495e..7543660 100644
 +	long long unsigned capacity;
 +	_Alignas(8) meridian_atomic_u64 depth;
 +	_Alignas(8) meridian_atomic_u64 high_water;
++	_Alignas(8) meridian_atomic_u64 tail_refresh_count;
 +	_Alignas(8) meridian_atomic_u64 saturation_count;
 +	_Alignas(8) meridian_atomic_u64 dropped_events;
 +	_Alignas(8) meridian_atomic_u64 produced_events;
@@ -83,7 +84,7 @@ index cdf495e..7543660 100644
  struct trampoline_storage {
  	char exec_proc[32];
  	char server_tick[32];
-@@ -1319,21 +1364,28 @@ static struct {
+@@ -1319,21 +1365,28 @@ static struct {
  
  		// https://github.com/wolfpld/tracy/blame/master/public/common/TracyQueue.hpp#L10
  		char unsigned zone_begin;
@@ -112,7 +113,7 @@ index cdf495e..7543660 100644
  		char unsigned query_thread_string;
  		char unsigned query_source_location;
  		char unsigned query_disconnect;
-@@ -1386,15 +1438,21 @@ static struct {
+@@ -1386,15 +1439,21 @@ static struct {
  		_Alignas(UTRACY_L1_LINE_SIZE) int padding;
  #endif
  	} queue;
@@ -134,17 +135,18 @@ index cdf495e..7543660 100644
  	return 0;
  }
  
-@@ -1407,13 +1465,22 @@ void event_queue_push(struct event const *const event) {
+@@ -1407,13 +1466,23 @@ void event_queue_push(struct event const *const event) {
  		next_store = 0;
  	}
  
 +	int saturated = 0;
  	while(unlikely(next_store == utracy.queue.producer_tail_cache)) {
-+		if(!saturated) {
++		(void) meridian_atomic_fetch_add(&utracy.health.tail_refresh_count, 1);
+ 		utracy.queue.producer_tail_cache = atomic_load_acquire(&utracy.queue.tail);
++		if(next_store == utracy.queue.producer_tail_cache && !saturated) {
 +			(void) meridian_atomic_fetch_add(&utracy.health.saturation_count, 1);
 +			saturated = 1;
 +		}
- 		utracy.queue.producer_tail_cache = atomic_load_acquire(&utracy.queue.tail);
  	}
  
  	utracy.queue.events[store] = *event;
@@ -157,7 +159,7 @@ index cdf495e..7543660 100644
  }
  
  UTRACY_INTERNAL UTRACY_INLINE
-@@ -1435,6 +1502,8 @@ int event_queue_pop(struct event *const event) {
+@@ -1435,6 +1504,8 @@ int event_queue_pop(struct event *const event) {
  	}
  
  	atomic_store_release(&utracy.queue.tail, next_load);
@@ -166,7 +168,7 @@ index cdf495e..7543660 100644
  	return 0;
  }
  
-@@ -1665,6 +1734,8 @@ void get_cpu_info(char *manufacturer, int unsigned *cpu_id) {
+@@ -1665,6 +1736,8 @@ void get_cpu_info(char *manufacturer, int unsigned *cpu_id) {
  #define UTRACY_PROTOCOL_0_12_0 (74) // Also covers 0.12.1 and 0.12.2
  #define UTRACY_PROTOCOL_0_13_0 (76)
  #define UTRACY_PROTOCOL_0_14_0 (82)
@@ -175,7 +177,7 @@ index cdf495e..7543660 100644
  
  #define UTRACY_EVT_ZONEBEGIN (15)
  #define UTRACY_EVT_ZONEEND (17)
-@@ -1720,6 +1791,53 @@ void utracy_emit_frame_mark(char *const name) {
+@@ -1720,6 +1793,55 @@ void utracy_emit_frame_mark(char *const name) {
  	});
  }
  
@@ -195,6 +197,7 @@ index cdf495e..7543660 100644
 +	static char const queue_capacity[] = "meridian.queue.capacity";
 +	static char const queue_depth[] = "meridian.queue.depth";
 +	static char const queue_high_water[] = "meridian.queue.high_water";
++	static char const queue_tail_refresh_count[] = "meridian.queue.tail_refresh_count";
 +	static char const queue_saturation_count[] = "meridian.queue.saturation_count";
 +	static char const queue_dropped_events[] = "meridian.queue.dropped_events";
 +	static char const produced_events[] = "meridian.queue.produced_events";
@@ -211,6 +214,7 @@ index cdf495e..7543660 100644
 +	utracy_emit_plot(queue_capacity, (long long) utracy.health.capacity);
 +	utracy_emit_plot(queue_depth, (long long) meridian_atomic_load(&utracy.health.depth));
 +	utracy_emit_plot(queue_high_water, (long long) meridian_atomic_load(&utracy.health.high_water));
++	utracy_emit_plot(queue_tail_refresh_count, (long long) meridian_atomic_load(&utracy.health.tail_refresh_count));
 +	utracy_emit_plot(queue_saturation_count, (long long) meridian_atomic_load(&utracy.health.saturation_count));
 +	utracy_emit_plot(queue_dropped_events, (long long) meridian_atomic_load(&utracy.health.dropped_events));
 +	utracy_emit_plot(produced_events, (long long) meridian_atomic_load(&utracy.health.produced_events));
@@ -229,7 +233,7 @@ index cdf495e..7543660 100644
  /* removed in 0.13 */
  UTRACY_INTERNAL
  long long calibrate_delay(void) {
-@@ -1865,6 +1983,7 @@ retry:
+@@ -1865,6 +1987,7 @@ retry:
  UTRACY_INTERNAL
  int utracy_protocol_init(int unsigned version) {
  	utracy.protocol.version = version;
@@ -237,7 +241,7 @@ index cdf495e..7543660 100644
  
  	switch(version) {
  		case UTRACY_PROTOCOL_0_8_1:
-@@ -2047,16 +2166,22 @@ int utracy_protocol_init(int unsigned version) {
+@@ -2047,16 +2170,22 @@ int utracy_protocol_init(int unsigned version) {
  
  		case UTRACY_PROTOCOL_0_14_0:
  			utracy.protocol.zone_begin = 19;
@@ -260,7 +264,7 @@ index cdf495e..7543660 100644
  			utracy.protocol.response_thread_name = 120;
  
  			utracy.protocol.query_terminate = 0;
-@@ -2254,10 +2379,41 @@ int utracy_write_zone_begin(struct event evt) {
+@@ -2254,10 +2383,41 @@ int utracy_write_zone_begin(struct event evt) {
  		long long unsigned srcloc;
  	};
  	_Static_assert(17 == sizeof(struct network_zone_begin), "incorrect size");
@@ -302,7 +306,7 @@ index cdf495e..7543660 100644
  
  	struct network_zone_begin msg = {
  		.type = utracy.protocol.zone_begin,
-@@ -2281,10 +2437,37 @@ int utracy_write_zone_end(struct event evt) {
+@@ -2281,10 +2441,37 @@ int utracy_write_zone_end(struct event evt) {
  		long long timestamp;
  	};
  	_Static_assert(9 == sizeof(struct network_zone_end), "incorrect size");
@@ -340,7 +344,7 @@ index cdf495e..7543660 100644
  
  	struct network_zone_end msg = {
  		.type = utracy.protocol.zone_end,
-@@ -2351,6 +2534,35 @@ int utracy_write_frame_mark(struct event evt) {
+@@ -2351,6 +2538,35 @@ int utracy_write_frame_mark(struct event evt) {
  	return 0;
  }
  
@@ -376,7 +380,7 @@ index cdf495e..7543660 100644
  UTRACY_INTERNAL UTRACY_INLINE
  int utracy_write_srcloc(struct utracy_source_location const *const srcloc) {
  #pragma pack(push, 1)
-@@ -2505,6 +2717,11 @@ int utracy_consume_request(void) {
+@@ -2505,6 +2721,11 @@ int utracy_consume_request(void) {
  			LOG_DEBUG_ERROR;
  			return -1;
  		}
@@ -388,7 +392,7 @@ index cdf495e..7543660 100644
  
  	} else if(req.type == utracy.protocol.query_thread_string) {
  		if(0 != utracy_write_stringdata(utracy.protocol.response_thread_name, "main", req.ptr)) {
-@@ -2620,6 +2837,13 @@ int utracy_consume_queue(void) {
+@@ -2620,6 +2841,13 @@ int utracy_consume_queue(void) {
  				}
  				break;
  
@@ -402,7 +406,7 @@ index cdf495e..7543660 100644
  			default:
  				LOG_DEBUG_ERROR;
  				return -1;
-@@ -2981,6 +3205,7 @@ int UTRACY_WINDOWS_STDCALL UTRACY_LINUX_CDECL server_tick(void) {
+@@ -2981,6 +3209,7 @@ int UTRACY_WINDOWS_STDCALL UTRACY_LINUX_CDECL server_tick(void) {
  
  	/* server tick is the end of a frame and the beginning of the next frame */
  	utracy_emit_frame_mark(NULL);
@@ -410,7 +414,7 @@ index cdf495e..7543660 100644
  
  	utracy_emit_zone_begin(&srcloc);
  
-@@ -3009,6 +3234,16 @@ void UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL send_maps(void) {
+@@ -3009,6 +3238,16 @@ void UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL send_maps(void) {
  }
  
  /* hooking */
@@ -427,7 +431,7 @@ index cdf495e..7543660 100644
  UTRACY_INTERNAL
  void *hook(char *const restrict dst, char *const restrict src, char unsigned size, char *trampoline) {
  	char unsigned jmp[] = {
-@@ -3202,6 +3437,7 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
+@@ -3202,6 +3441,7 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
  	}
  
  	int unsigned const *const offsets = byond_offsets[BYOND_VERSION_ADJUSTED(byond_build)];
@@ -435,7 +439,7 @@ index cdf495e..7543660 100644
  
  	for(int i=0; i<11; i++) {
  		if(offsets[i] == 0) {
-@@ -3209,6 +3445,13 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
+@@ -3209,6 +3449,13 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
  			return "byond version unsupported";
  		}
  	}
@@ -449,7 +453,7 @@ index cdf495e..7543660 100644
  
  	char unsigned prologues[3];
  
-@@ -3250,23 +3493,36 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
+@@ -3250,23 +3497,36 @@ char *UTRACY_WINDOWS_CDECL UTRACY_LINUX_CDECL init(int argc, char **argv) {
  
  	LOG_INFO("byond build = %d\n", byond_build);
  

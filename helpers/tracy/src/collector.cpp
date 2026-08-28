@@ -154,9 +154,17 @@ CaptureWindowResult CollectorSession::capture(const CaptureWindowOptions& option
 	}
 }
 
-SessionStatus CollectorSession::status() const
+SessionStatus CollectorSession::status()
 {
 	std::scoped_lock lock(mutex);
+	if(worker_attached && !capture_active)
+	{
+		producer_progress = backend->producer_progress();
+		if(auto current_health = backend->health(); current_health.has_value())
+		{
+			queue_health = std::move(current_health);
+		}
+	}
 	return status_locked();
 }
 

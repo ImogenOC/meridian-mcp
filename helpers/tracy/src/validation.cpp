@@ -96,17 +96,28 @@ CaptureValidation validate_capture(const CaptureObservation& observation)
 		observation.trace_end_ns,
 		observation.nanoseconds_per_tick,
 		0.0,
+		observation.requested_seconds,
+		observation.measured_wall_seconds,
+		std::max(2.0, observation.requested_seconds * 0.25),
+		0.0,
 		0,
 		0,
 		observation.zone_count,
 		observation.source_file_count,
 		observation.queue_end,
 		{},
+		{},
 	};
 	const auto add_error = [&](const std::string& code) {
 		if(std::find(result.error_codes.begin(), result.error_codes.end(), code) == result.error_codes.end())
 		{
 			result.error_codes.push_back(code);
+		}
+	};
+	const auto add_warning = [&](const std::string& code) {
+		if(std::find(result.warning_codes.begin(), result.warning_codes.end(), code) == result.warning_codes.end())
+		{
+			result.warning_codes.push_back(code);
 		}
 	};
 
@@ -122,10 +133,14 @@ CaptureValidation validate_capture(const CaptureObservation& observation)
 	{
 		result.wall_span_seconds = static_cast<double>(observation.raw_end - observation.raw_begin) * observation.nanoseconds_per_tick / 1'000'000'000.0;
 	}
-	const auto wall_tolerance = std::max(2.0, observation.requested_seconds * 0.25);
-	if(!std::isfinite(observation.measured_wall_seconds) || observation.measured_wall_seconds <= 0.0 || std::abs(result.wall_span_seconds - observation.measured_wall_seconds) > wall_tolerance)
+	if(!std::isfinite(observation.measured_wall_seconds) || observation.measured_wall_seconds <= 0.0 || std::abs(result.wall_span_seconds - observation.measured_wall_seconds) > result.wall_tolerance_seconds)
 	{
 		add_error("wall_span_mismatch");
+	}
+	if(std::isfinite(observation.measured_wall_seconds) && observation.measured_wall_seconds > 0.0 && observation.measured_wall_seconds - result.wall_span_seconds > result.wall_tolerance_seconds)
+	{
+		result.producer_progress_shortfall_seconds = observation.measured_wall_seconds - result.wall_span_seconds;
+		add_error("producer_progress_shortfall");
 	}
 
 	for(const auto& frame : observation.frames)
@@ -156,7 +171,7 @@ CaptureValidation validate_capture(const CaptureObservation& observation)
 	if(observation.source_file_count == 0) add_error("zero_source_files");
 	if(observation.trace_bytes < observation.minimum_trace_bytes) add_error("trace_too_small");
 	if(!observation.trace_reopened) add_error("trace_reopen_failed");
-	if(observation.queue_end.saturation_count > observation.queue_start.saturation_count) add_error("queue_saturated");
+	if(observation.queue_end.saturation_count > observation.queue_start.saturation_count) add_warning("queue_saturated");
 	if(observation.queue_end.dropped_events > observation.queue_start.dropped_events) add_error("queue_dropped_events");
 	if(observation.queue_end.depth > observation.queue_end.capacity) add_error("queue_depth_invalid");
 	if(!observation.queue_end.hook_installed) add_error("hook_not_installed");

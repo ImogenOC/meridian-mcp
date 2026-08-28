@@ -156,9 +156,13 @@ pub fn compare_snapshots(
             baseline.root.join(path)
         };
         let absolute = absolute.canonicalize().unwrap_or(absolute);
-        let relative = absolute
-            .strip_prefix(&baseline.root)
-            .map_err(|_| IntegrityError::InvalidOwnedPath(path.display().to_string()))?;
+        let relative = match absolute.strip_prefix(&baseline.root) {
+            Ok(relative) => relative,
+            Err(_) if path.is_absolute() => continue,
+            Err(_) => {
+                return Err(IntegrityError::InvalidOwnedPath(path.display().to_string()));
+            }
+        };
         owned.insert(normalize_relative(relative));
     }
     let mut delta = IntegrityDelta {

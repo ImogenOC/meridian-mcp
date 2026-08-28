@@ -64,6 +64,23 @@ pub struct TraceMetadata {
     pub memory_roles: Vec<ProcessRole>,
 }
 
+pub fn is_complete_control_capture(metadata: &TraceMetadata) -> bool {
+    metadata.capture_valid && metadata.complete_frames >= 3
+}
+
+fn has_required_memory_roles(roles: &[ProcessRole]) -> bool {
+    roles
+        .iter()
+        .filter(|role| **role == ProcessRole::DreamDaemon)
+        .count()
+        == 1
+        && roles
+            .iter()
+            .filter(|role| **role == ProcessRole::Collector)
+            .count()
+            == 1
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonMode {
@@ -169,7 +186,7 @@ pub fn read_trace_metadata(trace: &Path) -> Result<Option<TraceMetadata>, TraceS
         || metadata.phase_iteration == 0
         || metadata.range.raw_end <= metadata.range.raw_begin
         || metadata.trace_range_ns.raw_end <= metadata.trace_range_ns.raw_begin
-        || metadata.memory_roles.len() != 2
+        || !has_required_memory_roles(&metadata.memory_roles)
     {
         return Err(TraceSetError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -347,4 +364,23 @@ fn hash_file(path: &Path) -> Result<String, std::io::Error> {
         hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_required_memory_roles;
+    use crate::process_metrics::ProcessRole;
+
+    #[test]
+    fn required_memory_roles_allow_an_owned_wake_client() {
+        assert!(has_required_memory_roles(&[
+            ProcessRole::DreamDaemon,
+            ProcessRole::DreamSeeker,
+            ProcessRole::Collector,
+        ]));
+        assert!(!has_required_memory_roles(&[
+            ProcessRole::DreamSeeker,
+            ProcessRole::Collector,
+        ]));
+    }
 }

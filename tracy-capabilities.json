@@ -11,7 +11,7 @@
       "disposition": "fixed_helper",
       "targets": ["dm_tracy_prepare", "dm_tracy_launch", "dm_tracy_status", "dm_tracy_stop"],
       "platforms": ["windows", "ubuntu"],
-      "verification": "Exact-revision x86 build with ordered owned patches, hash manifest, queue_capacity, queue_depth, queue_high_water, queue_saturation_count, queue_dropped_events, produced_events, consumed_events, last_producer_progress, per-hook installed/prologue_validated/module_relative_offset, BYOND build, offset_table_identity, and BYOND 516.1687 live capture gate.",
+      "verification": "Exact-revision x86 build with ordered owned patches, hash manifest, queue_capacity, queue_depth, queue_high_water, queue_tail_refresh_count, confirmed queue_saturation_count as a non-fatal backpressure warning, fatal queue_dropped_events deltas, produced_events, consumed_events, last_producer_progress, per-hook installed/prologue_validated/module_relative_offset, BYOND build, offset_table_identity, bounded post-initialization headless wake evidence, and BYOND 516.1687 live capture gate.",
       "evidence": [],
       "rationale": null
     },

@@ -186,6 +186,37 @@ fn managed_provenance_gate_is_bounded_and_retained() {
 }
 
 #[test]
+fn windows_live_gates_retain_bounded_failure_diagnostics() {
+    let provenance =
+        fs::read_to_string("scripts/run-provenance-integrity-integration.ps1").unwrap();
+    let auxtools = fs::read_to_string("scripts/run-auxtools-integration.ps1").unwrap();
+    let tracy = fs::read_to_string("scripts/run-tracy-integration.ps1").unwrap();
+
+    for (name, script) in [
+        ("provenance", provenance.as_str()),
+        ("auxtools", auxtools.as_str()),
+        ("Tracy", tracy.as_str()),
+    ] {
+        for required in [
+            "failure_stage",
+            "failure_message",
+            "ConvertTo-BoundedDiagnostic",
+            "response_timings_ms",
+            "mcp_stderr",
+        ] {
+            assert!(
+                script.contains(required),
+                "{name} live gate does not retain {required}"
+            );
+        }
+    }
+    assert!(
+        auxtools.contains("host_log"),
+        "auxtools live gate must retain the bounded DreamDaemon log"
+    );
+}
+
+#[test]
 fn byond_workflow_keeps_product_parser_and_runtime_claims_independent() {
     let workflow = fs::read_to_string(".github/workflows/byond-integration.yml")
         .expect("BYOND integration workflow should be readable");
@@ -354,6 +385,8 @@ fn tracy_experiment_runner_is_bounded_and_raw_traces_are_not_uploaded() {
     for required in [
         "[ValidateRange(3, 20)] [int] $ControlCount = 5",
         "[ValidateRange(5, 300)] [int] $CaptureSeconds = 30",
+        "[switch] $OverwritePreparedHook",
+        "overwrite = [bool]$OverwritePreparedHook",
         "dm_tracy_prepare",
         "dm_tracy_launch",
         "dm_tracy_status",
@@ -419,6 +452,13 @@ fn byond_workflow_uses_the_516_1687_runtime_baseline() {
     assert!(
         !workflow.contains("-DmbPath ./integration/Meridian-Rift/tgstation.dmb"),
         "the native debugger gate must not use the full game as its protocol fixture"
+    );
+
+    let fetch = fs::read_to_string("scripts/fetch-auxtools.ps1")
+        .expect("auxtools fetcher should be readable");
+    assert!(
+        fetch.contains("Unblock-File"),
+        "the verified Windows DLL must have download-zone metadata removed before BYOND loads it"
     );
 }
 

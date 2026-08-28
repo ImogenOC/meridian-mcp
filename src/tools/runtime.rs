@@ -548,6 +548,15 @@ async fn wait_for_output_value(
     }
 }
 
+pub(crate) async fn wait_for_literal_output(
+    state: &ServerState,
+    pattern: &str,
+    timeout_ms: u64,
+) -> Result<Value> {
+    let mut runtime = state.runtime().await;
+    wait_for_output_value(&mut runtime, pattern, false, timeout_ms).await
+}
+
 /// Wait until DreamDaemon output contains a literal or regular-expression marker.
 pub async fn wait_for_output(state: &ServerState, args: Value) -> Result<ToolResult> {
     let mut state = state.runtime().await;
@@ -930,7 +939,7 @@ pub async fn topic(state: &ServerState, args: Value) -> Result<ToolResult> {
 }
 
 /// Send a BYOND Topic packet and get response
-async fn send_topic(address: &str, topic: &str, timeout_ms: u64) -> Result<String> {
+pub(crate) async fn send_topic(address: &str, topic: &str, timeout_ms: u64) -> Result<String> {
     let topic_clean = topic.strip_prefix('?').unwrap_or(topic);
     info!(
         "Sending topic packet for: {} (cleaned: {})",

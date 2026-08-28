@@ -149,6 +149,7 @@ fn launch_manifest_carries_the_exact_meridian_mcp_build_identity() {
         meridian_mcp_build: meridian_mcp::build_identity::current().clone(),
         executable: executable(),
         workload_draft: WorkloadInput::default(),
+        runtime_configuration: None,
     };
     let value = serde_json::to_value(manifest).unwrap();
     assert_eq!(

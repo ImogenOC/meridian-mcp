@@ -12,6 +12,7 @@ try {
 	Invoke-WebRequest -Uri $url -OutFile $temporary -UseBasicParsing
 	$actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $temporary).Hash.ToLowerInvariant()
 	if ($actual -ne $expected) { throw "auxtools SHA-256 mismatch: $actual" }
+	if ($IsWindows) { Unblock-File -LiteralPath $temporary }
 	Move-Item -LiteralPath $temporary -Destination $destination -Force
 } finally {
 	if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }

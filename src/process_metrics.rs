@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "snake_case")]
 pub enum ProcessRole {
     DreamDaemon,
+    DreamSeeker,
     Collector,
 }
 

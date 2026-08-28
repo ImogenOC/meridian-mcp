@@ -28,11 +28,25 @@ function Assert-Revision([string]$Path, [string]$Expected, [string]$Name) {
 }
 
 function Invoke-OwnedPatch([string]$SourceRoot, [string]$PatchPath, [string]$Name) {
-	Push-Location $SourceRoot
+	$applyRoot = [IO.Path]::GetFullPath($SourceRoot)
+	$applyArguments = @()
+	$enclosingRepository = (& git -C $applyRoot rev-parse --show-toplevel 2>$null)
+	if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($enclosingRepository)) {
+		$repositoryRoot = [IO.Path]::GetFullPath($enclosingRepository.Trim())
+		if (-not $applyRoot.Equals($repositoryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+			$sourcePrefix = [IO.Path]::GetRelativePath($repositoryRoot, $applyRoot).Replace('\', '/')
+			if ($sourcePrefix.StartsWith('../', [StringComparison]::Ordinal) -or $sourcePrefix -eq '..') {
+				throw "$Name source root escaped its enclosing repository."
+			}
+			$applyRoot = $repositoryRoot
+			$applyArguments += "--directory=$sourcePrefix"
+		}
+	}
+	Push-Location $applyRoot
 	try {
-		& git apply --check $PatchPath
+		& git apply @applyArguments --check $PatchPath
 		if ($LASTEXITCODE -ne 0) { throw "$Name did not pass git apply --check." }
-		& git apply $PatchPath
+		& git apply @applyArguments $PatchPath
 		if ($LASTEXITCODE -ne 0) { throw "$Name did not apply cleanly." }
 	} finally {
 		Pop-Location
@@ -157,6 +171,7 @@ $entries += [ordered]@{
 		queue_capacity = $true
 		queue_depth = $true
 		queue_high_water = $true
+		queue_tail_refresh_count = $true
 		queue_saturation_count = $true
 		queue_dropped_events = $true
 		produced_events = $true
