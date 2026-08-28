@@ -1,6 +1,7 @@
 mod analysis;
 mod compile;
 mod debugger;
+mod diagnostics;
 mod dmi;
 mod docs;
 mod fixture;
@@ -353,14 +354,46 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     // Analysis tools
     tools.push(ToolDefinition {
         name: "dm_check_errors".to_string(),
-        description: "Run the type checker and return all diagnostics (errors and warnings)."
+        description: "Read a bounded page of parser and DreamChecker diagnostics cached by the latest dm_parse_environment call. Returns a summary across all matching diagnostics; it does not rerun analysis or replace DreamMaker compilation."
             .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Optional: only show errors from this file"
+                    "minLength": 1,
+                    "description": "Only include diagnostics whose normalized source path contains this value. Both slash styles are accepted."
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["error", "warning", "info", "hint"],
+                    "description": "Only include diagnostics with this severity."
+                },
+                "component": {
+                    "type": "string",
+                    "enum": ["parser", "dreamchecker"],
+                    "description": "Only include diagnostics emitted by this SpacemanDMM component."
+                },
+                "rule": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Only include diagnostics with this exact rule identifier."
+                },
+                "configured": {
+                    "type": "boolean",
+                    "description": "Only include diagnostics whose rule is or is not explicitly configured in SpacemanDMM.toml."
+                },
+                "cursor": {
+                    "type": "string",
+                    "pattern": "^[0-9]+$",
+                    "description": "Opaque continuation cursor returned by a previous call using the same filters and analysis generation."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                    "description": "Maximum diagnostics returned in this page. Summary counts cover every matching diagnostic."
                 }
             }
         }),
@@ -989,7 +1022,7 @@ pub async fn call_tool(
         "dm_search_context" => search::search_context(state, args).await,
 
         // Analysis tools
-        "dm_check_errors" => analysis::check_errors(state, args).await,
+        "dm_check_errors" => diagnostics::check_errors(state, args).await,
         "dm_get_definition" => analysis::get_definition(state, args).await,
         "dm_generate_docs" => docs::generate(context, state, args).await,
         "dm_document_symbols" => language::document_symbols(state, args).await,
@@ -1335,6 +1368,33 @@ mod tests {
         assert_eq!(
             search.input_schema["properties"]["max_source_lines"]["maximum"],
             200
+        );
+    }
+
+    #[test]
+    fn diagnostic_schema_exposes_bounded_snapshot_filters() {
+        let definitions = get_tool_definitions();
+        let diagnostics = definitions
+            .iter()
+            .find(|tool| tool.name == "dm_check_errors")
+            .expect("dm_check_errors should be registered");
+
+        assert!(diagnostics.description.contains("cached"));
+        assert_eq!(
+            diagnostics.input_schema["properties"]["limit"]["default"],
+            50
+        );
+        assert_eq!(
+            diagnostics.input_schema["properties"]["limit"]["maximum"],
+            100
+        );
+        assert_eq!(
+            diagnostics.input_schema["properties"]["severity"]["enum"],
+            json!(["error", "warning", "info", "hint"])
+        );
+        assert_eq!(
+            diagnostics.input_schema["properties"]["component"]["enum"],
+            json!(["parser", "dreamchecker"])
         );
     }
 }

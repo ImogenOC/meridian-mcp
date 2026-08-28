@@ -81,6 +81,8 @@ The complete packaging example is in [Operator and contributor reference](#opera
 
 Procedure results distinguish the implementation owner, which supplies the nearest executable body, from the declaration owner, which supplies declaration metadata. Exact lookup, definitions, searches, document symbols, and implementation queries use the same snapshot-owned resolver.
 
+`dm_check_errors` reads diagnostics already produced by the latest successful `dm_parse_environment`; it does not rerun the parser or DreamChecker. The response identifies that cached analysis generation, summarizes every matching diagnostic by severity, component, rule, and configuration provenance, and returns at most 50 diagnostic records by default. Follow `pagination.next_cursor` with the same filters and state generation for later pages. `file_path`, `severity`, `component`, `rule`, and `configured` narrow both the summary and page. A response with `truncated: true` and `diagnostic_page_limit` is a normal paginated result, not lost server output.
+
 ### Compile and exercise a world
 
 Use `dm_compile` for a direct compiler gate. Use `rift_compile` only for the contained Meridian-Rift full-build workflow. A successful managed compile records the compiler, repository identity, parsed source closure, fixture inputs, and DMB/RSC hashes. A later failed compile or changed input/output makes that managed artifact stale.
@@ -142,7 +144,7 @@ Analysis mode exposes the read-only tools below. Development mode adds the activ
 | `dm_list_types` | Enumerate parsed type paths, optionally restricted by a type-path prefix and maximum traversal depth. |
 | `dm_search_symbols` | Find type, procedure, and variable names by case-insensitive partial match, with an optional symbol-kind filter and result limit. |
 | `dm_search_context` | Run deterministic ranked retrieval across parsed symbols, documentation, parameters, source paths, and source text. Supports type, type-prefix, and file filters plus optional bounded source excerpts; verify candidates with the exact inspection tools. |
-| `dm_check_errors` | Run SpacemanDMM DreamChecker against the cached environment and return structured errors and warnings, optionally filtered to one source file. This is static-analysis evidence, not a DreamMaker compile result. |
+| `dm_check_errors` | Read a bounded page of parser and DreamChecker diagnostics cached by the latest successful parse. Returns full matching summary counts, normalized file/severity/component/rule/configuration filters, an opaque continuation cursor, and the analysis generation. It does not rerun analysis and is not a DreamMaker compile result. |
 | `dm_get_definition` | Resolve an exact type, variable, or procedure to its parsed definition and source location. |
 | `dm_document_symbols` | List nested type, variable, and procedure declarations in one parsed source file. |
 | `dm_find_references` | Find semantic read/write references to an exact canonical declaration, excluding shadowed locals and unresolved dynamic accesses. |

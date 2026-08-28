@@ -114,6 +114,15 @@ if ($DmePath) {
             arguments = [ordered]@{ dme_path = (Resolve-Path -LiteralPath $DmePath).Path }
         }
     })
+    $requests += ConvertTo-McpJsonLine ([ordered]@{
+        jsonrpc = "2.0"
+        id = 19
+        method = "tools/call"
+        params = [ordered]@{
+            name = "dm_check_errors"
+            arguments = [ordered]@{ limit = 1 }
+        }
+    })
 }
 
 if ($CompileDmePath) {
@@ -388,11 +397,51 @@ if (@($searchTool[0].inputSchema.required) -notcontains "query") {
     throw "dm_search_context schema does not require query"
 }
 
+$diagnosticTool = @($tools | Where-Object { $_.name -eq "dm_check_errors" })
+if ($diagnosticTool.Count -ne 1) {
+    throw "Expected one dm_check_errors definition, found $($diagnosticTool.Count)"
+}
+$diagnosticProperties = @($diagnosticTool[0].inputSchema.properties.PSObject.Properties.Name)
+foreach ($diagnosticProperty in @("file_path", "severity", "component", "rule", "configured", "cursor", "limit")) {
+    if ($diagnosticProperties -notcontains $diagnosticProperty) {
+        throw "dm_check_errors schema is missing implemented property: $diagnosticProperty"
+    }
+}
+if ($diagnosticTool[0].inputSchema.properties.limit.default -ne 50 -or
+    $diagnosticTool[0].inputSchema.properties.limit.maximum -ne 100) {
+    throw "dm_check_errors schema does not expose the bounded page limits"
+}
+
 if ($DmePath) {
     $parseResponse = Get-McpResponse -Responses $session.Responses -Id 3
     if ($parseResponse.result.isError -eq $true) {
         $message = $parseResponse.result.content[0].text
         throw "dm_parse_environment returned an MCP tool error: $message"
+    }
+
+    $diagnosticResponse = Get-McpResponse -Responses $session.Responses -Id 19
+    if ($diagnosticResponse.result.isError -eq $true) {
+        throw "dm_check_errors returned an MCP tool error: $($diagnosticResponse.result.content[0].text)"
+    }
+    $diagnosticPayload = $diagnosticResponse.result.content[0].text | ConvertFrom-Json
+    if ($diagnosticPayload.analysis.source -ne "cached_snapshot" -or
+        $diagnosticPayload.analysis.recomputed -ne $false -or
+        $diagnosticPayload.analysis.state_generation -ne $diagnosticPayload.state_generation) {
+        throw "dm_check_errors did not identify its cached analysis generation"
+    }
+    if ($diagnosticPayload.count -ne @($diagnosticPayload.diagnostics).Count -or
+        $diagnosticPayload.total_count -ne $diagnosticPayload.summary.total) {
+        throw "dm_check_errors returned inconsistent page or summary counts"
+    }
+    if ($diagnosticPayload.pagination.limit -ne 1) {
+        throw "dm_check_errors did not honor the requested page limit"
+    }
+    if ($diagnosticPayload.total_count -gt $diagnosticPayload.count -and
+        (-not $diagnosticPayload.pagination.has_more -or
+         -not $diagnosticPayload.pagination.next_cursor -or
+         -not $diagnosticPayload.truncated -or
+         @($diagnosticPayload.truncation_reasons) -notcontains "diagnostic_page_limit")) {
+        throw "dm_check_errors did not expose its continuation and truncation metadata"
     }
 }
 
@@ -545,6 +594,7 @@ if ($CompileDmePath) {
 Write-Output ("MCP smoke test passed: protocol 2024-11-05, {0} tools, exit code {1}" -f $tools.Count, $sessionExitCode)
 if ($DmePath) {
     Write-Output "DME parse smoke test passed: $DmePath"
+    Write-Output "Cached DreamChecker diagnostic smoke test passed: $($diagnosticPayload.total_count) matching diagnostics"
 }
 if ($TypePath) {
     Write-Output "Symbol smoke test passed: $TypePath"

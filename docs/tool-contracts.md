@@ -5,7 +5,7 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | Tool | Mode | Support | Effects | Timeout ms | Max output bytes | Summary |
 | --- | --- | --- | --- | ---: | ---: | --- |
 | `dm_audit_icons` | Analysis | Experimental | read | - | 1048576 | Audit parsed icon evidence and duplicate DMI states. |
-| `dm_check_errors` | Analysis | Provisional | memory | - | 1048576 | Run SpacemanDMM DreamChecker diagnostics. |
+| `dm_check_errors` | Analysis | Provisional | memory | - | 1048576 | Read bounded cached parser and DreamChecker diagnostics. |
 | `dm_check_fixture_sync` | Analysis | Experimental | read | - | 1048576 | Validate declared fixture source contracts and build provenance. |
 | `dm_compare_dmi_states` | Analysis | Provisional | read | - | 1048576 | Compare complete DMI states including common lazy changes. |
 | `dm_compile` | Development | Provisional | read, write, process | 1800000 | 1048576 | Run an allowlisted DreamMaker compiler gate. |

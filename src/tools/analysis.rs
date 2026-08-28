@@ -1,40 +1,13 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use tracing::info;
 
 use crate::analysis_snapshot::AnalysisContext;
 use crate::mcp::ToolResult;
-use crate::result::{json_success, ToolMetadata};
 use crate::state::ServerState;
 
 /// Helper to get file path string from a location
 fn get_file_path(context: &AnalysisContext, file_id: dreammaker::FileId) -> String {
     context.file_path(file_id).display().to_string()
-}
-
-/// Run type checker and return errors
-pub async fn check_errors(state: &ServerState, args: Value) -> Result<ToolResult> {
-    let snapshot = state.snapshot().await?;
-
-    let file_filter = args.get("file_path").and_then(|v| v.as_str());
-
-    info!("Running type checker...");
-
-    let diagnostics = snapshot
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| file_filter.is_none_or(|filter| diagnostic.file.contains(filter)))
-        .collect::<Vec<_>>();
-
-    let result = json!({
-        "count": diagnostics.len(),
-        "diagnostics": diagnostics
-    });
-
-    Ok(json_success(
-        ToolMetadata::complete(Some(snapshot.generation)),
-        result,
-    ))
 }
 
 /// Get definition location for a symbol

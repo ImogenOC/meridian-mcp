@@ -142,3 +142,66 @@ async fn diagnostics_report_explicit_configuration_provenance() {
     assert!(diagnostic["file"].as_str().unwrap().ends_with("fixture.dm"));
     assert!(diagnostic["line"].as_u64().unwrap() > 0);
 }
+
+#[tokio::test]
+async fn diagnostics_report_cached_snapshot_summary() {
+    let (context, state, _) = parsed_fixture().await;
+    let result = call_tool(
+        &context,
+        &state,
+        "dm_check_errors",
+        json!({
+            "file_path": "fixture.dm",
+            "limit": 1
+        }),
+    )
+    .await
+    .unwrap();
+    let body = payload(result);
+
+    assert_eq!(body["analysis"]["source"], "cached_snapshot");
+    assert_eq!(body["analysis"]["recomputed"], false);
+    assert_eq!(body["analysis"]["refresh_with"], "dm_parse_environment");
+    assert_eq!(body["analysis"]["state_generation"], 1);
+    assert_eq!(body["count"], 1, "{body:#}");
+    assert_eq!(body["total_count"], 1);
+    assert_eq!(body["summary"]["total"], 1);
+    assert_eq!(body["summary"]["by_severity"]["warning"], 1);
+    assert_eq!(body["summary"]["by_component"]["parser"], 1);
+    assert_eq!(body["summary"]["by_rule"]["tmp_no_effect"], 1);
+    assert_eq!(body["summary"]["configured"], 1);
+    assert_eq!(body["pagination"]["limit"], 1);
+    assert_eq!(body["pagination"]["has_more"], false);
+    assert!(body["pagination"]["next_cursor"].is_null());
+}
+
+#[tokio::test]
+async fn diagnostics_reject_invalid_pagination_inputs() {
+    let (context, state, _) = parsed_fixture().await;
+
+    for args in [json!({"limit": 0}), json!({"cursor": "not-a-cursor"})] {
+        let result = call_tool(&context, &state, "dm_check_errors", args)
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let body = payload(result);
+        assert_eq!(body["code"], "invalid_input", "{body:#}");
+    }
+}
+
+#[tokio::test]
+async fn diagnostics_accept_every_spacemandmm_severity_filter() {
+    let (context, state, _) = parsed_fixture().await;
+
+    for severity in ["error", "warning", "info", "hint"] {
+        let result = call_tool(
+            &context,
+            &state,
+            "dm_check_errors",
+            json!({"severity": severity}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_error, None, "severity {severity} was rejected");
+    }
+}

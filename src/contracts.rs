@@ -206,7 +206,7 @@ static CONTRACTS: &[ToolContract] = &[
     ),
     contract!(
         "dm_check_errors",
-        "Run SpacemanDMM DreamChecker diagnostics.",
+        "Read bounded cached parser and DreamChecker diagnostics.",
         Analysis,
         MEMORY,
         Provisional,
