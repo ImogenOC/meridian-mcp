@@ -36,6 +36,26 @@ const BLOCKING_ERROR_MESSAGES: &[&str] = &["i/o error opening file", "i/o error 
 /// client forever with no reply.
 const DEFAULT_PARSE_TIMEOUT_MS: u64 = 600_000;
 
+/// Render a canonicalized path the way a caller wrote it.
+///
+/// Containment canonicalizes arguments, which on Windows yields the `\\?\`
+/// verbatim form. Echoing that back is technically correct and unreadable, so
+/// reporting strips it the same way spawn paths do elsewhere in the tools.
+fn display_path(path: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        let path_text = path.to_string_lossy();
+        if let Some(unc_path) = path_text.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc_path}");
+        }
+        if let Some(dos_path) = path_text.strip_prefix(r"\\?\") {
+            return dos_path.to_owned();
+        }
+    }
+
+    path.display().to_string()
+}
+
 fn is_blocking_error(description: &str) -> bool {
     BLOCKING_ERROR_PREFIXES
         .iter()
@@ -82,7 +102,7 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             return Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
                 "success": true,
                 "reused": true,
-                "environment": reused.environment_path.display().to_string(),
+                "environment": display_path(&reused.environment_path),
                 "total_types": reused.total_types,
                 "indexed_symbols": reused.indexed_symbol_count(),
                 "error_count": errors,
@@ -187,7 +207,7 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
                 "success": true,
                 "reused": false,
-                "environment": snapshot.environment_path.display().to_string(),
+                "environment": display_path(&snapshot.environment_path),
                 "total_types": snapshot.total_types,
                 "indexed_symbols": snapshot.indexed_symbol_count(),
                 "error_count": errors,
@@ -243,7 +263,7 @@ async fn parse_failure(
         Some("Correct the DreamMaker parse errors and run dm_parse_environment again.".to_owned()),
         json!({
         "state_preserved": true,
-        "active_environment": prior_environment.map(|path| path.display().to_string()),
+        "active_environment": prior_environment.map(display_path),
         "state_generation": state.state_generation().await
         }),
     ))
@@ -690,6 +710,23 @@ mod tests {
 
         assert!(!is_blocking_error("expected expression, found ')'"));
         assert!(!is_blocking_error("undefined proc: do_work"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reported_paths_drop_the_windows_verbatim_prefix() {
+        assert_eq!(
+            display_path(std::path::Path::new(r"\\?\C:\workspace\tgstation.dme")),
+            r"C:\workspace\tgstation.dme"
+        );
+        assert_eq!(
+            display_path(std::path::Path::new(r"\\?\UNC\server\share\tgstation.dme")),
+            r"\\server\share\tgstation.dme"
+        );
+        assert_eq!(
+            display_path(std::path::Path::new(r"C:\workspace\tgstation.dme")),
+            r"C:\workspace\tgstation.dme"
+        );
     }
 
     #[tokio::test]
