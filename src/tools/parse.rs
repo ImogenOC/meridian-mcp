@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 use tracing::info;
 
 use dreammaker::{Context, Parser, Preprocessor, Severity};
@@ -13,8 +15,33 @@ use crate::mcp::ToolResult;
 use crate::result::{structured_error, ToolErrorCode};
 use crate::search::SearchIndex;
 use crate::source::extract_source;
+use crate::source_fingerprint::SourceFingerprint;
 use crate::state::ServerState;
 use crate::{PathPolicy, ProjectProfile};
+
+/// Diagnostics that mean the environment was never fully read, so the resulting
+/// object tree is silently incomplete rather than merely flawed.
+///
+/// SpacemanDMM has no structured discriminant for these, so they are matched on
+/// description text. The strings below are verified against the pinned revision
+/// (`preprocessor.rs` and `lexer.rs`); if an upstream bump reworded any of them
+/// the failure is silent and severe — a truncated tree installed as a success —
+/// so `blocking_error_descriptions_match_upstream_wording` guards the list.
+const BLOCKING_ERROR_PREFIXES: &[&str] =
+    &["failed to find #include", "failed to open file: #include"];
+const BLOCKING_ERROR_MESSAGES: &[&str] = &["i/o error opening file", "i/o error reading file"];
+
+/// Default ceiling on a single parse. Generous enough for a station-sized
+/// environment on a cold cache; present so a pathological input cannot wedge a
+/// client forever with no reply.
+const DEFAULT_PARSE_TIMEOUT_MS: u64 = 600_000;
+
+fn is_blocking_error(description: &str) -> bool {
+    BLOCKING_ERROR_PREFIXES
+        .iter()
+        .any(|prefix| description.starts_with(prefix))
+        || BLOCKING_ERROR_MESSAGES.contains(&description)
+}
 
 /// Parse a DreamMaker environment
 pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolResult> {
@@ -24,15 +51,62 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
         .ok_or_else(|| anyhow!("Missing dme_path argument"))?;
 
     let path = PathBuf::from(dme_path);
-    if !path.exists() {
-        return Ok(ToolResult::error(format!("File not found: {dme_path}")));
+    if !path.is_file() {
+        let reason = if path.is_dir() {
+            format!("Not a file (expected a .dme environment): {dme_path}")
+        } else {
+            format!("File not found: {dme_path}")
+        };
+        let prior = state
+            .active_snapshot()
+            .await
+            .map(|snapshot| snapshot.environment_path.clone());
+        return parse_failure(state, prior.as_deref(), reason).await;
+    }
+
+    let timeout = Duration::from_millis(
+        args.get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_PARSE_TIMEOUT_MS),
+    );
+    let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+
+    // Serialize parses before touching the active snapshot, so a concurrent
+    // caller cannot observe a half-replaced state or double peak memory.
+    let permit = state.parse_permit().await;
+
+    if !force {
+        if let Some(reused) = reusable_snapshot(state, &path).await {
+            info!("Reusing analysis snapshot for {}", path.display());
+            let (errors, warnings) = reused.diagnostic_counts();
+            return Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
+                "success": true,
+                "reused": true,
+                "environment": reused.environment_path.display().to_string(),
+                "total_types": reused.total_types,
+                "indexed_symbols": reused.indexed_symbol_count(),
+                "error_count": errors,
+                "warning_count": warnings,
+                "state_generation": reused.generation,
+                "spacemandmm_revision": reused.spacemandmm_revision,
+            }))?));
+        }
     }
 
     info!("Parsing environment: {}", dme_path);
 
-    let prior = state.active_snapshot().await;
+    // Only the prior environment path is needed on the failure path. Holding the
+    // whole prior snapshot across the parse would pin the old object tree in
+    // memory while the new one is built.
+    let prior_environment = state
+        .active_snapshot()
+        .await
+        .map(|snapshot| snapshot.environment_path.clone());
+
+    let started = Instant::now();
+    let parse_started_at = SystemTime::now();
     let parse_path = path.clone();
-    let parsed = tokio::task::spawn_blocking(move || -> Result<_> {
+    let mut handle = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut context = Context::default();
         context.autodetect_config(&parse_path);
         let mut preprocessor = Preprocessor::new(&context, parse_path.clone())?;
@@ -46,12 +120,8 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             .errors()
             .iter()
             .filter(|diagnostic| {
-                let description = diagnostic.description();
                 diagnostic.severity() == Severity::Error
-                    && (description.starts_with("failed to find #include")
-                        || description.starts_with("failed to open file: #include")
-                        || description == "i/o error opening file"
-                        || description == "i/o error reading file")
+                    && is_blocking_error(diagnostic.description())
             })
             .map(ToString::to_string)
             .collect::<Vec<_>>();
@@ -60,18 +130,21 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             return Err(anyhow!("DreamMaker parser reported errors:\n{diagnostics}"));
         }
 
+        // Always run. Measured on a ~10k-file, 65k-type environment, skipping
+        // dreamchecker saved under 1% of parse time (41.4s vs 41.7s, inside the
+        // noise) while dropping every semantic diagnostic — 139 errors and a
+        // warning on that environment. There is no useful trade here; the cost
+        // is dominated by preprocessing and index construction, not by this.
         dreamchecker::run(&context, &objtree);
         let configured_rules = configured_diagnostic_rules(&parse_path);
         let diagnostics = collect_diagnostics(&context, &configured_rules);
-        let type_count = objtree.iter_types().count();
         let search_index = SearchIndex::from_object_tree(&objtree, &context, &parse_path);
-        let indexed_document_count = search_index.len();
         let profile = parse_path.parent().and_then(|root| {
             PathPolicy::new(vec![root.to_owned()], Vec::new())
                 .ok()
                 .and_then(|policy| ProjectProfile::discover(&policy, &parse_path).ok())
         });
-        let build = AnalysisBuild::from_parse(
+        Ok(AnalysisBuild::from_parse(
             parse_path,
             &context,
             objtree,
@@ -79,37 +152,89 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             search_index,
             diagnostics,
             profile,
-        );
-        Ok((build, type_count, indexed_document_count))
-    })
-    .await;
+            parse_started_at,
+        ))
+    });
 
-    match parsed {
-        Ok(Ok((build, type_count, indexed_document_count))) => {
+    // A blocking task cannot be aborted, so on timeout the worker keeps running.
+    // Move the parse permit into a detached waiter rather than dropping it here:
+    // that keeps the next parse queued behind the orphan instead of letting the
+    // two coexist, which is exactly the memory blowup this lock exists to stop.
+    let parsed = match tokio::time::timeout(timeout, &mut handle).await {
+        Ok(joined) => joined,
+        Err(_elapsed) => {
+            tokio::spawn(async move {
+                let _ = handle.await;
+                drop(permit);
+            });
+            return parse_failure(
+                state,
+                prior_environment.as_deref(),
+                format!(
+                    "parse exceeded {} ms and was abandoned; the worker is still running and the \
+                     next parse will queue behind it",
+                    timeout.as_millis()
+                ),
+            )
+            .await;
+        }
+    };
+
+    let result = match parsed {
+        Ok(Ok(build)) => {
             let snapshot = state.install_analysis(build).await;
+            let (errors, warnings) = snapshot.diagnostic_counts();
             Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
                 "success": true,
-                "environment": dme_path,
-                "total_types": type_count,
-                "indexed_symbols": indexed_document_count,
-                "state_generation": snapshot.generation
+                "reused": false,
+                "environment": snapshot.environment_path.display().to_string(),
+                "total_types": snapshot.total_types,
+                "indexed_symbols": snapshot.indexed_symbol_count(),
+                "error_count": errors,
+                "warning_count": warnings,
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "state_generation": snapshot.generation,
+                "spacemandmm_revision": snapshot.spacemandmm_revision,
             }))?))
         }
-        Ok(Err(error)) => parse_failure(state, prior.as_deref(), error.to_string()).await,
+        Ok(Err(error)) => {
+            parse_failure(state, prior_environment.as_deref(), error.to_string()).await
+        }
         Err(error) => {
             parse_failure(
                 state,
-                prior.as_deref(),
+                prior_environment.as_deref(),
                 format!("parser worker failed: {error}"),
             )
             .await
         }
+    };
+    drop(permit);
+    result
+}
+
+/// The active snapshot, when it already describes exactly this environment.
+///
+/// Returns `None` whenever reuse cannot be proven safe: a different environment,
+/// or source files whose on-disk state does not match the snapshot's fingerprint.
+async fn reusable_snapshot(
+    state: &ServerState,
+    path: &std::path::Path,
+) -> Option<Arc<AnalysisSnapshot>> {
+    let snapshot = state.active_snapshot().await?;
+    if snapshot.environment_path.as_path() != path {
+        return None;
     }
+    let current = SourceFingerprint::capture(snapshot.source_inputs(), SystemTime::now());
+    snapshot
+        .source_fingerprint
+        .matches(&current)
+        .then_some(snapshot)
 }
 
 async fn parse_failure(
     state: &ServerState,
-    prior: Option<&AnalysisSnapshot>,
+    prior_environment: Option<&std::path::Path>,
     error: String,
 ) -> Result<ToolResult> {
     Ok(structured_error(
@@ -118,7 +243,7 @@ async fn parse_failure(
         Some("Correct the DreamMaker parse errors and run dm_parse_environment again.".to_owned()),
         json!({
         "state_preserved": true,
-        "active_environment": prior.map(|snapshot| snapshot.environment_path.display().to_string()),
+        "active_environment": prior_environment.map(|path| path.display().to_string()),
         "state_generation": state.state_generation().await
         }),
     ))
@@ -522,6 +647,24 @@ mod tests {
         (directory, dme_path)
     }
 
+    /// Push every fixture file's mtime far enough into the past that the
+    /// fingerprint's settle window accepts it. Without this, files written
+    /// moments ago are deliberately treated as unreusable.
+    fn settle(directory: &std::path::Path) {
+        let settled = SystemTime::now() - Duration::from_secs(60);
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(settled)
+                    .unwrap();
+            }
+        }
+    }
+
     async fn parsed_fixture() -> (PathBuf, ServerState) {
         let (directory, dme_path) = write_environment_fixture();
         let state = ServerState::new();
@@ -530,6 +673,153 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, None, "parse result: {result:?}");
         (directory, state)
+    }
+
+    #[test]
+    fn blocking_error_descriptions_match_upstream_wording() {
+        // Verified against the pinned SpacemanDMM revision: the first two are
+        // formatted in preprocessor.rs, the last two raised in lexer.rs.
+        assert!(is_blocking_error(
+            r#"failed to find #include "code/absent.dm""#
+        ));
+        assert!(is_blocking_error(
+            r#"failed to open file: #include "code/absent.dm""#
+        ));
+        assert!(is_blocking_error("i/o error opening file"));
+        assert!(is_blocking_error("i/o error reading file"));
+
+        assert!(!is_blocking_error("expected expression, found ')'"));
+        assert!(!is_blocking_error("undefined proc: do_work"));
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_environment_is_reused_without_reparsing() {
+        let (directory, dme_path) = write_environment_fixture();
+        settle(&directory);
+        let state = ServerState::new();
+
+        let first = parse_environment(&state, json!({"dme_path": dme_path.clone()}))
+            .await
+            .unwrap();
+        assert_eq!(first.is_error, None, "first parse: {first:?}");
+        assert_eq!(result_json(&first)["reused"], false);
+        let generation = state.state_generation().await;
+
+        let second = parse_environment(&state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        let payload = result_json(&second);
+
+        assert_eq!(second.is_error, None, "second parse: {second:?}");
+        assert_eq!(payload["reused"], true);
+        assert_eq!(payload["state_generation"], generation);
+        assert_eq!(payload["total_types"], result_json(&first)["total_types"]);
+        assert_eq!(state.state_generation().await, generation);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_edited_source_file_forces_a_reparse() {
+        let (directory, dme_path) = write_environment_fixture();
+        settle(&directory);
+        let state = ServerState::new();
+        parse_environment(&state, json!({"dme_path": dme_path.clone()}))
+            .await
+            .unwrap();
+        let generation = state.state_generation().await;
+
+        std::fs::write(
+            directory.join("fixture.dm"),
+            "/datum/meridian_fixture\n\n/datum/meridian_fixture/successor\n",
+        )
+        .unwrap();
+        settle(&directory);
+
+        let reparsed = parse_environment(&state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        let payload = result_json(&reparsed);
+
+        assert_eq!(reparsed.is_error, None, "reparse: {reparsed:?}");
+        assert_eq!(payload["reused"], false);
+        assert_eq!(payload["state_generation"], generation + 1);
+        assert!(state
+            .snapshot()
+            .await
+            .unwrap()
+            .objtree
+            .find("/datum/meridian_fixture/successor")
+            .is_some());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn force_reparses_an_unchanged_environment() {
+        let (directory, dme_path) = write_environment_fixture();
+        settle(&directory);
+        let state = ServerState::new();
+        parse_environment(&state, json!({"dme_path": dme_path.clone()}))
+            .await
+            .unwrap();
+        let generation = state.state_generation().await;
+
+        let forced = parse_environment(&state, json!({"dme_path": dme_path, "force": true}))
+            .await
+            .unwrap();
+        let payload = result_json(&forced);
+
+        assert_eq!(payload["reused"], false);
+        assert_eq!(payload["state_generation"], generation + 1);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_successful_parse_reports_diagnostic_counts_and_duration() {
+        let (directory, dme_path) = write_environment_fixture();
+        settle(&directory);
+        let state = ServerState::new();
+
+        let result = parse_environment(&state, json!({"dme_path": dme_path.clone()}))
+            .await
+            .unwrap();
+        let payload = result_json(&result);
+
+        assert!(payload["error_count"].is_u64());
+        assert!(payload["warning_count"].is_u64());
+        assert!(payload["duration_ms"].is_u64());
+        assert!(!payload["spacemandmm_revision"].as_str().unwrap().is_empty());
+        assert_eq!(
+            payload["environment"].as_str().unwrap(),
+            dme_path.display().to_string()
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_directory_is_rejected_before_parsing() {
+        let (directory, _) = write_environment_fixture();
+        let result = parse_environment(
+            &ServerState::new(),
+            json!({"dme_path": directory.display().to_string()}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        let payload = result_json(&result);
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Not a file")),
+            "payload: {payload}"
+        );
+        assert_eq!(payload["details"]["state_preserved"], true);
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

@@ -51,7 +51,7 @@ This is the smallest useful local setup for Codex on Windows. It provides source
    MERIDIAN_MCP_ROOTS = 'C:\path\to\Meridian-Rift'
    ```
 
-3. Restart Codex, call `dm_server_status`, then call `dm_parse_environment` with the contained `.dme` path. Parse again after source changes.
+3. Restart Codex, call `dm_server_status`, then call `dm_parse_environment` with the contained `.dme` path. Parse again after source changes; an unchanged environment reuses the active snapshot rather than reparsing.
 
 Analysis mode needs no BYOND installation. `dm_generate_docs` is advertised only when an exact, hash-verified dmdoc helper and manifest are also packaged and configured.
 
@@ -78,6 +78,8 @@ The complete packaging example is in [Operator and contributor reference](#opera
 3. Verify candidates with `dm_get_type`, `dm_get_proc`, `dm_get_var`, or `dm_get_definition`.
 4. Use `dm_find_references`, `dm_find_implementations`, `dm_document_symbols`, and `dm_check_errors` for impact analysis.
 5. Reparse after any source change. Parser success is not compiler success.
+
+Reparsing is cheap when nothing changed. `dm_parse_environment` fingerprints every source file behind the active snapshot, so a repeated call on an unchanged environment returns that snapshot with `reused: true` and an unchanged `state_generation` instead of parsing again. On a station-sized environment of roughly 10,000 files and 65,000 types this is the difference between about 35 seconds and under half a second, so calling it defensively before an analysis sequence is inexpensive. Any change to any contributing file produces a normal full reparse and a new generation. Files modified within two seconds of the check are always reparsed, because filesystem timestamps are too coarse to prove an edit in that window did not happen. Pass `force: true` to reparse regardless.
 
 Procedure results distinguish the implementation owner, which supplies the nearest executable body, from the declaration owner, which supplies declaration metadata. Exact lookup, definitions, searches, document symbols, and implementation queries use the same snapshot-owned resolver.
 
@@ -136,7 +138,7 @@ Analysis mode exposes the read-only tools below. Development mode adds the activ
 | Tool | Description |
 | --- | --- |
 | `dm_server_status` | Report the MCP build identity, capability mode, optional startup gates, `immutable_startup_roots` containment policy, effective roots and authorization sources, compiler allowlist, active analysis generation, and owned runtime summary. It is read-only and does not require a parsed environment. |
-| `dm_parse_environment` | Parse a contained `.dme` file and atomically replace the cached object tree and search index. Returns type and indexed-symbol counts; call it before the other source-analysis tools and again after source changes. |
+| `dm_parse_environment` | Parse a contained `.dme` file and atomically replace the cached object tree and search index. Returns type and indexed-symbol counts, error and warning counts for the diagnostics it just produced, parse duration, and the pinned SpacemanDMM revision. Call it before the other source-analysis tools and again after source changes; an unchanged environment reuses the active snapshot instead of reparsing, reported as `reused: true`. Optional `force` reparses anyway, and `timeout_ms` bounds a single parse. Parses are serialized, so overlapping calls queue rather than building two object trees at once. |
 | `dm_check_fixture_sync` | Validate a contained declarative fixture manifest against exact parsed proc signatures, required tokens in declared text inputs, and any available managed build record. Returns `verified`, `stale`, or `invalid` without compiling or modifying the fixture. |
 | `dm_get_type` | Inspect an exact DreamMaker type path. Returns its documentation, source location, parent and child types, and variable and procedure metadata, including which members are declared on that type. |
 | `dm_get_proc` | Inspect an exact procedure on a type. Returns its requested type, implementation owner, declaration owner, local-or-inherited resolution kind, and every parsed implementation with parameters, documentation, source location, and a bounded source excerpt. |

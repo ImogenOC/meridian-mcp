@@ -27,6 +27,7 @@ pub mod runtime_integrity;
 mod search;
 pub mod server;
 mod source;
+pub mod source_fingerprint;
 pub mod spaceman;
 pub mod state;
 pub mod tools;
@@ -63,6 +64,7 @@ pub use proc_resolution::{
 pub use project::ProjectProfile;
 pub use repository_roots::{expand_effective_roots, EffectiveRoot, RepositoryIdentity, RootSource};
 pub use server::MeridianServer;
+pub use source_fingerprint::SourceFingerprint;
 pub use tools::rift::BuildEvidence;
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {

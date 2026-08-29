@@ -953,6 +953,7 @@ dependencies = [
  "getrandom",
  "image",
  "png 0.17.16",
+ "rayon",
  "regex",
  "rmcp",
  "schemars",

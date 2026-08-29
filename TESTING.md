@@ -145,6 +145,15 @@ Get-ChildItem ./scripts -Filter *.ps1 | ForEach-Object {
 
 Parsing/search is MCP evidence. Run Meridian-Rift's own PowerShell and `BUILD.cmd` gates before claiming game-code completion. A focused fixture or query is iteration evidence, not the full acceptance matrix.
 
+The snapshot-reuse gate measures the `dm_parse_environment` short-circuit at real scale. It is ignored by default because it needs a full checkout, and it only reads that checkout:
+
+```powershell
+$env:MERIDIAN_SCALE_DME = 'C:\path\to\Meridian-Rift\tgstation.dme'
+cargo +1.95.0 test --locked --release --test parse_reuse_scale -- --ignored --nocapture
+```
+
+Run it in release; a debug parse is slow enough to obscure the comparison. It asserts that reusing an unchanged environment is decisively cheaper than parsing it and that reuse does not install a new state generation, and it prints type, symbol, input, and diagnostic counts alongside both timings. Cache invalidation on edit is proved at fixture scale by the unit tests, which do not need to mutate a real checkout. Reuse timings are filesystem-bound and vary with input count and cache warmth; treat a single run as iteration evidence.
+
 The named Windows integration uses:
 
 ```powershell

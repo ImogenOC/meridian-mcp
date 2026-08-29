@@ -172,13 +172,22 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
     tools.push(ToolDefinition {
 		name: "dm_parse_environment".to_string(),
-        description: "Parse a DreamMaker environment (.dme file) and cache the object tree. This must be called before using other analysis tools.".to_string(),
+        description: "Parse a DreamMaker environment (.dme file) and cache the object tree. This must be called before using other analysis tools. Reparsing an unchanged environment reuses the active snapshot and returns immediately.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "dme_path": {
                     "type": "string",
                     "description": "Path to the .dme environment file"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Reparse even when the active snapshot already matches this environment on disk (default false)."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Abandon the parse after this many milliseconds (default 600000)."
                 }
             },
             "required": ["dme_path"]

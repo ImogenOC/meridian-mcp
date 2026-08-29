@@ -403,6 +403,10 @@ pub struct ServerState {
     assets: Mutex<DmiCache>,
     debugger: Mutex<Option<DebuggerSession>>,
     lifecycle: Mutex<()>,
+    /// Serializes environment parses. Held for the whole build so two callers
+    /// never hold two complete object trees at once, and kept separate from
+    /// `lifecycle` so a long parse does not block runtime launches.
+    parse: Arc<Mutex<()>>,
     tracy_capture: Mutex<TracyCaptureState>,
 }
 
@@ -414,6 +418,7 @@ impl ServerState {
             assets: Mutex::new(DmiCache::default()),
             debugger: Mutex::new(None),
             lifecycle: Mutex::new(()),
+            parse: Arc::new(Mutex::new(())),
             tracy_capture: Mutex::new(TracyCaptureState::default()),
         }
     }
@@ -461,6 +466,14 @@ impl ServerState {
 
     pub(crate) async fn lifecycle(&self) -> MutexGuard<'_, ()> {
         self.lifecycle.lock().await
+    }
+
+    /// Acquire exclusive rights to build an analysis snapshot.
+    ///
+    /// The guard is owned so a parse that outlives its request — a worker that
+    /// blew its timeout — can keep holding it until the worker really exits.
+    pub(crate) async fn parse_permit(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.parse).lock_owned().await
     }
 
     pub(crate) async fn tracy_capture(&self) -> MutexGuard<'_, TracyCaptureState> {

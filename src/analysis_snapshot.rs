@@ -2,6 +2,7 @@ use crate::capabilities::SPACEMANDMM_REVISION;
 use crate::index::LanguageIndex;
 use crate::proc_resolution::ProcResolver;
 use crate::search::SearchIndex;
+use crate::source_fingerprint::SourceFingerprint;
 use crate::spaceman::dmi::{IconReference, IconReferenceResolution};
 use crate::spaceman::language::ReferenceTable;
 use crate::ProjectProfile;
@@ -14,6 +15,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct DiagnosticRecord {
@@ -116,9 +118,11 @@ pub struct AnalysisBuild {
     pub icon_references: Vec<IconReference>,
     pub proc_resolver: ProcResolver,
     pub source_inputs: Vec<PathBuf>,
+    pub source_fingerprint: SourceFingerprint,
 }
 
 impl AnalysisBuild {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parse(
         environment_path: PathBuf,
         context: &Context,
@@ -127,6 +131,7 @@ impl AnalysisBuild {
         search_index: SearchIndex,
         diagnostics: Vec<DiagnosticRecord>,
         project_profile: Option<ProjectProfile>,
+        parse_started_at: SystemTime,
     ) -> Self {
         let extracted_context =
             AnalysisContext::extract(context, &objtree, &defines, &environment_path);
@@ -152,22 +157,47 @@ impl AnalysisBuild {
                 definition: define.display_with_name(name).to_string(),
             })
             .collect();
-        let proc_resolver = ProcResolver::build(&extracted_context, &objtree);
-        let search_index = search_index.with_proc_resolver(&proc_resolver);
-        let source_inputs = build_source_inputs(
-            &extracted_context,
-            &environment_path,
-            project_profile.as_ref(),
+        // These passes each walk the finished object tree and share nothing
+        // mutable, so they run concurrently. The only ordering constraint is
+        // that the search index and language index both consume the resolver.
+        let (proc_resolver, (reference_table, (icon_references, source_inputs))) = rayon::join(
+            || ProcResolver::build(&extracted_context, &objtree),
+            || {
+                rayon::join(
+                    || ReferenceTable::build(&objtree),
+                    || {
+                        rayon::join(
+                            || {
+                                build_icon_references(
+                                    &extracted_context,
+                                    &objtree,
+                                    &environment_path,
+                                )
+                            },
+                            || {
+                                build_source_inputs(
+                                    &extracted_context,
+                                    &environment_path,
+                                    project_profile.as_ref(),
+                                )
+                            },
+                        )
+                    },
+                )
+            },
         );
-        let language_index = LanguageIndex::build(
-            &extracted_context,
-            &objtree,
-            &macro_definitions,
-            &proc_resolver,
+        let (search_index, language_index) = rayon::join(
+            || search_index.with_proc_resolver(&proc_resolver),
+            || {
+                LanguageIndex::build(
+                    &extracted_context,
+                    &objtree,
+                    &macro_definitions,
+                    &proc_resolver,
+                )
+            },
         );
-        let reference_table = ReferenceTable::build(&objtree);
-        let icon_references =
-            build_icon_references(&extracted_context, &objtree, &environment_path);
+        let source_fingerprint = SourceFingerprint::capture(&source_inputs, parse_started_at);
         Self {
             environment_path,
             context: extracted_context,
@@ -181,6 +211,7 @@ impl AnalysisBuild {
             icon_references,
             proc_resolver,
             source_inputs,
+            source_fingerprint,
         }
     }
 }
@@ -198,12 +229,15 @@ pub struct AnalysisSnapshot {
     pub icon_references: Arc<[IconReference]>,
     pub proc_resolver: Arc<ProcResolver>,
     pub source_inputs: Arc<[PathBuf]>,
+    pub source_fingerprint: Arc<SourceFingerprint>,
+    pub total_types: usize,
     pub generation: u64,
     pub spacemandmm_revision: &'static str,
 }
 
 impl AnalysisSnapshot {
     pub(crate) fn from_build(build: AnalysisBuild, generation: u64) -> Self {
+        let total_types = build.objtree.iter_types().count();
         Self {
             environment_path: build.environment_path,
             context: Arc::new(build.context),
@@ -217,6 +251,8 @@ impl AnalysisSnapshot {
             icon_references: Arc::from(build.icon_references),
             proc_resolver: Arc::new(build.proc_resolver),
             source_inputs: Arc::from(build.source_inputs),
+            source_fingerprint: Arc::new(build.source_fingerprint),
+            total_types,
             generation,
             spacemandmm_revision: SPACEMANDMM_REVISION,
         }
@@ -228,6 +264,25 @@ impl AnalysisSnapshot {
 
     pub fn source_inputs(&self) -> &[PathBuf] {
         &self.source_inputs
+    }
+
+    pub fn indexed_symbol_count(&self) -> usize {
+        self.search_index.len()
+    }
+
+    /// Counts of the diagnostics recorded when this snapshot was built.
+    pub fn diagnostic_counts(&self) -> (usize, usize) {
+        let errors = self
+            .diagnostics
+            .iter()
+            .filter(|record| record.severity == "error")
+            .count();
+        let warnings = self
+            .diagnostics
+            .iter()
+            .filter(|record| record.severity == "warning")
+            .count();
+        (errors, warnings)
     }
 }
 
