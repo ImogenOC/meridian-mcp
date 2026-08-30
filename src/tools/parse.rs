@@ -14,6 +14,7 @@ use crate::analysis_snapshot::{
 use crate::mcp::ToolResult;
 use crate::result::{structured_error, ToolErrorCode};
 use crate::search::SearchDocuments;
+use crate::semantic::SEMANTIC_CHUNK_SCHEMA_VERSION;
 use crate::source::extract_source;
 use crate::source_fingerprint::SourceFingerprint;
 use crate::state::ServerState;
@@ -148,6 +149,15 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
                 "warning_count": warnings,
                 "state_generation": reused.generation,
                 "spacemandmm_revision": reused.spacemandmm_revision,
+                "retrieval": {
+                    "lexical": {
+                        "status": "ready",
+                        "algorithm": "bm25",
+                        "documents": reused.indexed_symbol_count(),
+                    },
+                    "dense": {"status": "not_configured"},
+                    "semantic_chunk_schema_version": SEMANTIC_CHUNK_SCHEMA_VERSION,
+                },
                 "timings_ms": {
                     "queue_wait": queue_wait,
                     "reuse_validation": reuse_validation,
@@ -269,6 +279,15 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
                 "duration_ms": total,
                 "state_generation": snapshot.generation,
                 "spacemandmm_revision": snapshot.spacemandmm_revision,
+                "retrieval": {
+                    "lexical": {
+                        "status": "ready",
+                        "algorithm": "bm25",
+                        "documents": snapshot.indexed_symbol_count(),
+                    },
+                    "dense": {"status": "not_configured"},
+                    "semantic_chunk_schema_version": SEMANTIC_CHUNK_SCHEMA_VERSION,
+                },
                 "timings_ms": {
                     "queue_wait": queue_wait,
                     "preprocess_parse": preprocess_parse,
@@ -976,6 +995,10 @@ mod tests {
         assert!(payload["error_count"].is_u64());
         assert!(payload["warning_count"].is_u64());
         assert!(payload["duration_ms"].is_u64());
+        assert_eq!(payload["retrieval"]["lexical"]["status"], "ready");
+        assert_eq!(payload["retrieval"]["lexical"]["algorithm"], "bm25");
+        assert_eq!(payload["retrieval"]["dense"]["status"], "not_configured");
+        assert_eq!(payload["retrieval"]["semantic_chunk_schema_version"], 1);
         for stage in [
             "queue_wait",
             "preprocess_parse",
