@@ -793,6 +793,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn editing_a_comment_only_include_forces_a_reparse() {
+        let (directory, dme_path) = write_environment_fixture();
+        let comment_only = directory.join("comment_only.dm");
+        std::fs::write(
+            &dme_path,
+            "#include \"fixture.dm\"\n#include \"comment_only.dm\"\n",
+        )
+        .unwrap();
+        std::fs::write(&comment_only, "// first revision\n").unwrap();
+        settle(&directory);
+        let state = ServerState::new();
+
+        parse_environment(&state, json!({"dme_path": dme_path.clone()}))
+            .await
+            .unwrap();
+        let generation = state.state_generation().await;
+        assert!(state
+            .snapshot()
+            .await
+            .unwrap()
+            .source_inputs()
+            .contains(&comment_only.canonicalize().unwrap()));
+
+        std::fs::write(&comment_only, "// second revision\n").unwrap();
+        settle(&directory);
+        let reparsed = parse_environment(&state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        let body = result_json(&reparsed);
+
+        assert_eq!(body["reused"], false);
+        assert_eq!(body["state_generation"], generation + 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn force_reparses_an_unchanged_environment() {
         let (directory, dme_path) = write_environment_fixture();
         settle(&directory);
