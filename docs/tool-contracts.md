@@ -41,11 +41,11 @@ Generated from `src/contracts.rs`; do not edit by hand.
 | `dm_map_info` | Analysis | Provisional | read | - | 1048576 | Read DMM/TGM dimensions and atom statistics. |
 | `dm_native_evidence_compare` | Analysis | Experimental | read | 600000 | 1048576 | Compare identity-compatible native evidence runs. |
 | `dm_native_evidence_summary` | Analysis | Experimental | read | 120000 | 1048576 | Summarize bounded redacted native runtime evidence. |
-| `dm_parse_environment` | Analysis | Provisional | read | 1800000 | 1048576 | Parse and atomically index a DreamMaker environment. |
+| `dm_parse_environment` | Analysis | Provisional | read | 1800000 | 1048576 | Parse and atomically install DreamMaker analysis and lexical indexes. |
 | `dm_render_map` | Development | Provisional | read, write | - | 262144 | Render a contained DMM/TGM map output. |
 | `dm_render_maps` | Development | Experimental | read, write | - | 1048576 | Render a bounded typed batch of map chunks. |
 | `dm_run` | Development | Provisional | read, write, process, loopback | 300000 | 1048576 | Start a contained DreamDaemon program on loopback. |
-| `dm_search_context` | Analysis | Provisional | read | - | 1048576 | Rank parsed symbols and source context deterministically. |
+| `dm_search_context` | Analysis | Provisional | read | - | 1048576 | Rank lexical candidates from parsed symbols and source context. |
 | `dm_search_symbols` | Analysis | Provisional | memory | - | 1048576 | Search parsed symbol names. |
 | `dm_server_status` | Analysis | Provisional | memory | - | 262144 | Report immutable startup policy, build identity, analysis generation, and owned runtime summary. |
 | `dm_status` | Development | Provisional | read, write | - | 1048576 | Inspect server-owned DreamDaemon state. |

@@ -172,7 +172,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
     tools.push(ToolDefinition {
 		name: "dm_parse_environment".to_string(),
-        description: "Parse a DreamMaker environment (.dme file) and cache the object tree. This must be called before using other analysis tools. Reparsing an unchanged environment reuses the active snapshot and returns immediately.".to_string(),
+        description: "Parse a DreamMaker environment and atomically install its analysis and lexical BM25 indexes. Reuse compares metadata for every parser-registered input; results report stage timings and explicit dense-not-configured readiness. Call this before other analysis tools.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -320,7 +320,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
     tools.push(ToolDefinition {
         name: "dm_search_context".to_string(),
-        description: "Search parsed DreamMaker types, procs, variables, documentation, and source using deterministic ranked retrieval. Call dm_parse_environment first, then verify results with the exact inspection tools.".to_string(),
+        description: "Search parsed DreamMaker types, procs, variables, documentation, and source using deterministic candidate-bounded lexical BM25 retrieval. Reports candidate and scoring counts; call dm_parse_environment first and verify results with exact inspection tools.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {

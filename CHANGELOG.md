@@ -15,12 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added source fingerprinting to `dm_parse_environment` so an unchanged environment reuses the active snapshot instead of reparsing, reported as `reused: true` with an unchanged state generation. Measured on a ~10,000-file, 65,000-type environment, a redundant reparse fell from about 35 seconds to under half a second. Files modified within two seconds of the check are always reparsed, because filesystem timestamp granularity cannot prove an edit in that window did not happen.
 - Added `force` and `timeout_ms` arguments to `dm_parse_environment`. A parse that exceeds its timeout is abandoned with a structured error; because a blocking parse cannot be cancelled, the worker keeps running and the next parse queues behind it rather than running alongside it.
 - Added error and warning counts, parse duration, the canonical environment path, and the pinned SpacemanDMM revision to the `dm_parse_environment` result, so diagnostic volume no longer needs a second `dm_check_errors` call to discover.
+- Added cold/reuse stage timings, explicit lexical/dense readiness, deterministic schema-1 semantic chunk identities, and a checked-in relevance gate with exact MRR and natural-language recall assertions.
 
 ### Changed
 
 - Serialized `dm_parse_environment` so overlapping calls queue instead of each building a complete object tree, and stopped holding the previous snapshot alive for the duration of a parse. Both removed a doubled peak memory footprint on large environments.
 - Built the post-parse indexes concurrently and centralized detection of the parser diagnostics that mean an environment was never fully read, with a test pinning that wording to the SpacemanDMM revision it is matched against.
 - Made `dm_parse_environment` reject a directory or missing path as a structured error before parsing, rather than reporting it as a parser failure.
+- Made reuse cover every SpacemanDMM-registered input, corrected the fingerprint contract to path/length/settled-mtime metadata, and classified timeouts and worker failures separately from invalid input.
+- Built lexical postings once after canonical proc resolution, cached source line offsets once per file, and ranked only posting/exact/verified-substring candidates before bounded top-k sorting.
 
 - Made workflow contract parsing portable across LF and CRLF checkouts, and made the explicitly diagnostic Windows synthetic runtime lane retain evidence as a warning while Ubuntu remains the required compatibility gate.
 
