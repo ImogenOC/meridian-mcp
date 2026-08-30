@@ -28,6 +28,14 @@ fn dreamdaemon_and_collector_roles_are_never_implicitly_combined() {
 }
 
 #[test]
+fn meridian_mcp_role_has_a_stable_serialized_name() {
+    assert_eq!(
+        serde_json::to_string(&ProcessRole::MeridianMcp).unwrap(),
+        "\"meridian_mcp\""
+    );
+}
+
+#[test]
 fn memory_summaries_remain_separate_by_role_and_metric() {
     let identity = process_identity(std::process::id(), ProcessRole::Collector).unwrap();
     let samples = sample_process(&identity, 0).unwrap();

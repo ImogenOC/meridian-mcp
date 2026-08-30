@@ -51,8 +51,9 @@ pub(crate) async fn search_context(state: &ServerState, args: Value) -> Result<T
         file_filter,
         limit,
     };
-    let hits = index.search(&request);
-    let results: Vec<Value> = hits
+    let execution = index.search(&request);
+    let results: Vec<Value> = execution
+        .hits
         .iter()
         .map(|hit| {
             let document = hit.document;
@@ -103,6 +104,12 @@ pub(crate) async fn search_context(state: &ServerState, args: Value) -> Result<T
         "indexed_documents": index.len(),
         "count": results.len(),
         "results": results,
+        "retrieval": {
+            "mode": "lexical",
+            "algorithm": "bm25",
+            "candidates_considered": execution.candidates_considered,
+            "documents_scored": execution.documents_scored,
+        },
     });
     Ok(ToolResult::text(serde_json::to_string_pretty(&response)?))
 }
