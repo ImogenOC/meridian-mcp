@@ -15,7 +15,16 @@ cargo +1.95.0 build --locked --release
 cargo +1.95.0 deny check
 ```
 
-The suite covers owned DreamMaker and DMM fixtures, parse generations, exact lookup and source excerpts, ranked search, map coordinates and PNG output, path containment, executable allowlisting, overwrite policy, mode inventories, runtime buffering, readiness, `Topic()` framing, generated contract drift, and documentation links.
+The suite covers owned DreamMaker and DMM fixtures, parse generations, complete registered-input reuse, exact lookup and source excerpts, lexical retrieval judgments, semantic chunk identities, map coordinates and PNG output, path containment, executable allowlisting, overwrite policy, mode inventories, runtime buffering, readiness, `Topic()` framing, generated contract drift, and documentation links.
+
+The fixed search fixture is the relevance acceptance gate:
+
+```powershell
+cargo +1.95.0 test --locked --test search_relevance -- --nocapture
+cargo +1.95.0 test --locked --lib semantic::tests -- --nocapture
+```
+
+Its schema-1 labels require exact-identifier MRR 1.0 and natural-language recall@10 1.0. Do not weaken a label to accommodate a ranking regression. The semantic tests cover stable repository-relative document/chunk IDs, content digests, 40-line chunks with five-line overlap, and independence from embedding-model identity. These gates do not claim that dense retrieval exists.
 
 The repository's checked-in cross-platform text policy is LF, including PowerShell and owned DreamMaker fixtures. Do not rewrite files to CRLF to satisfy a Windows-only observation. Parsers and contract tests that consume external text must accept both LF and CRLF explicitly; use `git diff --check` and the checked-in `.gitattributes` as the repository authority rather than a developer's `core.autocrlf` setting.
 
@@ -152,7 +161,9 @@ $env:MERIDIAN_SCALE_DME = 'C:\path\to\Meridian-Rift\tgstation.dme'
 cargo +1.95.0 test --locked --release --test parse_reuse_scale -- --ignored --nocapture
 ```
 
-Run it in release; a debug parse is slow enough to obscure the comparison. It asserts that reusing an unchanged environment is decisively cheaper than parsing it and that reuse does not install a new state generation, and it prints type, symbol, input, and diagnostic counts alongside both timings. Cache invalidation on edit is proved at fixture scale by the unit tests, which do not need to mutate a real checkout. Reuse timings are filesystem-bound and vary with input count and cache warmth; treat a single run as iteration evidence.
+Run it in release; a debug parse is slow enough to obscure the comparison. It asserts that reusing an unchanged environment is decisively cheaper than parsing it and that reuse does not install a new state generation. It also runs the ten audit queries, prints per-query latency, candidates, scored documents, top symbols, median and maximum latency, and samples process memory immediately before parsing and after snapshot installation. Cache invalidation on edit is proved at fixture scale by the unit tests, which do not need to mutate a real checkout. Reuse, query, and memory values vary with the host and cache warmth; treat one run as iteration evidence and compare changes on the same host.
+
+A future dense backend adds separate acceptance requirements: labeled hybrid relevance, ANN recall against exact nearest-neighbor results, embedding/provider/dimension migration tests, payload indexes for selective filters, immutable generation builds, and an atomic active-generation swap. None is required while `dense.status` remains `not_configured`; enabling dense retrieval without those gates is not acceptable.
 
 The named Windows integration uses:
 

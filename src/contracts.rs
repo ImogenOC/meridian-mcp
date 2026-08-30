@@ -132,7 +132,7 @@ static CONTRACTS: &[ToolContract] = &[
 	),
 	contract!(
         "dm_parse_environment",
-        "Parse and atomically index a DreamMaker environment.",
+        "Parse and atomically install DreamMaker analysis and lexical indexes.",
         Analysis,
         READ,
         Provisional,
@@ -197,7 +197,7 @@ static CONTRACTS: &[ToolContract] = &[
     ),
     contract!(
         "dm_search_context",
-        "Rank parsed symbols and source context deterministically.",
+        "Rank lexical candidates from parsed symbols and source context.",
         Analysis,
         READ,
         Provisional,

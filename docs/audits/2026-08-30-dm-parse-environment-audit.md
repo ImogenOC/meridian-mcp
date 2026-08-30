@@ -263,3 +263,16 @@ make that decision reversible and measurable.
 - Golden-set exact-identifier MRR is 1.0 and natural-language recall@10 does not regress.
 - Full pinned tests, formatting, Clippy, release build, dependency policy, installed MCP fixture smoke,
   and real-corpus scale gates pass.
+
+## Implementation status
+
+Alternative A is implemented on the audit branch. Complete registered-input tracking, structured
+failure codes, bounded input schema, one-pass postings construction, cached source line offsets,
+stage timings, candidate-bounded ranking, retrieval counters, the owned relevance corpus, and the
+schema-1 semantic chunk API are covered by focused tests. Parse results report lexical BM25 as ready
+and dense retrieval as `not_configured`; no embedding model, vector index, source upload, or duplicate
+semantic corpus was added to the active snapshot.
+
+Final release-scale timings, post-install memory, installed MCP smoke results, and the full pinned gate
+matrix are recorded below after Task 7. Until those fresh results exist, the original baseline and
+acceptance targets above remain the comparison authority.
