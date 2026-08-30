@@ -273,6 +273,24 @@ schema-1 semantic chunk API are covered by focused tests. Parse results report l
 and dense retrieval as `not_configured`; no embedding model, vector index, source upload, or duplicate
 semantic corpus was added to the active snapshot.
 
-Final release-scale timings, post-install memory, installed MCP smoke results, and the full pinned gate
-matrix are recorded below after Task 7. Until those fresh results exist, the original baseline and
-acceptance targets above remain the comparison authority.
+The final same-host release run produced:
+
+| Measurement | Baseline | Updated | Result |
+| --- | ---: | ---: | --- |
+| Registered/fingerprinted inputs | 10,389 | 10,413 | Complete registry adds 24 previously omitted inputs |
+| Cold parse and index | 34,386 ms | 22,048 ms | 35.9% faster; target passed |
+| Unchanged snapshot reuse | 451 ms | 440 ms | Below 750 ms; passed |
+| Post-install working set | 1,737.2 MiB | 1,765.4 MiB | 1.6% increase; below 1,824 MiB ceiling |
+| Post-install private memory | 1,895.8 MiB | 1,896.9 MiB | 0.1% increase; below 1,991 MiB ceiling |
+| Ten-query latency | 106-255 ms each | 2 ms median, 39 ms maximum | Both targets passed |
+| Exact mapping query | 106-255 ms range | 0 ms, 1 candidate | Exact symbol ranked first |
+| Golden exact-identifier MRR | Not measured | 1.0 | Passed |
+| Golden natural-language recall@10 | Not measured | 1.0 | Passed |
+
+The release scale gate parsed 64,855 types into 450,258 lexical documents with 139 cached errors and
+one warning, then reused the same generation. `dogmos` and the exact mapping subsystem symbol ranked
+first. The installed release MCP smoke passed protocol negotiation, fixture parsing, cached
+DreamChecker diagnostics, and ranked context search. On the exact final tree, Rust 1.95.0 formatting,
+all-feature tests, warnings-denied all-target Clippy, optimized release build, documentation/generated
+contract checks, and dependency policy all passed. Dependency policy retained existing
+duplicate-version warnings; advisories, bans, licenses, and sources passed.
