@@ -187,10 +187,12 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 1800000,
                     "description": "Abandon the parse after this many milliseconds (default 600000)."
                 }
             },
-            "required": ["dme_path"]
+            "required": ["dme_path"],
+            "additionalProperties": false
         }),
     });
 

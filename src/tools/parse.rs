@@ -35,6 +35,7 @@ const BLOCKING_ERROR_MESSAGES: &[&str] = &["i/o error opening file", "i/o error 
 /// environment on a cold cache; present so a pathological input cannot wedge a
 /// client forever with no reply.
 const DEFAULT_PARSE_TIMEOUT_MS: u64 = 600_000;
+const MAX_PARSE_TIMEOUT_MS: u64 = 1_800_000;
 
 /// Render a canonicalized path the way a caller wrote it.
 ///
@@ -63,12 +64,48 @@ fn is_blocking_error(description: &str) -> bool {
         || BLOCKING_ERROR_MESSAGES.contains(&description)
 }
 
+fn validated_parse_timeout(args: &Value) -> Result<Duration> {
+    let timeout_ms = args
+        .get("timeout_ms")
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| anyhow!("timeout_ms must be an integer"))
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_PARSE_TIMEOUT_MS);
+    if !(1..=MAX_PARSE_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(anyhow!(
+            "timeout_ms must be between 1 and {MAX_PARSE_TIMEOUT_MS}"
+        ));
+    }
+    Ok(Duration::from_millis(timeout_ms))
+}
+
 /// Parse a DreamMaker environment
 pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolResult> {
     let dme_path = args
         .get("dme_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("Missing dme_path argument"))?;
+
+    let prior_environment = state
+        .active_snapshot()
+        .await
+        .map(|snapshot| snapshot.environment_path.clone());
+    let timeout = match validated_parse_timeout(&args) {
+        Ok(timeout) => timeout,
+        Err(error) => {
+            return parse_failure(
+                state,
+                prior_environment.as_deref(),
+                ToolErrorCode::InvalidInput,
+                error.to_string(),
+                Some("Use timeout_ms between 1 and 1800000 milliseconds.".to_owned()),
+            )
+            .await;
+        }
+    };
 
     let path = PathBuf::from(dme_path);
     if !path.is_file() {
@@ -77,18 +114,15 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
         } else {
             format!("File not found: {dme_path}")
         };
-        let prior = state
-            .active_snapshot()
-            .await
-            .map(|snapshot| snapshot.environment_path.clone());
-        return parse_failure(state, prior.as_deref(), reason).await;
+        return parse_failure(
+            state,
+            prior_environment.as_deref(),
+            ToolErrorCode::InvalidInput,
+            reason,
+            Some("Provide the path to an existing DreamMaker .dme file.".to_owned()),
+        )
+        .await;
     }
-
-    let timeout = Duration::from_millis(
-        args.get("timeout_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_PARSE_TIMEOUT_MS),
-    );
     let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
 
     // Serialize parses before touching the active snapshot, so a concurrent
@@ -118,11 +152,6 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
     // Only the prior environment path is needed on the failure path. Holding the
     // whole prior snapshot across the parse would pin the old object tree in
     // memory while the new one is built.
-    let prior_environment = state
-        .active_snapshot()
-        .await
-        .map(|snapshot| snapshot.environment_path.clone());
-
     let started = Instant::now();
     let parse_started_at = SystemTime::now();
     let parse_path = path.clone();
@@ -190,11 +219,13 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             return parse_failure(
                 state,
                 prior_environment.as_deref(),
+                ToolErrorCode::TimedOut,
                 format!(
                     "parse exceeded {} ms and was abandoned; the worker is still running and the \
                      next parse will queue behind it",
                     timeout.as_millis()
                 ),
+                Some("Wait for the active parser worker to finish, then retry.".to_owned()),
             )
             .await;
         }
@@ -218,13 +249,25 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             }))?))
         }
         Ok(Err(error)) => {
-            parse_failure(state, prior_environment.as_deref(), error.to_string()).await
+            parse_failure(
+                state,
+                prior_environment.as_deref(),
+                ToolErrorCode::InvalidInput,
+                error.to_string(),
+                Some(
+                    "Correct the DreamMaker parse errors and run dm_parse_environment again."
+                        .to_owned(),
+                ),
+            )
+            .await
         }
         Err(error) => {
             parse_failure(
                 state,
                 prior_environment.as_deref(),
+                ToolErrorCode::Internal,
                 format!("parser worker failed: {error}"),
+                Some("Retry the parse; report the worker failure if it recurs.".to_owned()),
             )
             .await
         }
@@ -255,12 +298,14 @@ async fn reusable_snapshot(
 async fn parse_failure(
     state: &ServerState,
     prior_environment: Option<&std::path::Path>,
+    code: ToolErrorCode,
     error: String,
+    recovery: Option<String>,
 ) -> Result<ToolResult> {
     Ok(structured_error(
-        ToolErrorCode::InvalidInput,
+        code,
         error,
-        Some("Correct the DreamMaker parse errors and run dm_parse_environment again.".to_owned()),
+        recovery,
         json!({
         "state_preserved": true,
         "active_environment": prior_environment.map(display_path),
@@ -754,6 +799,31 @@ mod tests {
         assert_eq!(state.state_generation().await, generation);
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn parse_failure_preserves_the_requested_error_code() {
+        let result = parse_failure(
+            &ServerState::new(),
+            None,
+            ToolErrorCode::TimedOut,
+            "parse exceeded 1 ms".to_owned(),
+            Some("Wait for the active parser worker to finish, then retry.".to_owned()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result_json(&result)["code"], "timed_out");
+    }
+
+    #[test]
+    fn parse_timeout_rejects_values_outside_the_contract() {
+        assert!(validated_parse_timeout(&json!({"timeout_ms": 0})).is_err());
+        assert!(validated_parse_timeout(&json!({"timeout_ms": 1_800_001})).is_err());
+        assert_eq!(
+            validated_parse_timeout(&json!({"timeout_ms": 1_800_000})).unwrap(),
+            Duration::from_millis(1_800_000),
+        );
     }
 
     #[tokio::test]

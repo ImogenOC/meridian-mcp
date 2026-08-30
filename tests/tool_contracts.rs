@@ -23,6 +23,11 @@ fn contracts_are_unique_bounded_and_analysis_is_read_only() {
                 && !contract.effects.network_loopback
                 && !contract.effects.network_external
         }));
+    let parse = all_contracts()
+        .iter()
+        .find(|contract| contract.name == "dm_parse_environment")
+        .expect("dm_parse_environment must have a maximum contract");
+    assert_eq!(parse.timeout_ms, Some(1_800_000));
 }
 
 #[test]
