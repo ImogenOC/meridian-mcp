@@ -8,6 +8,7 @@
 //! at fixture scale by `an_edited_source_file_forces_a_reparse`, which does not
 //! need to mutate a real checkout to prove it.
 
+use meridian_mcp::process_metrics::{process_identity, sample_process, ProcessRole};
 use meridian_mcp::result::ToolContent;
 use meridian_mcp::state::ServerState;
 use meridian_mcp::tools::{call_tool, ToolExecutionContext};
@@ -33,6 +34,8 @@ async fn reusing_a_large_environment_is_orders_of_magnitude_faster() {
         PathPolicy::new(vec![root], Vec::new()).unwrap(),
     );
     let state = ServerState::new();
+    let identity = process_identity(std::process::id(), ProcessRole::MeridianMcp).unwrap();
+    let memory_before = sample_process(&identity, 0).unwrap();
 
     let cold_started = Instant::now();
     let cold = call_tool(
@@ -47,6 +50,7 @@ async fn reusing_a_large_environment_is_orders_of_magnitude_faster() {
     let cold_payload = payload(&cold);
     assert_eq!(cold.is_error, None, "cold parse: {cold_payload}");
     assert_eq!(cold_payload["reused"], false);
+    let memory_after = sample_process(&identity, cold_elapsed.as_millis() as u64).unwrap();
 
     let warm_started = Instant::now();
     let warm = call_tool(
@@ -70,6 +74,8 @@ async fn reusing_a_large_environment_is_orders_of_magnitude_faster() {
     println!("warnings:    {}", cold_payload["warning_count"]);
     println!("cold parse:  {} ms", cold_elapsed.as_millis());
     println!("warm reuse:  {} ms", warm_elapsed.as_millis());
+    println!("memory before: {memory_before:?}");
+    println!("memory after:  {memory_after:?}");
 
     assert_eq!(warm.is_error, None, "warm parse: {warm_payload}");
     assert_eq!(warm_payload["reused"], true);
@@ -84,4 +90,49 @@ async fn reusing_a_large_environment_is_orders_of_magnitude_faster() {
         warm_elapsed * 20 < cold_elapsed,
         "reuse ({warm_elapsed:?}) was not decisively faster than a parse ({cold_elapsed:?})"
     );
+
+    let queries = [
+        "dogmos",
+        "/datum/controller/subsystem/mapping",
+        "native dog library health detection",
+        "find references to icon state",
+        "air temperature reset",
+        "bluespace personal cache",
+        "camera network visibility",
+        "liquid turf processing",
+        "admin technology",
+        "move manager path",
+    ];
+    let mut latencies = Vec::with_capacity(queries.len());
+    for query in queries {
+        let started = Instant::now();
+        let result = call_tool(
+            &context,
+            &state,
+            "dm_search_context",
+            json!({ "query": query, "limit": 10, "include_source": false }),
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        let body = payload(&result);
+        assert_eq!(result.is_error, None, "search {query}: {body}");
+        let top_symbol = body["results"][0]["symbol"].as_str().unwrap_or("(none)");
+        println!(
+            "query={query:?} latency_ms={} candidates={} scored={} top={top_symbol}",
+            elapsed.as_millis(),
+            body["retrieval"]["candidates_considered"],
+            body["retrieval"]["documents_scored"],
+        );
+        if query == "dogmos" {
+            assert!(top_symbol.to_ascii_lowercase().contains("dogmos"));
+        }
+        if query == "/datum/controller/subsystem/mapping" {
+            assert_eq!(top_symbol, query);
+        }
+        latencies.push(elapsed.as_millis() as u64);
+    }
+    latencies.sort_unstable();
+    println!("query median: {} ms", latencies[latencies.len() / 2]);
+    println!("query maximum: {} ms", latencies.last().unwrap());
 }

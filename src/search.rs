@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -63,6 +64,12 @@ pub(crate) struct SearchHit<'a> {
     pub(crate) document: &'a SearchDocument,
 }
 
+pub(crate) struct SearchExecution<'a> {
+    pub(crate) hits: Vec<SearchHit<'a>>,
+    pub(crate) candidates_considered: usize,
+    pub(crate) documents_scored: usize,
+}
+
 pub(crate) struct SearchDocuments {
     documents: Vec<SearchDocument>,
 }
@@ -77,6 +84,8 @@ struct Posting {
 pub(crate) struct SearchIndex {
     documents: Vec<SearchDocument>,
     postings: HashMap<String, Vec<Posting>>,
+    exact_symbols: HashMap<String, Vec<usize>>,
+    exact_names: HashMap<String, Vec<usize>>,
     document_lengths: Vec<f64>,
     average_document_length: f64,
 }
@@ -84,9 +93,19 @@ pub(crate) struct SearchIndex {
 impl SearchIndex {
     pub(crate) fn new(documents: Vec<SearchDocument>) -> Self {
         let mut postings: HashMap<String, Vec<Posting>> = HashMap::new();
+        let mut exact_symbols: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut exact_names: HashMap<String, Vec<usize>> = HashMap::new();
         let mut document_lengths = Vec::with_capacity(documents.len());
 
         for (document_id, document) in documents.iter().enumerate() {
+            exact_symbols
+                .entry(document.symbol.to_lowercase())
+                .or_default()
+                .push(document_id);
+            exact_names
+                .entry(document.name.to_lowercase())
+                .or_default()
+                .push(document_id);
             let terms = weighted_terms(document);
             let length = terms.values().map(|frequency| *frequency as f64).sum();
             document_lengths.push(length);
@@ -108,6 +127,8 @@ impl SearchIndex {
         Self {
             documents,
             postings,
+            exact_symbols,
+            exact_names,
             document_lengths,
             average_document_length,
         }
@@ -306,13 +327,19 @@ impl SearchIndex {
             .collect()
     }
 
-    pub(crate) fn search(&self, request: &SearchRequest<'_>) -> Vec<SearchHit<'_>> {
+    pub(crate) fn search(&self, request: &SearchRequest<'_>) -> SearchExecution<'_> {
         let query_terms = Self::query_terms(request.query);
         if query_terms.is_empty() || request.limit == 0 {
-            return Vec::new();
+            return SearchExecution {
+                hits: Vec::new(),
+                candidates_considered: 0,
+                documents_scored: 0,
+            };
         }
 
-        let mut scores = vec![0.0; self.documents.len()];
+        let normalized_query = request.query.trim().to_lowercase();
+        let mut candidates = BTreeSet::new();
+        let mut scores = HashMap::<usize, f64>::new();
         for term in query_terms {
             let Some(postings) = self.postings.get(&term) else {
                 continue;
@@ -325,6 +352,7 @@ impl SearchIndex {
                 .ln();
 
             for posting in postings {
+                candidates.insert(posting.document_id);
                 let document_length = self.document_lengths[posting.document_id];
                 let length_normalization = if self.average_document_length == 0.0 {
                     1.0
@@ -333,30 +361,56 @@ impl SearchIndex {
                 };
                 let numerator = posting.term_frequency * (BM25_K1 + 1.0);
                 let denominator = posting.term_frequency + BM25_K1 * length_normalization;
-                scores[posting.document_id] += inverse_document_frequency * numerator / denominator;
+                *scores.entry(posting.document_id).or_default() +=
+                    inverse_document_frequency * numerator / denominator;
             }
         }
+        for document_id in self
+            .exact_symbols
+            .get(&normalized_query)
+            .into_iter()
+            .chain(self.exact_names.get(&normalized_query))
+            .flatten()
+        {
+            candidates.insert(*document_id);
+        }
+        if candidates.is_empty() {
+            candidates.extend(
+                self.documents
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, document)| {
+                        document.symbol.to_lowercase().contains(&normalized_query)
+                    })
+                    .map(|(document_id, _)| document_id),
+            );
+        }
 
-        let normalized_query = request.query.trim().to_lowercase();
+        let candidates_considered = candidates.len();
         let type_prefix = request.type_prefix.map(str::to_lowercase);
         let file_filter = request.file_filter.map(str::to_lowercase);
-        let mut hits: Vec<SearchHit<'_>> = self
-            .documents
-            .iter()
-            .enumerate()
-            .filter(|(_, document)| request.kind.is_none_or(|kind| document.kind == kind))
-            .filter(|(_, document)| {
-                type_prefix
+        let mut documents_scored = 0;
+        let mut hits: Vec<SearchHit<'_>> = candidates
+            .into_iter()
+            .filter_map(|document_id| {
+                let document = &self.documents[document_id];
+                if !request.kind.is_none_or(|kind| document.kind == kind) {
+                    return None;
+                }
+                if !type_prefix
                     .as_ref()
                     .is_none_or(|prefix| document.type_path.to_lowercase().starts_with(prefix))
-            })
-            .filter(|(_, document)| {
-                file_filter
+                {
+                    return None;
+                }
+                if !file_filter
                     .as_ref()
                     .is_none_or(|filter| document.file.to_lowercase().contains(filter))
-            })
-            .filter_map(|(document_id, document)| {
-                let mut score = scores[document_id];
+                {
+                    return None;
+                }
+                documents_scored += 1;
+                let mut score = scores.get(&document_id).copied().unwrap_or_default();
                 let normalized_symbol = document.symbol.to_lowercase();
                 let normalized_name = document.name.to_lowercase();
                 if normalized_symbol == normalized_query {
@@ -371,17 +425,26 @@ impl SearchIndex {
             })
             .collect();
 
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.document.symbol.cmp(&right.document.symbol))
-                .then_with(|| left.document.file.cmp(&right.document.file))
-                .then_with(|| left.document.line.cmp(&right.document.line))
-        });
-        hits.truncate(request.limit);
-        hits
+        if hits.len() > request.limit {
+            hits.select_nth_unstable_by(request.limit, compare_hits);
+            hits.truncate(request.limit);
+        }
+        hits.sort_by(compare_hits);
+        SearchExecution {
+            hits,
+            candidates_considered,
+            documents_scored,
+        }
     }
+}
+
+fn compare_hits(left: &SearchHit<'_>, right: &SearchHit<'_>) -> Ordering {
+    right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| left.document.symbol.cmp(&right.document.symbol))
+        .then_with(|| left.document.file.cmp(&right.document.file))
+        .then_with(|| left.document.line.cmp(&right.document.line))
 }
 
 fn weighted_terms(document: &SearchDocument) -> HashMap<String, u32> {
@@ -562,7 +625,7 @@ mod tests {
             ),
         ]);
 
-        let hits = index.search(&request("turf air temperature reset"));
+        let hits = index.search(&request("turf air temperature reset")).hits;
 
         assert_eq!(hits[0].document.name, "reset_temperature");
         assert!(hits[0].score > 0.0);
@@ -591,7 +654,9 @@ mod tests {
             ),
         ]);
 
-        let hits = index.search(&request("/datum/other/proc/update_state"));
+        let hits = index
+            .search(&request("/datum/other/proc/update_state"))
+            .hits;
 
         assert_eq!(hits[0].document.symbol, "/datum/other/proc/update_state");
     }
@@ -635,7 +700,7 @@ mod tests {
             limit: 1,
         };
 
-        let hits = index.search(&filtered);
+        let hits = index.search(&filtered).hits;
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].document.symbol, "/turf/open/proc/update_air");
@@ -666,10 +731,79 @@ mod tests {
             ),
         ]);
 
-        let hits = index.search(&request("shared"));
+        let hits = index.search(&request("shared")).hits;
 
         assert_eq!(hits[0].document.symbol, "/datum/example/proc/alpha");
         assert_eq!(hits[1].document.symbol, "/datum/example/proc/beta");
+    }
+
+    #[test]
+    fn partial_symbol_queries_use_substring_candidates() {
+        let index = SearchIndex::new(vec![
+            document(
+                SymbolKind::Proc,
+                "/datum/dogmos_kennel/proc/status",
+                "status",
+                "/datum/dogmos_kennel",
+                "code/dogmos.dm",
+                "",
+                "return",
+            ),
+            document(
+                SymbolKind::Proc,
+                "/datum/unrelated/proc/status",
+                "status",
+                "/datum/unrelated",
+                "code/other.dm",
+                "",
+                "return",
+            ),
+        ]);
+
+        let execution = index.search(&request("dogmos_kenn"));
+
+        assert_eq!(
+            execution.hits[0].document.symbol,
+            "/datum/dogmos_kennel/proc/status"
+        );
+
+        let filtered = SearchRequest {
+            query: "dogmos_kenn",
+            kind: Some(SymbolKind::Proc),
+            type_prefix: Some("/datum/dogmos"),
+            file_filter: Some("dogmos"),
+            limit: 1,
+        };
+        let filtered_execution = index.search(&filtered);
+        assert_eq!(filtered_execution.hits.len(), 1);
+        assert_eq!(
+            filtered_execution.hits[0].document.symbol,
+            "/datum/dogmos_kennel/proc/status"
+        );
+    }
+
+    #[test]
+    fn absent_terms_do_not_score_the_whole_corpus() {
+        let index = SearchIndex::new(
+            (0..10_000)
+                .map(|number| {
+                    document(
+                        SymbolKind::Type,
+                        &format!("/datum/noise_{number}"),
+                        &format!("noise_{number}"),
+                        "/datum",
+                        "code/noise.dm",
+                        "unrelated fixture",
+                        "return",
+                    )
+                })
+                .collect(),
+        );
+
+        let execution = index.search(&request("term_that_is_not_present"));
+
+        assert!(execution.hits.is_empty());
+        assert_eq!(execution.documents_scored, 0);
     }
 
     #[test]
@@ -682,7 +816,9 @@ mod tests {
         let index =
             SearchDocuments::from_object_tree(&objtree, &context, &environment_path).into_index();
 
-        let hits = index.search(&request("gas mixture temperature air reset"));
+        let hits = index
+            .search(&request("gas mixture temperature air reset"))
+            .hits;
         let proc_hit = hits
             .iter()
             .find(|hit| hit.document.kind == SymbolKind::Proc)
