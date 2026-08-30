@@ -1,6 +1,7 @@
 # `dm_parse_environment` Correctness and Performance Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. The user authorized sequential implementation and review subagents for this plan.
+> **Execution note:** Use `superpowers:executing-plans` task-by-task. Work returned to inline-only
+> processing before final acceptance and closure.
 
 **Goal:** Make parse reuse complete and honest, remove avoidable parse/index and query work, expose actionable timing evidence, and establish a versioned semantic-corpus contract without adding an unapproved embedding model or vector service.
 
@@ -9,6 +10,10 @@
 **Tech Stack:** Rust 1.95.0, Tokio, Rayon, pinned SpacemanDMM/DreamChecker, SHA-256, serde/serde_json, PowerShell.
 
 **Spec:** `docs/audits/2026-08-30-dm-parse-environment-audit.md`
+
+**Execution status:** Complete. Tasks 1-7 were executed in scoped local commits. Every checklist gate
+below passed on the final tree; release-scale evidence and existing dependency-policy warnings are
+recorded in the audit.
 
 ## Global Constraints
 
