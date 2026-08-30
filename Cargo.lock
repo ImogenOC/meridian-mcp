@@ -950,6 +950,7 @@ dependencies = [
  "dmm-tools",
  "dreamchecker",
  "dreammaker",
+ "foldhash",
  "getrandom",
  "image",
  "png 0.17.16",

@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use dreammaker::objtree::ObjectTree;
 use dreammaker::Context;
+use foldhash::{HashMap, HashMapExt};
 
 use crate::proc_resolution::ProcResolver;
 use crate::source::IndexedSource;
@@ -338,53 +339,55 @@ impl SearchIndex {
         }
 
         let normalized_query = request.query.trim().to_lowercase();
-        let mut candidates = BTreeSet::new();
         let mut scores = HashMap::<usize, f64>::new();
-        for term in query_terms {
-            let Some(postings) = self.postings.get(&term) else {
-                continue;
-            };
-
-            let document_frequency = postings.len() as f64;
-            let document_count = self.documents.len() as f64;
-            let inverse_document_frequency = (1.0
-                + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
-                .ln();
-
-            for posting in postings {
-                candidates.insert(posting.document_id);
-                let document_length = self.document_lengths[posting.document_id];
-                let length_normalization = if self.average_document_length == 0.0 {
-                    1.0
-                } else {
-                    1.0 - BM25_B + BM25_B * document_length / self.average_document_length
+        if let Some(exact_symbols) = self.exact_symbols.get(&normalized_query) {
+            scores.extend(exact_symbols.iter().map(|document_id| (*document_id, 0.0)));
+        } else {
+            for term in query_terms {
+                let Some(postings) = self.postings.get(&term) else {
+                    continue;
                 };
-                let numerator = posting.term_frequency * (BM25_K1 + 1.0);
-                let denominator = posting.term_frequency + BM25_K1 * length_normalization;
-                *scores.entry(posting.document_id).or_default() +=
-                    inverse_document_frequency * numerator / denominator;
+
+                let document_frequency = postings.len() as f64;
+                let document_count = self.documents.len() as f64;
+                let inverse_document_frequency = (1.0
+                    + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
+                    .ln();
+
+                for posting in postings {
+                    let document_length = self.document_lengths[posting.document_id];
+                    let length_normalization = if self.average_document_length == 0.0 {
+                        1.0
+                    } else {
+                        1.0 - BM25_B + BM25_B * document_length / self.average_document_length
+                    };
+                    let numerator = posting.term_frequency * (BM25_K1 + 1.0);
+                    let denominator = posting.term_frequency + BM25_K1 * length_normalization;
+                    *scores.entry(posting.document_id).or_default() +=
+                        inverse_document_frequency * numerator / denominator;
+                }
+            }
+            for document_id in self
+                .exact_names
+                .get(&normalized_query)
+                .into_iter()
+                .flatten()
+            {
+                scores.entry(*document_id).or_default();
             }
         }
-        for document_id in self
-            .exact_symbols
-            .get(&normalized_query)
-            .into_iter()
-            .chain(self.exact_names.get(&normalized_query))
-            .flatten()
-        {
-            candidates.insert(*document_id);
-        }
-        if candidates.is_empty() {
-            candidates.extend(
-                self.documents
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, document)| {
-                        document.symbol.to_lowercase().contains(&normalized_query)
-                    })
-                    .map(|(document_id, _)| document_id),
-            );
-        }
+        let candidates = if scores.is_empty() {
+            self.documents
+                .iter()
+                .enumerate()
+                .filter(|(_, document)| {
+                    contains_case_insensitive(&document.symbol, &normalized_query)
+                })
+                .map(|(document_id, _)| document_id)
+                .collect::<Vec<_>>()
+        } else {
+            scores.keys().copied().collect::<Vec<_>>()
+        };
 
         let candidates_considered = candidates.len();
         let type_prefix = request.type_prefix.map(str::to_lowercase);
@@ -399,25 +402,23 @@ impl SearchIndex {
                 }
                 if !type_prefix
                     .as_ref()
-                    .is_none_or(|prefix| document.type_path.to_lowercase().starts_with(prefix))
+                    .is_none_or(|prefix| starts_with_case_insensitive(&document.type_path, prefix))
                 {
                     return None;
                 }
                 if !file_filter
                     .as_ref()
-                    .is_none_or(|filter| document.file.to_lowercase().contains(filter))
+                    .is_none_or(|filter| contains_case_insensitive(&document.file, filter))
                 {
                     return None;
                 }
                 documents_scored += 1;
                 let mut score = scores.get(&document_id).copied().unwrap_or_default();
-                let normalized_symbol = document.symbol.to_lowercase();
-                let normalized_name = document.name.to_lowercase();
-                if normalized_symbol == normalized_query {
+                if equals_case_insensitive(&document.symbol, &normalized_query) {
                     score += EXACT_SYMBOL_BOOST;
-                } else if normalized_name == normalized_query {
+                } else if equals_case_insensitive(&document.name, &normalized_query) {
                     score += EXACT_NAME_BOOST;
-                } else if normalized_symbol.contains(&normalized_query) {
+                } else if contains_case_insensitive(&document.symbol, &normalized_query) {
                     score += PHRASE_BOOST;
                 }
 
@@ -445,6 +446,36 @@ fn compare_hits(left: &SearchHit<'_>, right: &SearchHit<'_>) -> Ordering {
         .then_with(|| left.document.symbol.cmp(&right.document.symbol))
         .then_with(|| left.document.file.cmp(&right.document.file))
         .then_with(|| left.document.line.cmp(&right.document.line))
+        .then_with(|| left.document.column.cmp(&right.document.column))
+}
+
+fn equals_case_insensitive(text: &str, normalized_query: &str) -> bool {
+    if text.is_ascii() && normalized_query.is_ascii() {
+        text.eq_ignore_ascii_case(normalized_query)
+    } else {
+        text.to_lowercase() == normalized_query
+    }
+}
+
+fn starts_with_case_insensitive(text: &str, normalized_prefix: &str) -> bool {
+    if text.is_ascii() && normalized_prefix.is_ascii() {
+        text.get(..normalized_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(normalized_prefix))
+    } else {
+        text.to_lowercase().starts_with(normalized_prefix)
+    }
+}
+
+fn contains_case_insensitive(text: &str, normalized_needle: &str) -> bool {
+    if text.is_ascii() && normalized_needle.is_ascii() {
+        if text.bytes().all(|byte| !byte.is_ascii_uppercase()) {
+            text.contains(normalized_needle)
+        } else {
+            text.to_ascii_lowercase().contains(normalized_needle)
+        }
+    } else {
+        text.to_lowercase().contains(normalized_needle)
+    }
 }
 
 fn weighted_terms(document: &SearchDocument) -> HashMap<String, u32> {
@@ -659,6 +690,39 @@ mod tests {
             .hits;
 
         assert_eq!(hits[0].document.symbol, "/datum/other/proc/update_state");
+    }
+
+    #[test]
+    fn exact_symbol_queries_skip_broad_term_candidates() {
+        let index = SearchIndex::new(vec![
+            document(
+                SymbolKind::Proc,
+                "/datum/example/proc/update_state",
+                "update_state",
+                "/datum/example",
+                "code/first.dm",
+                "Update state.",
+                "return state",
+            ),
+            document(
+                SymbolKind::Proc,
+                "/datum/other/proc/update_state",
+                "update_state",
+                "/datum/other",
+                "code/second.dm",
+                "Update state.",
+                "return state",
+            ),
+        ]);
+
+        let execution = index.search(&request("/datum/other/proc/update_state"));
+
+        assert_eq!(execution.candidates_considered, 1);
+        assert_eq!(execution.documents_scored, 1);
+        assert_eq!(
+            execution.hits[0].document.symbol,
+            "/datum/other/proc/update_state"
+        );
     }
 
     #[test]
