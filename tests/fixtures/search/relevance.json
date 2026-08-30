@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "judgments": [
+    {
+      "category": "exact_identifier",
+      "query": "/datum/controller/subsystem/dogmos_fixture/proc/library_status",
+      "relevant_symbols": [
+        "/datum/controller/subsystem/dogmos_fixture/proc/library_status"
+      ],
+      "required_first": true
+    },
+    {
+      "category": "natural_language",
+      "query": "native canine library health compatibility",
+      "relevant_symbols": [
+        "/datum/controller/subsystem/dogmos_fixture/proc/library_status"
+      ],
+      "required_first": true
+    },
+    {
+      "category": "natural_language",
+      "query": "move atom through managed path queue",
+      "relevant_symbols": [
+        "/datum/move_manager_fixture/proc/queue_path"
+      ],
+      "required_first": true
+    },
+    {
+      "category": "natural_language",
+      "query": "personal bluespace item storage cache",
+      "relevant_symbols": [
+        "/datum/personal_cache_fixture/proc/store_item"
+      ],
+      "required_first": true
+    }
+  ]
+}

@@ -25,6 +25,7 @@ pub mod repository_roots;
 pub mod result;
 pub mod runtime_integrity;
 mod search;
+pub mod semantic;
 pub mod server;
 mod source;
 pub mod source_fingerprint;
