@@ -136,7 +136,7 @@ static CONTRACTS: &[ToolContract] = &[
         Analysis,
         READ,
         Provisional,
-        None,
+        Some(1_800_000),
         1_048_576
     ),
     contract!(
