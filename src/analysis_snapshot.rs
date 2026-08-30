@@ -10,7 +10,7 @@ use dreammaker::config::Config;
 use dreammaker::constants::{ConstFn, Constant};
 use dreammaker::objtree::ObjectTree;
 use dreammaker::preprocessor::DefineHistory;
-use dreammaker::{Context, FileId, Location};
+use dreammaker::{Context, FileId};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -60,43 +60,20 @@ impl AnalysisContext {
             .unwrap_or_else(|| Path::new("(unknown)"))
     }
 
-    fn extract(
-        context: &Context,
-        objtree: &ObjectTree,
-        defines: &DefineHistory,
-        environment_path: &Path,
-    ) -> Self {
-        let mut file_paths = HashMap::new();
+    fn extract(context: &Context, environment_path: &Path) -> Self {
         let project_root = environment_path.parent().unwrap_or_else(|| Path::new("."));
-        let mut capture = |location: Location| {
-            if location.file != FileId::INVALID {
-                let reported = context.file_path(location.file);
-                let resolved = if reported.is_absolute() {
-                    reported.to_path_buf()
-                } else {
-                    project_root.join(&*reported)
-                };
-                file_paths.entry(location.file).or_insert(resolved);
-            }
-        };
-
-        for ty in objtree.iter_types() {
-            capture(ty.location);
-            for (_, var) in &ty.vars {
-                capture(var.value.location);
-            }
-            for (_, proc) in &ty.procs {
-                for value in &proc.value {
-                    capture(value.location);
-                }
-            }
-        }
-        for (range, _) in defines.iter() {
-            capture(range.start);
-        }
-        for error in context.errors().iter() {
-            capture(error.location());
-        }
+        let mut file_paths = HashMap::new();
+        context.file_list().for_each(|reported| {
+            let Some(file_id) = context.get_file(reported) else {
+                return;
+            };
+            let resolved = if reported.is_absolute() {
+                reported.to_path_buf()
+            } else {
+                project_root.join(reported)
+            };
+            file_paths.insert(file_id, resolved);
+        });
 
         Self {
             config: context.config().clone(),
@@ -133,8 +110,7 @@ impl AnalysisBuild {
         project_profile: Option<ProjectProfile>,
         parse_started_at: SystemTime,
     ) -> Self {
-        let extracted_context =
-            AnalysisContext::extract(context, &objtree, &defines, &environment_path);
+        let extracted_context = AnalysisContext::extract(context, &environment_path);
         let project_root = environment_path.parent().unwrap_or_else(|| Path::new("."));
         let macro_definitions: Vec<MacroDefinitionRecord> = defines
             .iter()

@@ -1,7 +1,8 @@
-//! Content fingerprints for the source files that produced an analysis snapshot.
+//! Metadata fingerprints for the source files that produced an analysis snapshot.
 //!
 //! `dm_parse_environment` uses these to skip a full reparse when the environment
-//! on disk is byte-for-byte the same as the one behind the active snapshot.
+//! has matching paths, lengths, and settled modification times to the active
+//! snapshot. It does not hash file contents.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
