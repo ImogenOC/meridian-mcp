@@ -5,7 +5,7 @@ use dreammaker::objtree::ObjectTree;
 use dreammaker::Context;
 
 use crate::proc_resolution::ProcResolver;
-use crate::source::extract_source_from_text;
+use crate::source::IndexedSource;
 
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
@@ -63,6 +63,10 @@ pub(crate) struct SearchHit<'a> {
     pub(crate) document: &'a SearchDocument,
 }
 
+pub(crate) struct SearchDocuments {
+    documents: Vec<SearchDocument>,
+}
+
 #[derive(Clone, Debug)]
 struct Posting {
     document_id: usize,
@@ -112,7 +116,9 @@ impl SearchIndex {
     pub(crate) fn len(&self) -> usize {
         self.documents.len()
     }
+}
 
+impl SearchDocuments {
     pub(crate) fn from_object_tree(
         objtree: &ObjectTree,
         context: &Context,
@@ -218,10 +224,10 @@ impl SearchIndex {
             }
         }
 
-        Self::new(documents)
+        Self { documents }
     }
 
-    pub(crate) fn with_proc_resolver(mut self, resolver: &ProcResolver) -> Self {
+    pub(crate) fn canonicalize_procs(mut self, resolver: &ProcResolver) -> Self {
         let mut canonical = HashMap::new();
         for resolution in resolver
             .resolutions()
@@ -283,9 +289,15 @@ impl SearchIndex {
                 *override_index,
             ))
         });
-        Self::new(self.documents)
+        self
     }
 
+    pub(crate) fn into_index(self) -> SearchIndex {
+        SearchIndex::new(self.documents)
+    }
+}
+
+impl SearchIndex {
     pub(crate) fn query_terms(query: &str) -> Vec<String> {
         tokenize(query)
             .into_iter()
@@ -433,7 +445,7 @@ fn resolve_context_file(
 }
 
 struct SourceCache {
-    files: HashMap<PathBuf, Option<String>>,
+    files: HashMap<PathBuf, Option<IndexedSource>>,
 }
 
 impl SourceCache {
@@ -443,24 +455,20 @@ impl SourceCache {
         }
     }
 
-    fn source_text(&mut self, file: &Path) -> Option<&str> {
+    fn source(&mut self, file: &Path) -> Option<&IndexedSource> {
         if !self.files.contains_key(file) {
             self.files
-                .insert(file.to_path_buf(), std::fs::read_to_string(file).ok());
+                .insert(file.to_path_buf(), IndexedSource::read(file).ok());
         }
-        self.files.get(file).and_then(Option::as_deref)
+        self.files.get(file).and_then(Option::as_ref)
     }
 
     fn source_line(&mut self, file: &Path, line: u32) -> Option<String> {
-        let line_index = line.checked_sub(1)? as usize;
-        self.source_text(file)?
-            .lines()
-            .nth(line_index)
-            .map(str::to_string)
+        self.source(file)?.line(line).map(str::to_owned)
     }
 
     fn source_declaration(&mut self, file: &Path, line: u32, max_lines: usize) -> Option<String> {
-        extract_source_from_text(self.source_text(file)?, line, max_lines)
+        self.source(file)?.declaration(line, max_lines)
     }
 }
 
@@ -671,7 +679,8 @@ mod tests {
         let objtree = context
             .parse_environment(&environment_path)
             .expect("fixture environment should parse");
-        let index = SearchIndex::from_object_tree(&objtree, &context, &environment_path);
+        let index =
+            SearchDocuments::from_object_tree(&objtree, &context, &environment_path).into_index();
 
         let hits = index.search(&request("gas mixture temperature air reset"));
         let proc_hit = hits
