@@ -1,7 +1,7 @@
 use crate::capabilities::SPACEMANDMM_REVISION;
 use crate::index::LanguageIndex;
 use crate::proc_resolution::ProcResolver;
-use crate::search::SearchIndex;
+use crate::search::{SearchDocuments, SearchIndex};
 use crate::source_fingerprint::SourceFingerprint;
 use crate::spaceman::dmi::{IconReference, IconReferenceResolution};
 use crate::spaceman::language::ReferenceTable;
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct DiagnosticRecord {
@@ -98,6 +98,12 @@ pub struct AnalysisBuild {
     pub source_fingerprint: SourceFingerprint,
 }
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct AnalysisBuildTimings {
+    pub analysis_indexes: u64,
+    pub fingerprint: u64,
+}
+
 impl AnalysisBuild {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parse(
@@ -105,11 +111,12 @@ impl AnalysisBuild {
         context: &Context,
         objtree: ObjectTree,
         defines: DefineHistory,
-        search_index: SearchIndex,
+        search_documents: SearchDocuments,
         diagnostics: Vec<DiagnosticRecord>,
         project_profile: Option<ProjectProfile>,
         parse_started_at: SystemTime,
-    ) -> Self {
+    ) -> (Self, AnalysisBuildTimings) {
+        let indexes_started = Instant::now();
         let extracted_context = AnalysisContext::extract(context, &environment_path);
         let project_root = environment_path.parent().unwrap_or_else(|| Path::new("."));
         let macro_definitions: Vec<MacroDefinitionRecord> = defines
@@ -163,7 +170,11 @@ impl AnalysisBuild {
             },
         );
         let (search_index, language_index) = rayon::join(
-            || search_index.with_proc_resolver(&proc_resolver),
+            || {
+                search_documents
+                    .canonicalize_procs(&proc_resolver)
+                    .into_index()
+            },
             || {
                 LanguageIndex::build(
                     &extracted_context,
@@ -173,22 +184,31 @@ impl AnalysisBuild {
                 )
             },
         );
+        let analysis_indexes = indexes_started.elapsed().as_millis() as u64;
+        let fingerprint_started = Instant::now();
         let source_fingerprint = SourceFingerprint::capture(&source_inputs, parse_started_at);
-        Self {
-            environment_path,
-            context: extracted_context,
-            objtree,
-            macro_definitions,
-            search_index,
-            diagnostics,
-            project_profile,
-            language_index,
-            reference_table,
-            icon_references,
-            proc_resolver,
-            source_inputs,
-            source_fingerprint,
-        }
+        let fingerprint = fingerprint_started.elapsed().as_millis() as u64;
+        (
+            Self {
+                environment_path,
+                context: extracted_context,
+                objtree,
+                macro_definitions,
+                search_index,
+                diagnostics,
+                project_profile,
+                language_index,
+                reference_table,
+                icon_references,
+                proc_resolver,
+                source_inputs,
+                source_fingerprint,
+            },
+            AnalysisBuildTimings {
+                analysis_indexes,
+                fingerprint,
+            },
+        )
     }
 }
 

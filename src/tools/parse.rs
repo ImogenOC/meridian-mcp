@@ -13,7 +13,7 @@ use crate::analysis_snapshot::{
 };
 use crate::mcp::ToolResult;
 use crate::result::{structured_error, ToolErrorCode};
-use crate::search::SearchIndex;
+use crate::search::SearchDocuments;
 use crate::source::extract_source;
 use crate::source_fingerprint::SourceFingerprint;
 use crate::state::ServerState;
@@ -84,6 +84,7 @@ fn validated_parse_timeout(args: &Value) -> Result<Duration> {
 
 /// Parse a DreamMaker environment
 pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let request_started = Instant::now();
     let dme_path = args
         .get("dme_path")
         .and_then(|v| v.as_str())
@@ -127,10 +128,14 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
 
     // Serialize parses before touching the active snapshot, so a concurrent
     // caller cannot observe a half-replaced state or double peak memory.
+    let queue_started = Instant::now();
     let permit = state.parse_permit().await;
+    let queue_wait = queue_started.elapsed().as_millis() as u64;
 
+    let reuse_started = Instant::now();
     if !force {
         if let Some(reused) = reusable_snapshot(state, &path).await {
+            let reuse_validation = reuse_started.elapsed().as_millis() as u64;
             info!("Reusing analysis snapshot for {}", path.display());
             let (errors, warnings) = reused.diagnostic_counts();
             return Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
@@ -143,6 +148,11 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
                 "warning_count": warnings,
                 "state_generation": reused.generation,
                 "spacemandmm_revision": reused.spacemandmm_revision,
+                "timings_ms": {
+                    "queue_wait": queue_wait,
+                    "reuse_validation": reuse_validation,
+                    "total": request_started.elapsed().as_millis() as u64,
+                },
             }))?));
         }
     }
@@ -152,10 +162,10 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
     // Only the prior environment path is needed on the failure path. Holding the
     // whole prior snapshot across the parse would pin the old object tree in
     // memory while the new one is built.
-    let started = Instant::now();
     let parse_started_at = SystemTime::now();
     let parse_path = path.clone();
     let mut handle = tokio::task::spawn_blocking(move || -> Result<_> {
+        let preprocess_started = Instant::now();
         let mut context = Context::default();
         context.autodetect_config(&parse_path);
         let mut preprocessor = Preprocessor::new(&context, parse_path.clone())?;
@@ -178,30 +188,42 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             let diagnostics = blocking_errors.join("\n");
             return Err(anyhow!("DreamMaker parser reported errors:\n{diagnostics}"));
         }
+        let preprocess_parse = preprocess_started.elapsed().as_millis() as u64;
 
         // Always run. Measured on a ~10k-file, 65k-type environment, skipping
         // dreamchecker saved under 1% of parse time (41.4s vs 41.7s, inside the
         // noise) while dropping every semantic diagnostic — 139 errors and a
         // warning on that environment. There is no useful trade here; the cost
         // is dominated by preprocessing and index construction, not by this.
+        let dreamchecker_started = Instant::now();
         dreamchecker::run(&context, &objtree);
         let configured_rules = configured_diagnostic_rules(&parse_path);
         let diagnostics = collect_diagnostics(&context, &configured_rules);
-        let search_index = SearchIndex::from_object_tree(&objtree, &context, &parse_path);
+        let dreamchecker = dreamchecker_started.elapsed().as_millis() as u64;
+        let search_documents_started = Instant::now();
+        let search_documents = SearchDocuments::from_object_tree(&objtree, &context, &parse_path);
+        let search_documents_ms = search_documents_started.elapsed().as_millis() as u64;
         let profile = parse_path.parent().and_then(|root| {
             PathPolicy::new(vec![root.to_owned()], Vec::new())
                 .ok()
                 .and_then(|policy| ProjectProfile::discover(&policy, &parse_path).ok())
         });
-        Ok(AnalysisBuild::from_parse(
+        let (build, build_timings) = AnalysisBuild::from_parse(
             parse_path,
             &context,
             objtree,
             defines,
-            search_index,
+            search_documents,
             diagnostics,
             profile,
             parse_started_at,
+        );
+        Ok((
+            build,
+            preprocess_parse,
+            dreamchecker,
+            search_documents_ms,
+            build_timings,
         ))
     });
 
@@ -232,9 +254,10 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
     };
 
     let result = match parsed {
-        Ok(Ok(build)) => {
+        Ok(Ok((build, preprocess_parse, dreamchecker, search_documents_ms, build_timings))) => {
             let snapshot = state.install_analysis(build).await;
             let (errors, warnings) = snapshot.diagnostic_counts();
+            let total = request_started.elapsed().as_millis() as u64;
             Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
                 "success": true,
                 "reused": false,
@@ -243,9 +266,18 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
                 "indexed_symbols": snapshot.indexed_symbol_count(),
                 "error_count": errors,
                 "warning_count": warnings,
-                "duration_ms": started.elapsed().as_millis() as u64,
+                "duration_ms": total,
                 "state_generation": snapshot.generation,
                 "spacemandmm_revision": snapshot.spacemandmm_revision,
+                "timings_ms": {
+                    "queue_wait": queue_wait,
+                    "preprocess_parse": preprocess_parse,
+                    "dreamchecker": dreamchecker,
+                    "search_documents": search_documents_ms,
+                    "analysis_indexes": build_timings.analysis_indexes,
+                    "fingerprint": build_timings.fingerprint,
+                    "total": total,
+                },
             }))?))
         }
         Ok(Err(error)) => {
@@ -794,6 +826,17 @@ mod tests {
 
         assert_eq!(second.is_error, None, "second parse: {second:?}");
         assert_eq!(payload["reused"], true);
+        assert_eq!(
+            payload["timings_ms"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["queue_wait", "reuse_validation", "total"]
+                .into_iter()
+                .collect()
+        );
         assert_eq!(payload["state_generation"], generation);
         assert_eq!(payload["total_types"], result_json(&first)["total_types"]);
         assert_eq!(state.state_generation().await, generation);
@@ -933,6 +976,17 @@ mod tests {
         assert!(payload["error_count"].is_u64());
         assert!(payload["warning_count"].is_u64());
         assert!(payload["duration_ms"].is_u64());
+        for stage in [
+            "queue_wait",
+            "preprocess_parse",
+            "dreamchecker",
+            "search_documents",
+            "analysis_indexes",
+            "fingerprint",
+            "total",
+        ] {
+            assert!(payload["timings_ms"][stage].is_u64(), "missing {stage}");
+        }
         assert!(!payload["spacemandmm_revision"].as_str().unwrap().is_empty());
         assert_eq!(
             payload["environment"].as_str().unwrap(),
