@@ -116,6 +116,14 @@ fn standard_runtime_integrity_is_documented() {
 }
 
 #[test]
+fn tracy_docs_do_not_disqualify_lossless_queue_saturation() {
+    let documentation = std::fs::read_to_string("docs/tracy-profiling.md").unwrap();
+    assert!(documentation
+        .contains("A positive saturation delta means the producer waited for the consumer"));
+    assert!(!documentation.contains("queue drop/saturation"));
+}
+
+#[test]
 fn native_evidence_semantics_are_documented() {
     let document = std::fs::read_to_string("docs/native-evidence.md")
         .expect("native evidence guide should be readable");

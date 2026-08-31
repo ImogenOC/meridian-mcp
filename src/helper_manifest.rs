@@ -281,7 +281,11 @@ fn validate_unique_identities(entries: &[Entry]) -> Result<(), ManifestError> {
     Ok(())
 }
 
-fn version_in_range(version: &str, minimum: Option<&str>, maximum: Option<&str>) -> bool {
+pub(crate) fn version_in_range(
+    version: &str,
+    minimum: Option<&str>,
+    maximum: Option<&str>,
+) -> bool {
     let Some(version) = parse_version(version) else {
         return false;
     };

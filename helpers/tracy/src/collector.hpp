@@ -87,7 +87,7 @@ class CollectorBackend
 public:
 	virtual ~CollectorBackend() = default;
 	virtual void configure(const SessionStartOptions&) {}
-	virtual void attach(WorkerPurpose purpose) = 0;
+	virtual void attach(WorkerPurpose purpose, std::uint64_t memory_limit_mb) = 0;
 	virtual void detach() = 0;
 	[[nodiscard]] virtual std::uint64_t producer_progress() const = 0;
 	[[nodiscard]] virtual std::optional<QueueHealth> health() = 0;
@@ -112,7 +112,7 @@ public:
 private:
 	[[nodiscard]] SessionStatus status_locked() const;
 	[[nodiscard]] QueueHealth wait_for_queue_health(std::chrono::steady_clock::time_point deadline);
-	void attach(WorkerPurpose purpose);
+	void attach(WorkerPurpose purpose, std::uint64_t memory_limit_mb);
 	bool restore_drain_worker() noexcept;
 
 	std::unique_ptr<CollectorBackend> backend;

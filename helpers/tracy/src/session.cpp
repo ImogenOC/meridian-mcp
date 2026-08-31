@@ -340,14 +340,14 @@ public:
 		connect_timeout = std::chrono::milliseconds(options.connect_timeout_ms);
 	}
 
-	void attach(const WorkerPurpose purpose) override
+	void attach(const WorkerPurpose purpose, const std::uint64_t memory_limit_mb) override
 	{
 		std::cerr << "collector.attach.begin purpose=" << (purpose == WorkerPurpose::Drain ? "drain" : "capture") << std::endl;
 		if(host != "127.0.0.1")
 		{
 			throw ProtocolError("invalid_host", "Collector host must be the fixed loopback address.");
 		}
-		worker = std::make_unique<::tracy::Worker>(host.c_str(), port, static_cast<std::int64_t>(MaximumResidentMemoryMb * 1024 * 1024));
+		worker = std::make_unique<::tracy::Worker>(host.c_str(), port, static_cast<std::int64_t>(memory_limit_mb * 1024 * 1024));
 		wait_for_live_connection(*worker, connect_timeout);
 		current_purpose = purpose;
 		std::cerr << "collector.attach.ready" << std::endl;
@@ -465,7 +465,7 @@ CaptureResult capture_trace(
 {
 	TracyCollectorBackend backend;
 	backend.configure({"127.0.0.1", port, 15'000, 15'000});
-	backend.attach(WorkerPurpose::Capture);
+	backend.attach(WorkerPurpose::Capture, memory_limit_mb);
 	std::atomic_bool cancelled {false};
 	std::atomic_bool window_started {false};
 	auto result = backend.capture({duration_ms, memory_limit_mb, output.string(), "legacy", 1}, cancelled, window_started);

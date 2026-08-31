@@ -125,6 +125,28 @@ async fn persistent_transport_rejects_unknown_response_ids() {
     ));
 }
 
+#[tokio::test]
+async fn control_requests_can_use_a_shorter_timeout_than_capture_requests() {
+    let (client_read, _server_write) = duplex(4096);
+    let (_server_read, client_write) = duplex(4096);
+    let transport = meridian_mcp::tracy_collector::CollectorTransport::new(
+        client_read,
+        client_write,
+        std::time::Duration::from_secs(1),
+    );
+    let started = tokio::time::Instant::now();
+    let result = transport
+        .request_with_timeout(
+            "session_status",
+            json!({}),
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+
+    assert!(matches!(result, Err(TracyProtocolError::Timeout { .. })));
+    assert!(started.elapsed() < std::time::Duration::from_millis(250));
+}
+
 #[test]
 fn arbitrary_commands_cannot_be_constructed() {
     let names = [

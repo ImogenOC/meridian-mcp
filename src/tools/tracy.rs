@@ -135,6 +135,33 @@ pub async fn launch(
     state: &crate::state::ServerState,
     args: Value,
 ) -> Result<ToolResult> {
+    let prior_journal_id = state
+        .tracy_capture()
+        .await
+        .integrity_journal
+        .as_ref()
+        .map(|journal| journal.summary().journal_id);
+    let result = launch_inner(context, state, args).await;
+    let failed = result
+        .as_ref()
+        .map_or(true, |tool_result| tool_result.is_error == Some(true));
+    let current_journal_id = state
+        .tracy_capture()
+        .await
+        .integrity_journal
+        .as_ref()
+        .map(|journal| journal.summary().journal_id);
+    if failed && current_journal_id.is_some() && current_journal_id != prior_journal_id {
+        let _ = stop(context, state).await;
+    }
+    result
+}
+
+async fn launch_inner(
+    context: &ToolExecutionContext,
+    state: &crate::state::ServerState,
+    args: Value,
+) -> Result<ToolResult> {
     let dmb_path = Path::new(required_string(&args, "dmb_path")?);
     let canonical_dmb = dmb_path.canonicalize()?;
     let require_verified_provenance = args
@@ -180,6 +207,7 @@ pub async fn launch(
             .ok_or_else(|| anyhow!("dmb_path has no parent"))?,
     )?;
     let integrity = crate::workspace_integrity::IntegrityBaseline::capture(&integrity_root)?;
+    let repository_dirty_digest = integrity.digest.clone();
     let workload_draft = workload_from_args(&args)?;
     let experiment_name = optional_string(&args, "experiment_name")?;
     if let Some(name) = &experiment_name {
@@ -231,50 +259,14 @@ pub async fn launch(
         "initialization_timeout_ms": initialization_timeout_ms,
     }))?;
     let rsc_path = canonical_dmb.with_extension("rsc");
-    let executable = finalize_executable(ExecutableIdentity {
-        schema: 1,
-        executable_id: String::new(),
-        repository_revision: git_revision(&integrity_root),
-        repository_dirty_digest: integrity.digest.clone(),
-        dmb_sha256: hash_file(&canonical_dmb)?,
-        rsc_sha256: rsc_path
-            .is_file()
-            .then(|| hash_file(&rsc_path))
-            .transpose()?,
-        byond_version: installation
-            .hook
-            .byond_max_version
-            .clone()
-            .unwrap_or_else(|| "unknown".to_owned()),
-        byond_executable_sha256: hash_file(&dreamdaemon)?,
-        native_modules: vec![NativeModuleIdentity {
-            name: hook_name.to_string_lossy().into_owned(),
-            sha256: installation.hook.sha256.clone(),
-        }],
-        helper_identity: HelperIdentity {
-            source_revision: installation.helper.source_revision.clone(),
-            sha256: installation.helper.sha256.clone(),
-            patch_sha256: installation.helper.patch_sha256.clone(),
-        },
-        hook_identity: HelperIdentity {
-            source_revision: installation.hook.source_revision.clone(),
-            sha256: installation.hook.sha256.clone(),
-            patch_sha256: Some(canonical_sha256(&installation.hook.patches)?),
-        },
-        startup_mode: "tracy".to_owned(),
-        launch_parameters_sha256,
-        build_record_id: launch_provenance.build_record_id.clone(),
-    })?;
-    let launch_manifest = ExperimentLaunchManifest {
-        schema: 1,
-        experiment_name,
-        meridian_mcp_build: crate::build_identity::current().clone(),
-        executable: executable.clone(),
-        workload_draft: workload_draft.clone(),
-        runtime_configuration: runtime_configuration
-            .as_ref()
-            .map(|configuration| configuration.identity.clone()),
-    };
+    let repository_revision = git_revision(&integrity_root);
+    let dmb_sha256 = hash_file(&canonical_dmb)?;
+    let rsc_sha256 = rsc_path
+        .is_file()
+        .then(|| hash_file(&rsc_path))
+        .transpose()?;
+    let byond_executable_sha256 = hash_file(&dreamdaemon)?;
+    let hook_patch_sha256 = canonical_sha256(&installation.hook.patches)?;
     let experiment_directory = context
         .policy()
         .read_path(required_string(&args, "experiment_directory")?)?;
@@ -300,19 +292,13 @@ pub async fn launch(
         Err(error) => return Err(error.into()),
     };
     let launch_manifest_path = experiment_directory.join("experiment-launch.meridian.json");
-    let launch_manifest_bytes = serde_json::to_vec_pretty(&launch_manifest)?;
-    let launch_artifact = write_atomic(context.policy(), &launch_manifest_path, false, |output| {
-        std::io::Write::write_all(output, &launch_manifest_bytes)?;
-        std::io::Write::write_all(output, b"\n")?;
-        Ok(())
-    })?;
     let identity_manifest_path =
         launch_manifest_path.with_file_name("experiment-identity.meridian.json");
     let final_manifest_path =
         launch_manifest_path.with_file_name("experiment-complete.meridian.json");
     let integrity_owned_paths = vec![
         canonical_dmb.with_extension("log"),
-        launch_artifact.path.clone(),
+        launch_manifest_path.clone(),
         integrity_journal.path().to_owned(),
         identity_manifest_path.clone(),
         final_manifest_path.clone(),
@@ -324,20 +310,7 @@ pub async fn launch(
         capture.integrity = Some(integrity);
         capture.integrity_journal = Some(integrity_journal);
         capture.integrity_owned_paths = integrity_owned_paths;
-        capture.experiment = Some(ExperimentState {
-            directory: experiment_directory,
-            launch_manifest_sha256: launch_artifact.sha256.clone(),
-            launch_manifest_path: launch_artifact.path,
-            identity_manifest_path,
-            final_manifest_path,
-            executable,
-            workload_draft,
-            runtime_configuration: runtime_configuration
-                .as_ref()
-                .map(|configuration| configuration.identity.clone()),
-            runtime_wake: None,
-            locked_identity: None,
-        });
+        capture.experiment = None;
         capture.used_phases.clear();
         capture.capture_records.clear();
         capture.diagnostic_records.clear();
@@ -364,6 +337,17 @@ pub async fn launch(
     if runtime_result.is_error == Some(true) {
         return Ok(runtime_result);
     }
+    let experiment_started_at = tokio::time::Instant::now();
+    let initial_process_identities = owned_process_identities(state).await;
+    let (memory_series, memory_stop, memory_task) =
+        start_memory_sampler(&initial_process_identities, experiment_started_at);
+    {
+        let mut capture = state.tracy_capture().await;
+        capture.memory_series = Some(memory_series);
+        capture.memory_stop = Some(memory_stop);
+        capture.memory_task = Some(memory_task);
+        capture.experiment_started_at = Some(experiment_started_at);
+    }
     let collector = match TracyCollector::spawn(TracyCollectorSpec {
         helper: installation.helper.path.clone(),
         working_directory: dmb_path
@@ -385,6 +369,15 @@ pub async fn launch(
             return Err(error.into());
         }
     };
+    {
+        let mut capture = state.tracy_capture().await;
+        capture.collector = Some(Arc::clone(&collector));
+        capture.phase = Some(TracySessionPhase::CollectorConnecting);
+    }
+    let memory_series = state.tracy_capture().await.memory_series.clone();
+    if let Some(memory_series) = memory_series {
+        register_memory_identities(&memory_series, &owned_process_identities(state).await).await;
+    }
     let readiness = match collector
         .session_start("127.0.0.1", profiler_port, readiness_timeout_ms)
         .await
@@ -399,11 +392,71 @@ pub async fn launch(
             ));
         }
     };
+    let reported_byond_version = readiness["queue_health"]["byond_build"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Tracy readiness omitted queue_health.byond_build"))?;
+    let byond_version = installation.validate_byond_version(reported_byond_version)?;
+    let executable = finalize_executable(ExecutableIdentity {
+        schema: 1,
+        executable_id: String::new(),
+        repository_revision,
+        repository_dirty_digest,
+        dmb_sha256,
+        rsc_sha256,
+        byond_version,
+        byond_executable_sha256,
+        native_modules: vec![NativeModuleIdentity {
+            name: hook_name.to_string_lossy().into_owned(),
+            sha256: installation.hook.sha256.clone(),
+        }],
+        helper_identity: HelperIdentity {
+            source_revision: installation.helper.source_revision.clone(),
+            sha256: installation.helper.sha256.clone(),
+            patch_sha256: installation.helper.patch_sha256.clone(),
+        },
+        hook_identity: HelperIdentity {
+            source_revision: installation.hook.source_revision.clone(),
+            sha256: installation.hook.sha256.clone(),
+            patch_sha256: Some(hook_patch_sha256),
+        },
+        startup_mode: "tracy".to_owned(),
+        launch_parameters_sha256,
+        build_record_id: launch_provenance.build_record_id.clone(),
+    })?;
+    let launch_manifest = ExperimentLaunchManifest {
+        schema: 1,
+        experiment_name,
+        meridian_mcp_build: crate::build_identity::current().clone(),
+        executable: executable.clone(),
+        workload_draft: workload_draft.clone(),
+        runtime_configuration: runtime_configuration
+            .as_ref()
+            .map(|configuration| configuration.identity.clone()),
+    };
+    let launch_manifest_bytes = serde_json::to_vec_pretty(&launch_manifest)?;
+    let launch_artifact = write_atomic(context.policy(), &launch_manifest_path, false, |output| {
+        std::io::Write::write_all(output, &launch_manifest_bytes)?;
+        std::io::Write::write_all(output, b"\n")?;
+        Ok(())
+    })?;
     {
         let mut capture = state.tracy_capture().await;
-        capture.collector = Some(Arc::clone(&collector));
         capture.phase = Some(TracySessionPhase::HealthyIdle);
         capture.last_status = Some(readiness);
+        capture.experiment = Some(ExperimentState {
+            directory: experiment_directory,
+            launch_manifest_sha256: launch_artifact.sha256.clone(),
+            launch_manifest_path: launch_artifact.path,
+            identity_manifest_path,
+            final_manifest_path,
+            executable,
+            workload_draft,
+            runtime_configuration: runtime_configuration
+                .as_ref()
+                .map(|configuration| configuration.identity.clone()),
+            runtime_wake: None,
+            locked_identity: None,
+        });
     }
     let runtime_wake = if wake_sleeping_world {
         let initialization = super::runtime::wait_for_literal_output(
@@ -494,11 +547,12 @@ pub async fn launch(
             {
                 Ok(client) => client,
                 Err(error) => {
+                    let topic_processed = topic_was_processed(&attempts);
                     let runtime_wake = json!({
                         "strategy":strategy,
                         "initialization_marker":"Initializations complete within",
                         "attempts":attempts,
-                        "topic_processed":true,
+                        "topic_processed":topic_processed,
                         "sustained_producer_progress":false,
                         "wake_client_error":error.to_string(),
                     });
@@ -520,6 +574,11 @@ pub async fn launch(
             };
             let client_pid = client.process.id();
             state.tracy_capture().await.wake_client = Some(client);
+            let memory_series = state.tracy_capture().await.memory_series.clone();
+            if let Some(memory_series) = memory_series {
+                register_memory_identities(&memory_series, &owned_process_identities(state).await)
+                    .await;
+            }
             let before = collector
                 .status()
                 .await
@@ -556,6 +615,7 @@ pub async fn launch(
             }));
         }
         let Some(producer_progress) = accepted else {
+            let topic_processed = topic_was_processed(&attempts);
             let runtime_wake = json!({
                 "strategy":strategy,
                 "initialization_marker":"Initializations complete within",
@@ -563,7 +623,7 @@ pub async fn launch(
                 "settle_ms":5_000,
                 "attempts":attempts,
                 "wake_client":wake_client_evidence,
-                "topic_processed":true,
+                "topic_processed":topic_processed,
                 "sustained_producer_progress":false,
             });
             state
@@ -581,6 +641,7 @@ pub async fn launch(
                 json!({"runtime_wake":runtime_wake,"cleanup_attempted":true}),
             ));
         };
+        let topic_processed = topic_was_processed(&attempts);
         Some(json!({
             "strategy":strategy,
             "initialization_marker":"Initializations complete within",
@@ -588,7 +649,7 @@ pub async fn launch(
             "settle_ms":5_000,
             "attempts":attempts,
             "wake_client":wake_client_evidence,
-            "topic_processed":true,
+            "topic_processed":topic_processed,
             "sustained_producer_progress":true,
             "producer_progress":producer_progress,
         }))
@@ -603,15 +664,8 @@ pub async fn launch(
         .expect("launch initialized experiment state")
         .runtime_wake = runtime_wake.clone();
     let process_identities = owned_process_identities(state).await;
-    let experiment_started_at = tokio::time::Instant::now();
-    let (memory_series, memory_stop, memory_task) =
-        start_memory_sampler(&process_identities, experiment_started_at);
     {
         let mut capture = state.tracy_capture().await;
-        capture.memory_series = Some(memory_series);
-        capture.memory_stop = Some(memory_stop);
-        capture.memory_task = Some(memory_task);
-        capture.experiment_started_at = Some(experiment_started_at);
         let mut audit = crate::network_audit::NetworkAuditCollector::new(true);
         let process_ids = process_identities
             .iter()
@@ -1190,19 +1244,26 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
             runtime.launch_provenance.clone(),
         )
     };
-    let mut capture = state.tracy_capture().await;
+    let collector = state.tracy_capture().await.collector.clone();
     let mut collector_stderr_tail = Vec::new();
     let mut collector_exit_code = None;
-    if let Some(collector) = capture.collector.clone() {
+    let mut helper_status = None;
+    let mut collector_stopped = false;
+    if let Some(collector) = collector {
         if collector.is_running().await {
-            if let Ok(helper_status) = collector.status().await {
-                capture.last_status = Some(helper_status);
-            }
+            helper_status = collector.status().await.ok();
         } else {
-            capture.phase = Some(TracySessionPhase::Stopped);
+            collector_stopped = true;
             collector_stderr_tail = collector.stderr_tail().await;
             collector_exit_code = collector.exit_code().await;
         }
+    }
+    let mut capture = state.tracy_capture().await;
+    if let Some(helper_status) = helper_status {
+        capture.last_status = Some(helper_status);
+    }
+    if collector_stopped {
+        capture.phase = Some(TracySessionPhase::Stopped);
     }
     Ok(json_success(
         ToolMetadata::complete(None),
@@ -1232,6 +1293,7 @@ pub async fn stop(
     context: &ToolExecutionContext,
     state: &crate::state::ServerState,
 ) -> Result<ToolResult> {
+    let cleanup_only = state.tracy_capture().await.integrity_journal.is_some();
     let pre_stop_checkpoint = checkpoint_integrity(context, state, "pre_stop").await;
     let stop_identities = owned_process_identities(state).await;
     let stop_profiler_port = state.runtime().await.profiler_port;
@@ -1306,7 +1368,7 @@ pub async fn stop(
     } else {
         Vec::new()
     };
-    if experiment.is_none() && !runtime_was_profiled {
+    if experiment.is_none() && !runtime_was_profiled && !cleanup_only {
         return Err(anyhow!("no MCP-owned Tracy runtime is active"));
     }
     let experiment_manifest = if let Some(experiment) = experiment {
@@ -2031,6 +2093,31 @@ fn capture_memory_window(
         .collect()
 }
 
+fn topic_was_processed(attempts: &[Value]) -> bool {
+    attempts
+        .iter()
+        .any(|attempt| attempt["topic_processed"].as_bool() == Some(true))
+}
+
+async fn register_memory_identities(
+    series: &Arc<tokio::sync::Mutex<Vec<crate::process_metrics::RoleMemorySeries>>>,
+    identities: &[crate::process_metrics::ProcessIdentity],
+) {
+    let mut series = series.lock().await;
+    for identity in identities {
+        if series.iter().any(|entry| entry.identity == *identity) {
+            continue;
+        }
+        series.push(crate::process_metrics::RoleMemorySeries {
+            identity: identity.clone(),
+            operating_system: std::env::consts::OS.to_owned(),
+            sampling_interval_ms: 500,
+            samples: Vec::new(),
+            missed_samples: 0,
+        });
+    }
+}
+
 fn start_memory_sampler(
     identities: &[crate::process_metrics::ProcessIdentity],
     started: tokio::time::Instant,
@@ -2054,24 +2141,23 @@ fn start_memory_sampler(
     ));
     let (stop, mut stop_rx) = tokio::sync::watch::channel(false);
     let task_series = Arc::clone(&series);
-    let role_count = identities.len();
     let task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
-        let mut active_roles = vec![true; role_count];
+        let mut inactive_identities = Vec::new();
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let offset = started.elapsed().as_millis() as u64;
                     let mut all_series = task_series.lock().await;
-                    for (index, series) in all_series.iter_mut().enumerate() {
-                        if !active_roles[index] {
+                    for series in all_series.iter_mut() {
+                        if inactive_identities.contains(&series.identity) {
                             continue;
                         }
                         match crate::process_metrics::sample_process(&series.identity, offset) {
                             Ok(samples) if series.samples.len().saturating_add(samples.len()) <= 20_000 => series.samples.extend(samples),
                             _ => {
                                 series.missed_samples = series.missed_samples.saturating_add(1);
-                                active_roles[index] = false;
+                                inactive_identities.push(series.identity.clone());
                             }
                         }
                     }
@@ -2103,4 +2189,96 @@ fn git_workspace_root(path: &Path) -> Result<std::path::PathBuf> {
         }
     }
     Ok(path.canonicalize()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{register_memory_identities, stop, topic_was_processed};
+    use crate::process_metrics::{ProcessIdentity, ProcessRole, RoleMemorySeries};
+    use crate::tools::ToolExecutionContext;
+    use crate::{CapabilityMode, PathPolicy, RiftBuildAccess};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn identity(pid: u32, role: ProcessRole) -> ProcessIdentity {
+        ProcessIdentity {
+            pid,
+            started_at_identity: u64::from(pid),
+            role,
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_sampler_registers_late_owned_processes_without_duplicates() {
+        let initial = identity(10, ProcessRole::DreamDaemon);
+        let collector = identity(11, ProcessRole::Collector);
+        let series = Arc::new(tokio::sync::Mutex::new(vec![RoleMemorySeries {
+            identity: initial.clone(),
+            operating_system: std::env::consts::OS.to_owned(),
+            sampling_interval_ms: 500,
+            samples: Vec::new(),
+            missed_samples: 0,
+        }]));
+
+        register_memory_identities(&series, &[initial, collector.clone()]).await;
+
+        let series = series.lock().await;
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[1].identity, collector);
+    }
+
+    #[test]
+    fn topic_summary_reflects_observed_attempts() {
+        assert!(!topic_was_processed(&[json!({"topic_processed":false})]));
+        assert!(topic_was_processed(&[
+            json!({"topic_processed":false}),
+            json!({"topic_processed":true}),
+        ]));
+    }
+
+    #[tokio::test]
+    async fn failed_launch_cleanup_finalizes_a_pre_manifest_integrity_journal() {
+        let root = std::env::temp_dir().join(format!(
+            "meridian-tracy-launch-cleanup-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let experiment_directory = root.join("experiment");
+        std::fs::create_dir_all(&experiment_directory).unwrap();
+        let context = ToolExecutionContext::with_features(
+            CapabilityMode::Development,
+            PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+            RiftBuildAccess::Disabled,
+            None,
+            None,
+            None,
+        );
+        let baseline = crate::workspace_integrity::IntegrityBaseline::capture(&root).unwrap();
+        let journal = crate::workspace_integrity::IntegrityJournal::create(
+            context.policy(),
+            &experiment_directory,
+            &baseline,
+        )
+        .unwrap();
+        let journal_path = journal.path().to_owned();
+        let state = crate::state::ServerState::new();
+        {
+            let mut capture = state.tracy_capture().await;
+            capture.integrity = Some(baseline);
+            capture.integrity_owned_paths.push(journal_path.clone());
+            capture.integrity_journal = Some(journal);
+        }
+
+        let result = stop(&context, &state).await.unwrap();
+
+        assert_ne!(result.is_error, Some(true));
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+        assert_eq!(journal["status"], "finalized");
+        assert!(state.tracy_capture().await.integrity_journal.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

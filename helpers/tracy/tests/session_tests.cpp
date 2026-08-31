@@ -34,7 +34,7 @@ void expect_protocol_error(Function&& function, const std::string& code)
 class FakeBackend final : public CollectorBackend
 {
 public:
-	void attach(const WorkerPurpose purpose) override
+	void attach(const WorkerPurpose purpose, const std::uint64_t memory_limit_mb) override
 	{
 		if(purpose == WorkerPurpose::Capture)
 		{
@@ -49,7 +49,7 @@ public:
 			throw ProtocolError("connect_timeout", "transient capture attach failure");
 		}
 		if(purpose == WorkerPurpose::Capture) ++capture_attach_attempts;
-		attachments.push_back(purpose);
+		attachments.emplace_back(purpose, memory_limit_mb);
 		attached = true;
 		progress += 10;
 	}
@@ -87,7 +87,7 @@ public:
 		return {2, 3, 1'000'000, 4096, 2048};
 	}
 
-	std::vector<WorkerPurpose> attachment_history() const
+	std::vector<std::pair<WorkerPurpose, std::uint64_t>> attachment_history() const
 	{
 		std::scoped_lock lock(mutex);
 		return attachments;
@@ -108,7 +108,7 @@ public:
 
 private:
 	mutable std::mutex mutex;
-	std::vector<WorkerPurpose> attachments;
+	std::vector<std::pair<WorkerPurpose, std::uint64_t>> attachments;
 	std::atomic_uint64_t progress {0};
 	bool attached = false;
 };
@@ -172,11 +172,11 @@ int main()
 
 	const auto history = fake->attachment_history();
 	assert(history.size() == 7);
-	assert(history.front() == WorkerPurpose::Drain);
+	assert(history.front() == std::pair(WorkerPurpose::Drain, MaximumResidentMemoryMb));
 	for(std::size_t index = 1; index < history.size(); index += 2)
 	{
-		assert(history[index] == WorkerPurpose::Capture);
-		assert(history[index + 1] == WorkerPurpose::Drain);
+		assert(history[index] == std::pair(WorkerPurpose::Capture, std::uint64_t {64}));
+		assert(history[index + 1] == std::pair(WorkerPurpose::Drain, MaximumResidentMemoryMb));
 	}
 	assert(session.stop().phase == SessionPhase::Stopped);
 	assert(session.stop().phase == SessionPhase::Stopped);

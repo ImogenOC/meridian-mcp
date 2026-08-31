@@ -28,7 +28,7 @@ fn fixture() -> (std::path::PathBuf, ToolExecutionContext) {
             {"id":"byond-tracy","platform":std::env::consts::OS,"target_arch":"x86","path":"helpers/prof.dll","sha256":hash(b"verified hook"),"source_revision":BYOND_TRACY_REVISION,"protocol_version":TRACY_PROTOCOL_VERSION,"byond_min_version":"516.1685","byond_max_version":"516.1687"}
         ]})).unwrap(),
     ).unwrap();
-    let installation = TracyInstallation::validate(&manifest, "516.1685").unwrap();
+    let installation = TracyInstallation::validate(&manifest).unwrap();
     let context = ToolExecutionContext::with_features(
         CapabilityMode::Development,
         PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
@@ -38,6 +38,28 @@ fn fixture() -> (std::path::PathBuf, ToolExecutionContext) {
         Some(installation),
     );
     (root, context)
+}
+
+#[test]
+fn actual_byond_version_is_checked_against_the_verified_hook_range() {
+    let (root, _) = fixture();
+    let installation = TracyInstallation::validate(&root.join("manifest.json")).unwrap();
+
+    assert_eq!(
+        installation.validate_byond_version("516.1685").unwrap(),
+        "516.1685"
+    );
+    assert_eq!(
+        installation.validate_byond_version("1685").unwrap(),
+        "516.1685"
+    );
+    assert_eq!(
+        installation.validate_byond_version("516.1687").unwrap(),
+        "516.1687"
+    );
+    assert!(installation.validate_byond_version("516.1684").is_err());
+    assert!(installation.validate_byond_version("516.1688").is_err());
+    assert!(installation.validate_byond_version("unknown").is_err());
 }
 
 #[tokio::test]

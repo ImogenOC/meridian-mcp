@@ -31,7 +31,7 @@ SessionStatus CollectorSession::start(const SessionStartOptions& options)
 	const auto initial_progress = backend->producer_progress();
 	try
 	{
-		attach(WorkerPurpose::Drain);
+		attach(WorkerPurpose::Drain, limits.maximum_memory_mb);
 	}
 	catch(...)
 	{
@@ -96,7 +96,7 @@ CaptureWindowResult CollectorSession::capture(const CaptureWindowOptions& option
 			std::scoped_lock lock(mutex);
 			worker_attached = false;
 		}
-		attach(WorkerPurpose::Capture);
+		attach(WorkerPurpose::Capture, options.memory_limit_mb);
 		{
 			std::scoped_lock lock(mutex);
 			phase = SessionPhase::Capturing;
@@ -116,7 +116,7 @@ CaptureWindowResult CollectorSession::capture(const CaptureWindowOptions& option
 			worker_attached = false;
 			phase = SessionPhase::DrainRestoring;
 		}
-		attach(WorkerPurpose::Drain);
+		attach(WorkerPurpose::Drain, limits.maximum_memory_mb);
 		const auto restored_queue_health = wait_for_queue_health(std::chrono::steady_clock::now() + readiness_timeout);
 		std::scoped_lock lock(mutex);
 		producer_progress = backend->producer_progress();
@@ -230,13 +230,13 @@ QueueHealth CollectorSession::wait_for_queue_health(const std::chrono::steady_cl
 	}
 }
 
-void CollectorSession::attach(const WorkerPurpose purpose)
+void CollectorSession::attach(const WorkerPurpose purpose, const std::uint64_t memory_limit_mb)
 {
 	for(std::uint64_t attempt = 1; attempt <= limits.maximum_attach_attempts; ++attempt)
 	{
 		try
 		{
-			backend->attach(purpose);
+			backend->attach(purpose, memory_limit_mb);
 			std::scoped_lock lock(mutex);
 			++worker_generation;
 			worker_purpose = purpose;
@@ -272,7 +272,7 @@ bool CollectorSession::restore_drain_worker() noexcept
 			worker_attached = false;
 			phase = SessionPhase::DrainRestoring;
 		}
-		attach(WorkerPurpose::Drain);
+		attach(WorkerPurpose::Drain, limits.maximum_memory_mb);
 		const auto restored_queue_health = wait_for_queue_health(std::chrono::steady_clock::now() + readiness_timeout);
 		{
 			std::scoped_lock lock(mutex);

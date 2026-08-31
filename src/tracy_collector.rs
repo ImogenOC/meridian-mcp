@@ -177,6 +177,16 @@ where
     }
 
     pub async fn request(&self, command: &str, params: Value) -> Result<Value, TracyProtocolError> {
+        self.request_with_timeout(command, params, self.request_timeout)
+            .await
+    }
+
+    pub async fn request_with_timeout(
+        &self,
+        command: &str,
+        params: Value,
+        request_timeout: Duration,
+    ) -> Result<Value, TracyProtocolError> {
         if !params.is_object() {
             return Err(TracyProtocolError::InvalidParams);
         }
@@ -202,7 +212,7 @@ where
                 "collector write failed: {error}"
             )));
         }
-        let document = match tokio::time::timeout(self.request_timeout, receiver).await {
+        let document = match tokio::time::timeout(request_timeout, receiver).await {
             Ok(Ok(Ok(document))) => document,
             Ok(Ok(Err(error))) => return Err(TracyProtocolError::Transport(error)),
             Ok(Err(_)) => {
@@ -383,23 +393,29 @@ impl TracyCollector {
 
     pub async fn status(&self) -> Result<Value, TracyProtocolError> {
         self.transport
-            .request("session_status", serde_json::json!({}))
+            .request_with_timeout(
+                "session_status",
+                serde_json::json!({}),
+                Duration::from_secs(5),
+            )
             .await
     }
 
     pub async fn cancel(&self) -> Result<Value, TracyProtocolError> {
         self.transport
-            .request("cancel", serde_json::json!({}))
+            .request_with_timeout("cancel", serde_json::json!({}), Duration::from_secs(5))
             .await
     }
 
     pub async fn stop(&self, timeout: Duration) -> Result<Value, TracyProtocolError> {
+        let deadline = tokio::time::Instant::now() + timeout;
         let result = self
             .transport
-            .request("session_stop", serde_json::json!({}))
+            .request_with_timeout("session_stop", serde_json::json!({}), timeout)
             .await;
         let mut child = self.child.lock().await;
-        let waited = tokio::time::timeout(timeout, child.wait()).await;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let waited = tokio::time::timeout(remaining, child.wait()).await;
         if waited.is_err() {
             child.kill().await.map_err(|error| {
                 TracyProtocolError::Transport(format!("collector kill failed: {error}"))
