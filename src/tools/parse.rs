@@ -12,7 +12,7 @@ use crate::analysis_snapshot::{
     AnalysisSnapshot,
 };
 use crate::mcp::ToolResult;
-use crate::result::{structured_error, ToolErrorCode};
+use crate::result::{json_success, structured_error, ToolErrorCode, ToolMetadata};
 use crate::search::SearchDocuments;
 use crate::semantic::SEMANTIC_CHUNK_SCHEMA_VERSION;
 use crate::source::extract_source;
@@ -37,6 +37,10 @@ const BLOCKING_ERROR_MESSAGES: &[&str] = &["i/o error opening file", "i/o error 
 /// client forever with no reply.
 const DEFAULT_PARSE_TIMEOUT_MS: u64 = 600_000;
 const MAX_PARSE_TIMEOUT_MS: u64 = 1_800_000;
+const DEFAULT_TYPE_LIMIT: u64 = 100;
+const MAX_TYPE_LIMIT: u64 = 500;
+const DEFAULT_SYMBOL_LIMIT: u64 = 50;
+const MAX_SYMBOL_LIMIT: u64 = 200;
 
 /// Render a canonicalized path the way a caller wrote it.
 ///
@@ -586,8 +590,16 @@ pub async fn list_types(state: &ServerState, args: Value) -> Result<ToolResult> 
         .get("max_depth")
         .and_then(|v| v.as_u64())
         .map(|d| d as usize);
+    let limit = super::bounded_u64(&args, "limit", DEFAULT_TYPE_LIMIT, 1, MAX_TYPE_LIMIT)? as usize;
+    let cursor = match args.get("cursor") {
+        Some(Value::String(cursor)) => cursor
+            .parse::<usize>()
+            .map_err(|_| anyhow!("cursor must be a non-negative integer string"))?,
+        Some(_) => return Err(anyhow!("cursor must be a non-negative integer string")),
+        None => 0,
+    };
 
-    let types: Vec<Value> = objtree
+    let matching_types: Vec<_> = objtree
         .iter_types()
         .filter(|ty| ty.path.starts_with(prefix))
         .filter(|ty| {
@@ -597,6 +609,12 @@ pub async fn list_types(state: &ServerState, args: Value) -> Result<ToolResult> 
                 true
             }
         })
+        .collect();
+    let total_count = matching_types.len();
+    let types: Vec<Value> = matching_types
+        .into_iter()
+        .skip(cursor)
+        .take(limit)
         .map(|ty| {
             json!({
                 "path": ty.path.to_string(),
@@ -605,13 +623,30 @@ pub async fn list_types(state: &ServerState, args: Value) -> Result<ToolResult> 
             })
         })
         .collect();
+    let next_offset = cursor.saturating_add(types.len());
+    let has_more = next_offset < total_count;
+    let next_cursor = has_more.then(|| next_offset.to_string());
 
     let result = json!({
         "count": types.len(),
-        "types": types
+        "total_count": total_count,
+        "types": types,
+        "pagination": {
+            "cursor": cursor.to_string(),
+            "limit": limit,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }
     });
+    let mut metadata = ToolMetadata::complete(Some(snapshot.generation));
+    metadata.truncated = has_more;
+    if has_more {
+        metadata
+            .truncation_reasons
+            .push("result_page_limit".to_owned());
+    }
 
-    Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
+    Ok(json_success(metadata, result))
 }
 
 /// Search for symbols
@@ -627,8 +662,12 @@ pub async fn search_symbols(state: &ServerState, args: Value) -> Result<ToolResu
         .to_lowercase();
 
     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("all");
+    if !matches!(kind, "type" | "proc" | "var" | "macro" | "all") {
+        return Err(anyhow!("kind must be one of: type, proc, var, macro, all"));
+    }
 
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let limit =
+        super::bounded_u64(&args, "limit", DEFAULT_SYMBOL_LIMIT, 1, MAX_SYMBOL_LIMIT)? as usize;
 
     let mut results: Vec<Value> = Vec::new();
 
@@ -1126,6 +1165,56 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Stored fixture values"));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn type_listing_is_paginated_with_stable_cursors() {
+        let (directory, state) = parsed_fixture().await;
+        let first = list_types(
+            &state,
+            json!({"prefix": "/datum/meridian_fixture", "limit": 1}),
+        )
+        .await
+        .unwrap();
+        let first_payload = result_json(&first);
+
+        assert_eq!(first_payload["count"], 1);
+        assert_eq!(first_payload["total_count"], 2);
+        assert_eq!(first_payload["pagination"]["next_cursor"], "1");
+        assert_eq!(first_payload["truncated"], true);
+
+        let second = list_types(
+            &state,
+            json!({
+                "prefix": "/datum/meridian_fixture",
+                "limit": 1,
+                "cursor": "1"
+            }),
+        )
+        .await
+        .unwrap();
+        let second_payload = result_json(&second);
+
+        assert_eq!(second_payload["count"], 1);
+        assert_eq!(second_payload["pagination"]["has_more"], false);
+        assert!(second_payload["pagination"]["next_cursor"].is_null());
+        assert_eq!(second_payload["truncated"], false);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn symbol_search_rejects_unbounded_limits() {
+        let (directory, state) = parsed_fixture().await;
+        let error = search_symbols(&state, json!({"query": "meridian_fixture", "limit": 201}))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("limit must be between 1 and 200"));
 
         std::fs::remove_dir_all(directory).unwrap();
     }

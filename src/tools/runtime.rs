@@ -118,13 +118,12 @@ pub async fn run(
     run_internal(context, state, args, None).await
 }
 
-pub(crate) async fn run_profiled(
+pub(crate) async fn run_profiled_with_lifecycle(
     context: &super::ToolExecutionContext,
     state: &ServerState,
     args: Value,
     profiler_port: u16,
 ) -> Result<ToolResult> {
-    let _lifecycle = state.lifecycle().await;
     if state.debugger().await.is_some() {
         return Err(anyhow!(
             "a debugger session is active; stop it before launching Tracy"
@@ -157,7 +156,14 @@ async fn run_internal(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("Missing dmb_path argument"))?;
 
-    let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(1337) as u16;
+    let port = u16::try_from(super::bounded_u64(&args, "port", 1337, 1, 65_535)?)?;
+    let startup_timeout_ms = super::bounded_u64(
+        &args,
+        "startup_timeout_ms",
+        DEFAULT_OUTPUT_WAIT_TIMEOUT_MS,
+        1,
+        MAX_OUTPUT_WAIT_TIMEOUT_MS,
+    )?;
 
     let requested_path = PathBuf::from(dmb_path);
     let requested_working_directory = args
@@ -344,11 +350,8 @@ async fn run_internal(
             .get("wait_regex")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let timeout_ms = args
-            .get("startup_timeout_ms")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(DEFAULT_OUTPUT_WAIT_TIMEOUT_MS);
-        let wait_result = wait_for_output_value(&mut state, pattern, use_regex, timeout_ms).await?;
+        let wait_result =
+            wait_for_output_value(&mut state, pattern, use_regex, startup_timeout_ms).await?;
         result["readiness"] = wait_result;
         if !readiness_succeeded(&result["readiness"]) {
             result["success"] = json!(false);
@@ -650,12 +653,29 @@ mod tests {
 
         assert_eq!(
             find_dreamdaemon_for_compilers(std::slice::from_ref(&compiler)),
-            Some(daemon.clone())
+            Some(normalize_spawn_path(&daemon.canonicalize().unwrap()))
         );
 
         std::fs::remove_file(compiler).unwrap();
         std::fs::remove_file(daemon).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_exclusive_runtime_lifecycle_access() {
+        let state = ServerState::new();
+        let lifecycle = state.lifecycle().await;
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            stop(&state, json!({})),
+        )
+        .await;
+
+        assert!(blocked.is_err(), "stop bypassed the runtime lifecycle lock");
+        drop(lifecycle);
+        let result = stop(&state, json!({})).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
     }
 
     #[test]
@@ -833,6 +853,11 @@ mod tests {
 
 /// Stop the running DreamDaemon instance
 pub async fn stop(state: &ServerState, _args: Value) -> Result<ToolResult> {
+    let _lifecycle = state.lifecycle().await;
+    stop_with_lifecycle(state).await
+}
+
+async fn stop_with_lifecycle(state: &ServerState) -> Result<ToolResult> {
     let mut state = state.runtime().await;
     let was_running = state.is_game_running();
     if !was_running && state.integrity.is_none() {

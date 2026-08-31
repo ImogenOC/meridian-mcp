@@ -1,5 +1,5 @@
 use crate::mcp::ToolDefinition;
-use crate::result::{DomainContent, DomainToolResult};
+use crate::result::{structured_error, DomainContent, DomainToolResult, ToolErrorCode};
 use crate::state::ServerState;
 use crate::tools::{self, ToolExecutionContext};
 use crate::{PathPolicy, ServerConfig};
@@ -125,8 +125,39 @@ impl ServerHandler for MeridianServer {
         )
         .await
         .unwrap_or_else(|error| DomainToolResult::error(error.to_string()));
+        let result = enforce_output_limit(&request.name, result);
         Ok(CallToolResponse::Complete(to_sdk_result(result)))
     }
+}
+
+fn enforce_output_limit(name: &str, result: DomainToolResult) -> DomainToolResult {
+    let Some(contract) = crate::all_contracts()
+        .iter()
+        .find(|contract| contract.name == name)
+    else {
+        return result;
+    };
+    let output_bytes = result
+        .content
+        .iter()
+        .map(|content| match content {
+            DomainContent::Text { text } => text.len(),
+        })
+        .sum::<usize>();
+    if output_bytes <= contract.max_output_bytes {
+        return result;
+    }
+
+    structured_error(
+        ToolErrorCode::LimitExceeded,
+        "tool output exceeded its declared transport limit",
+        Some("Narrow the request or use the tool's pagination controls.".to_owned()),
+        serde_json::json!({
+            "tool": name,
+            "output_bytes": output_bytes,
+            "max_output_bytes": contract.max_output_bytes,
+        }),
+    )
 }
 
 fn to_sdk_tool(definition: ToolDefinition, rift_build: crate::RiftBuildAccess) -> Tool {
@@ -148,7 +179,7 @@ fn to_sdk_tool(definition: ToolDefinition, rift_build: crate::RiftBuildAccess) -
                     && !contract.effects.network_loopback
                     && !external_network,
             )
-            .destructive(false)
+            .destructive(contract.effects.destructive)
             .open_world(external_network)
     });
     let mut tool = Tool::new(definition.name, definition.description, input_schema);
@@ -168,5 +199,36 @@ fn to_sdk_result(result: DomainToolResult) -> CallToolResult {
         CallToolResult::error(content)
     } else {
         CallToolResult::success(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdk_annotations_follow_contract_effects() {
+        let definition = ToolDefinition {
+            name: "dm_stop".to_owned(),
+            description: "stop".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let tool = to_sdk_tool(definition, crate::RiftBuildAccess::Disabled);
+        let annotations = tool.annotations.expect("contract annotations");
+
+        assert_eq!(annotations.read_only_hint, Some(false));
+        assert_eq!(annotations.destructive_hint, Some(true));
+    }
+
+    #[test]
+    fn oversized_tool_results_are_replaced_by_bounded_errors() {
+        let oversized = DomainToolResult::text("x".repeat(300_000));
+        let bounded = enforce_output_limit("dm_stop", oversized);
+
+        assert_eq!(bounded.is_error, Some(true));
+        let DomainContent::Text { text } = &bounded.content[0];
+        let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["code"], "limit_exceeded");
+        assert!(text.len() <= 262_144);
     }
 }

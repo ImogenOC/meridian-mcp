@@ -7,6 +7,7 @@ pub struct ToolEffects {
     pub spawns_process: bool,
     pub network_loopback: bool,
     pub network_external: bool,
+    pub destructive: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +35,7 @@ const READ: ToolEffects = ToolEffects {
     spawns_process: false,
     network_loopback: false,
     network_external: false,
+    destructive: false,
 };
 const MEMORY: ToolEffects = ToolEffects {
     reads_files: false,
@@ -41,6 +43,7 @@ const MEMORY: ToolEffects = ToolEffects {
     spawns_process: false,
     network_loopback: false,
     network_external: false,
+    destructive: false,
 };
 const COMPILE: ToolEffects = ToolEffects {
     reads_files: true,
@@ -48,6 +51,7 @@ const COMPILE: ToolEffects = ToolEffects {
     spawns_process: true,
     network_loopback: false,
     network_external: false,
+    destructive: true,
 };
 const RIFT_COMPILE: ToolEffects = ToolEffects {
     reads_files: true,
@@ -55,6 +59,7 @@ const RIFT_COMPILE: ToolEffects = ToolEffects {
     spawns_process: true,
     network_loopback: false,
     network_external: true,
+    destructive: true,
 };
 const RENDER: ToolEffects = ToolEffects {
     reads_files: true,
@@ -62,6 +67,7 @@ const RENDER: ToolEffects = ToolEffects {
     spawns_process: false,
     network_loopback: false,
     network_external: false,
+    destructive: true,
 };
 const RUNTIME: ToolEffects = ToolEffects {
     reads_files: true,
@@ -69,6 +75,7 @@ const RUNTIME: ToolEffects = ToolEffects {
     spawns_process: true,
     network_loopback: true,
     network_external: false,
+    destructive: false,
 };
 const RUNTIME_STATE: ToolEffects = ToolEffects {
     reads_files: true,
@@ -76,6 +83,15 @@ const RUNTIME_STATE: ToolEffects = ToolEffects {
     spawns_process: false,
     network_loopback: false,
     network_external: false,
+    destructive: false,
+};
+const RUNTIME_STOP: ToolEffects = ToolEffects {
+    reads_files: true,
+    writes_files: true,
+    spawns_process: false,
+    network_loopback: false,
+    network_external: false,
+    destructive: true,
 };
 const TOPIC: ToolEffects = ToolEffects {
     reads_files: false,
@@ -83,6 +99,7 @@ const TOPIC: ToolEffects = ToolEffects {
     spawns_process: false,
     network_loopback: true,
     network_external: false,
+    destructive: false,
 };
 const DEBUG: ToolEffects = ToolEffects {
     reads_files: true,
@@ -90,6 +107,7 @@ const DEBUG: ToolEffects = ToolEffects {
     spawns_process: true,
     network_loopback: true,
     network_external: false,
+    destructive: false,
 };
 const TRACY_PREPARE: ToolEffects = ToolEffects {
     reads_files: true,
@@ -97,6 +115,7 @@ const TRACY_PREPARE: ToolEffects = ToolEffects {
     spawns_process: false,
     network_loopback: false,
     network_external: false,
+    destructive: true,
 };
 const TRACY_PROCESS: ToolEffects = ToolEffects {
     reads_files: true,
@@ -104,6 +123,23 @@ const TRACY_PROCESS: ToolEffects = ToolEffects {
     spawns_process: true,
     network_loopback: false,
     network_external: false,
+    destructive: false,
+};
+const TRACY_STATUS: ToolEffects = ToolEffects {
+    reads_files: false,
+    writes_files: false,
+    spawns_process: false,
+    network_loopback: true,
+    network_external: false,
+    destructive: false,
+};
+const TRACY_STOP: ToolEffects = ToolEffects {
+    reads_files: true,
+    writes_files: true,
+    spawns_process: false,
+    network_loopback: true,
+    network_external: false,
+    destructive: true,
 };
 
 macro_rules! contract {
@@ -485,7 +521,7 @@ static CONTRACTS: &[ToolContract] = &[
     ),
     contract!(
         "rift_compile",
-        "Run Meridian-Rift's contained RIFT_BUILD.cmd full-build gate.",
+        "Run Meridian-Rift's contained RIFT_BUILD.cmd full-build gate; reserve outer cleanup time and validate its versioned artifact result.",
         Development,
         RIFT_COMPILE,
         Provisional,
@@ -523,7 +559,7 @@ static CONTRACTS: &[ToolContract] = &[
         "dm_stop",
         "Stop the server-owned DreamDaemon process.",
         Development,
-        RUNTIME_STATE,
+        RUNTIME_STOP,
         Provisional,
         None,
         262_144
@@ -561,7 +597,7 @@ static CONTRACTS: &[ToolContract] = &[
         Development,
         RUNTIME,
         Experimental,
-        Some(60_000),
+        Some(600_000),
         262_144
     ),
     contract!(
@@ -577,7 +613,7 @@ static CONTRACTS: &[ToolContract] = &[
         "dm_tracy_status",
         "Inspect profiled runtime and capture state.",
         Development,
-        MEMORY,
+        TRACY_STATUS,
         Experimental,
         None,
         262_144
@@ -586,7 +622,7 @@ static CONTRACTS: &[ToolContract] = &[
         "dm_tracy_stop",
         "Stop capture and the profiled DreamDaemon.",
         Development,
-        MEMORY,
+        TRACY_STOP,
         Experimental,
         Some(30_000),
         262_144
@@ -684,6 +720,9 @@ pub fn render_tool_reference(contracts: &[ToolContract]) -> String {
         }
         if contract.effects.network_external {
             effects.push("network");
+        }
+        if contract.effects.destructive {
+            effects.push("destructive");
         }
         output.push_str(&format!(
             "| `{}` | {:?} | {:?} | {} | {} | {} | {} |\n",

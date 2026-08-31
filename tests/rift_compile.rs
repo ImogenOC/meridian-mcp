@@ -47,6 +47,7 @@ if /I "%MERIDIAN_RIFT_BUILD_NETWORK%"=="offline" if not exist "%~dp0offline.read
   >&2 echo [offline_preflight_failed] fixture cache is cold
   exit /b 2
 )
+echo controller wall=%MERIDIAN_RIFT_WALL_TIMEOUT_SECONDS% idle=%MERIDIAN_RIFT_IDLE_TIMEOUT_SECONDS%
 >"%~dp0wrapper.marker" echo ran
 if exist "%~dp0no-write.ready" exit /b 0
 if exist "%~dp0cache-hit.ready" (
@@ -193,6 +194,16 @@ async fn fixed_wrapper_produces_fresh_artifact_evidence() {
     assert_eq!(payload["artifact_after"]["dmb"]["exists"], true);
     assert_eq!(payload["artifact_after"]["rsc"]["exists"], true);
     assert!(payload["artifact_after"]["dmb"]["sha256"].is_string());
+    assert!(payload["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("controller wall=1740 idle=120"));
+    assert_eq!(payload["controller_timeout"]["inner_wall_seconds"], 1740);
+    assert_eq!(payload["controller_timeout"]["inner_idle_seconds"], 120);
+    assert_eq!(
+        payload["controller_timeout"]["outer_idle_timeout_ms"],
+        1_800_000
+    );
     assert!(root.join("wrapper.marker").exists());
     std::fs::remove_dir_all(root).unwrap();
 }

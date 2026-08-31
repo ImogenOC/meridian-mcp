@@ -77,3 +77,29 @@ fn checked_in_reference_matches_contract_registry() {
     let actual = std::fs::read_to_string("docs/tool-contracts.md").unwrap();
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn runtime_control_contracts_report_their_actual_effects() {
+    let contract = |name| {
+        all_contracts()
+            .iter()
+            .find(|contract| contract.name == name)
+            .copied()
+            .expect("runtime control contract should exist")
+    };
+
+    let runtime_stop = contract("dm_stop");
+    assert!(runtime_stop.effects.destructive);
+    assert!(runtime_stop.effects.writes_files);
+
+    let tracy_status = contract("dm_tracy_status");
+    assert!(!tracy_status.effects.destructive);
+    assert!(tracy_status.effects.network_loopback);
+
+    let tracy_stop = contract("dm_tracy_stop");
+    assert!(tracy_stop.effects.destructive);
+    assert!(tracy_stop.effects.writes_files);
+    assert!(tracy_stop.effects.network_loopback);
+
+    assert_eq!(contract("dm_tracy_launch").timeout_ms, Some(600_000));
+}

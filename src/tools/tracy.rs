@@ -135,6 +135,7 @@ pub async fn launch(
     state: &crate::state::ServerState,
     args: Value,
 ) -> Result<ToolResult> {
+    let _lifecycle = state.lifecycle().await;
     let prior_journal_id = state
         .tracy_capture()
         .await
@@ -152,7 +153,7 @@ pub async fn launch(
         .as_ref()
         .map(|journal| journal.summary().journal_id);
     if failed && current_journal_id.is_some() && current_journal_id != prior_journal_id {
-        let _ = stop(context, state).await;
+        let _ = stop_with_lifecycle(context, state).await;
     }
     result
 }
@@ -164,6 +165,11 @@ async fn launch_inner(
 ) -> Result<ToolResult> {
     let dmb_path = Path::new(required_string(&args, "dmb_path")?);
     let canonical_dmb = dmb_path.canonicalize()?;
+    let game_port = u16::try_from(super::bounded_u64(&args, "game_port", 1337, 1, 65_535)?)?;
+    let readiness_timeout_ms =
+        super::bounded_u64(&args, "startup_timeout_ms", 60_000, 1_000, 60_000)?;
+    let initialization_timeout_ms =
+        super::bounded_u64(&args, "initialization_timeout_ms", 180_000, 1, 300_000)?;
     let require_verified_provenance = args
         .get("require_verified_provenance")
         .and_then(Value::as_bool)
@@ -220,10 +226,6 @@ async fn launch_inner(
         super::runtime::find_dreamdaemon_for_compilers(context.policy().compiler_allowlist())
             .ok_or_else(|| anyhow!("DreamDaemon not found. Please install BYOND."))?
             .canonicalize()?;
-    let readiness_timeout_ms = args
-        .get("startup_timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(60_000);
     let runtime_configuration = optional_string(&args, "config_directory")?
         .map(|path| context.policy().read_path(path))
         .transpose()?
@@ -241,13 +243,8 @@ async fn launch_inner(
         .as_ref()
         .map(|path| hash_file(path))
         .transpose()?;
-    let initialization_timeout_ms = args
-        .get("initialization_timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(180_000)
-        .min(300_000);
     let launch_parameters_sha256 = canonical_sha256(&json!({
-        "game_port": args.get("game_port").and_then(Value::as_u64).unwrap_or(1337),
+        "game_port": game_port,
         "startup_timeout_ms": readiness_timeout_ms,
         "profiler_transport": "loopback_ephemeral",
         "runtime_configuration": runtime_configuration.as_ref().map(|configuration| &configuration.identity),
@@ -319,15 +316,11 @@ async fn launch_inner(
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let profiler_port = listener.local_addr()?.port();
     drop(listener);
-    let game_port = args
-        .get("game_port")
-        .and_then(Value::as_u64)
-        .unwrap_or(1337) as u16;
     let daemon_args = runtime_configuration
         .as_ref()
         .map(|configuration| vec!["-params".to_owned(), configuration.world_parameter()])
         .unwrap_or_default();
-    let runtime_result = super::runtime::run_profiled(
+    let runtime_result = super::runtime::run_profiled_with_lifecycle(
         context,
         state,
         json!({"dmb_path":dmb_path,"port":game_port,"require_verified_provenance":require_verified_provenance,"daemon_args":daemon_args}),
@@ -466,7 +459,7 @@ async fn launch_inner(
         )
         .await?;
         if initialization["matched"].as_bool() != Some(true) {
-            let _ = stop(context, state).await;
+            let _ = stop_with_lifecycle(context, state).await;
             return Ok(structured_error(
                 ToolErrorCode::TimedOut,
                 "Meridian-Rift did not reach the fixed initialization-complete marker before the wake deadline.",
@@ -563,7 +556,7 @@ async fn launch_inner(
                         .as_mut()
                         .expect("launch initialized experiment state")
                         .runtime_wake = Some(runtime_wake.clone());
-                    let _ = stop(context, state).await;
+                    let _ = stop_with_lifecycle(context, state).await;
                     return Ok(structured_error(
                         ToolErrorCode::ExternalToolFailure,
                         "DreamSeeker could not be started to keep the initialized headless world awake.",
@@ -633,7 +626,7 @@ async fn launch_inner(
                 .as_mut()
                 .expect("launch initialized experiment state")
                 .runtime_wake = Some(runtime_wake.clone());
-            let _ = stop(context, state).await;
+            let _ = stop_with_lifecycle(context, state).await;
             return Ok(structured_error(
                 ToolErrorCode::ExternalToolFailure,
                 "DreamDaemon did not sustain producer progress after the bounded post-initialization wake sequence.",
@@ -1290,6 +1283,14 @@ pub async fn status(state: &crate::state::ServerState) -> Result<ToolResult> {
 }
 
 pub async fn stop(
+    context: &ToolExecutionContext,
+    state: &crate::state::ServerState,
+) -> Result<ToolResult> {
+    let _lifecycle = state.lifecycle().await;
+    stop_with_lifecycle(context, state).await
+}
+
+async fn stop_with_lifecycle(
     context: &ToolExecutionContext,
     state: &crate::state::ServerState,
 ) -> Result<ToolResult> {
@@ -2193,7 +2194,7 @@ fn git_workspace_root(path: &Path) -> Result<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{register_memory_identities, stop, topic_was_processed};
+    use super::{launch, register_memory_identities, stop, topic_was_processed};
     use crate::process_metrics::{ProcessIdentity, ProcessRole, RoleMemorySeries};
     use crate::tools::ToolExecutionContext;
     use crate::{CapabilityMode, PathPolicy, RiftBuildAccess};
@@ -2279,6 +2280,69 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
         assert_eq!(journal["status"], "finalized");
         assert!(state.tracy_capture().await.integrity_journal.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn launch_waits_for_exclusive_runtime_lifecycle_access() {
+        let root = std::env::temp_dir().join(format!(
+            "meridian-tracy-launch-lifecycle-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = ToolExecutionContext::with_features(
+            CapabilityMode::Development,
+            PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+            RiftBuildAccess::Disabled,
+            None,
+            None,
+            None,
+        );
+        let state = crate::state::ServerState::new();
+        let lifecycle = state.lifecycle().await;
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            launch(&context, &state, json!({})),
+        )
+        .await;
+
+        assert!(
+            blocked.is_err(),
+            "launch bypassed the runtime lifecycle lock"
+        );
+        drop(lifecycle);
+        assert!(launch(&context, &state, json!({})).await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_exclusive_runtime_lifecycle_access() {
+        let root = std::env::temp_dir().join(format!(
+            "meridian-tracy-stop-lifecycle-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = ToolExecutionContext::with_features(
+            CapabilityMode::Development,
+            PathPolicy::new(vec![root.clone()], Vec::new()).unwrap(),
+            RiftBuildAccess::Disabled,
+            None,
+            None,
+            None,
+        );
+        let state = crate::state::ServerState::new();
+        let lifecycle = state.lifecycle().await;
+
+        let blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(20), stop(&context, &state))
+                .await;
+
+        assert!(blocked.is_err(), "stop bypassed the runtime lifecycle lock");
+        drop(lifecycle);
+        assert!(stop(&context, &state).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

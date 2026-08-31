@@ -13,7 +13,7 @@ use crate::{ProjectProfile, RiftBuildAccess};
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -42,6 +42,35 @@ struct ValidatedProject {
 struct ArtifactPair {
     dmb: ArtifactSnapshot,
     rsc: ArtifactSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ControllerTimeoutPolicy {
+    inner_wall_seconds: u64,
+    inner_idle_seconds: u64,
+    outer_idle_timeout: Duration,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RiftResultArtifact {
+    path: String,
+    size: u64,
+    sha256: String,
+    freshness: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RiftResultRecord {
+    schema_version: u64,
+    run_id: String,
+    command: String,
+    status: String,
+    evidence: String,
+    exit_code: i64,
+    reused: Option<bool>,
+    artifacts: Vec<RiftResultArtifact>,
 }
 
 pub async fn compile(
@@ -185,12 +214,14 @@ pub async fn compile(
         }
     };
     let command_processor = command_path(&command_processor);
+    let timeout_policy = controller_timeout_policy(timeout_ms, idle_timeout_ms);
     let (environment, mut warnings) = build_environment(
         context,
         &command_processor,
         &compiler,
         params.network_mode(),
         params.force_rebuild,
+        timeout_policy,
     );
     let script_argument = match cmd_script_argument(&project.rift_build) {
         Ok(argument) => argument,
@@ -215,7 +246,7 @@ pub async fn compile(
         environment,
         stdin: None,
         timeout: Duration::from_millis(timeout_ms),
-        idle_timeout: Duration::from_millis(idle_timeout_ms),
+        idle_timeout: timeout_policy.outer_idle_timeout,
         capture_network: params.capture_network,
         cancellation: None,
     })
@@ -261,6 +292,7 @@ pub async fn compile(
         &params,
         timeout_ms,
         idle_timeout_ms,
+        timeout_policy,
         before,
         after,
         outcome,
@@ -324,6 +356,7 @@ fn build_environment(
     compiler: &Path,
     network_mode: RiftNetworkMode,
     force_rebuild: bool,
+    timeout_policy: ControllerTimeoutPolicy,
 ) -> (Vec<(OsString, OsString)>, Vec<String>) {
     let mut environment = Vec::new();
     for name in [
@@ -362,6 +395,14 @@ fn build_environment(
         "MERIDIAN_RIFT_FORCE_REBUILD".into(),
         if force_rebuild { "1" } else { "0" }.into(),
     ));
+    environment.push((
+        "MERIDIAN_RIFT_WALL_TIMEOUT_SECONDS".into(),
+        timeout_policy.inner_wall_seconds.to_string().into(),
+    ));
+    environment.push((
+        "MERIDIAN_RIFT_IDLE_TIMEOUT_SECONDS".into(),
+        timeout_policy.inner_idle_seconds.to_string().into(),
+    ));
 
     let mut warnings = Vec::new();
     if let Some(cache) = std::env::var_os("TG_BOOTSTRAP_CACHE") {
@@ -379,6 +420,22 @@ fn build_environment(
         }
     }
     (environment, warnings)
+}
+
+fn controller_timeout_policy(timeout_ms: u64, idle_timeout_ms: u64) -> ControllerTimeoutPolicy {
+    let outer_wall_seconds = (timeout_ms / 1_000).max(1);
+    let cleanup_headroom_seconds = if outer_wall_seconds > 1 {
+        (outer_wall_seconds / 10).clamp(1, 60)
+    } else {
+        0
+    };
+    ControllerTimeoutPolicy {
+        inner_wall_seconds: outer_wall_seconds
+            .saturating_sub(cleanup_headroom_seconds)
+            .max(1),
+        inner_idle_seconds: idle_timeout_ms.div_ceil(1_000).max(1),
+        outer_idle_timeout: Duration::from_millis(timeout_ms),
+    }
 }
 
 #[cfg(windows)]
@@ -443,6 +500,7 @@ fn classify_result(
     params: &RiftCompileParams,
     timeout_ms: u64,
     idle_timeout_ms: u64,
+    timeout_policy: ControllerTimeoutPolicy,
     before: ArtifactPair,
     after: ArtifactPair,
     outcome: ProcessOutcome,
@@ -451,6 +509,7 @@ fn classify_result(
     let combined_output = format!("{}\n{}", outcome.stdout.text, outcome.stderr.text);
     let diagnostics = parsed_error_lines(&combined_output);
     let cache_evidence = dm_cache_marker(&combined_output);
+    let rift_result = parse_rift_result(&combined_output);
     let artifacts_valid = valid_artifact(&after.dmb) && valid_artifact(&after.rsc);
     let artifacts_changed =
         artifact_changed(&before.dmb, &after.dmb) || artifact_changed(&before.rsc, &after.rsc);
@@ -468,6 +527,19 @@ fn classify_result(
         )
     } else if !artifacts_valid {
         (BuildEvidence::BuildFailed, Some("artifact_missing"))
+    } else if rift_result.is_err() {
+        (
+            BuildEvidence::InsufficientEvidence,
+            Some("wrapper_result_invalid"),
+        )
+    } else if let Some(result) = rift_result.as_ref().ok().and_then(Option::as_ref) {
+        match validate_rift_result(result, &after, artifacts_changed, params.force_rebuild) {
+            Ok(evidence) => (evidence, None),
+            Err(_) => (
+                BuildEvidence::InsufficientEvidence,
+                Some("wrapper_result_invalid"),
+            ),
+        }
     } else if artifacts_changed {
         (BuildEvidence::FreshArtifacts, None)
     } else if cache_evidence.is_some() && !params.force_rebuild {
@@ -505,6 +577,11 @@ fn classify_result(
         "capture_network": params.capture_network,
         "timeout_ms": timeout_ms,
         "idle_timeout_ms": idle_timeout_ms,
+        "controller_timeout": {
+            "inner_wall_seconds": timeout_policy.inner_wall_seconds,
+            "inner_idle_seconds": timeout_policy.inner_idle_seconds,
+            "outer_idle_timeout_ms": timeout_policy.outer_idle_timeout.as_millis(),
+        },
         "duration_ms": outcome.duration_ms,
         "termination": outcome.termination,
         "exit_code": outcome.exit_code,
@@ -514,6 +591,7 @@ fn classify_result(
         "stderr_truncated_bytes": outcome.stderr.truncated_bytes,
         "diagnostics": diagnostics,
         "cache_evidence": cache_evidence,
+        "rift_result": rift_result.ok().flatten(),
         "artifact_before": {
             "dmb": before.dmb,
             "rsc": before.rsc,
@@ -674,6 +752,89 @@ fn artifact_changed(before: &ArtifactSnapshot, after: &ArtifactSnapshot) -> bool
             || before.sha256 != after.sha256)
 }
 
+fn parse_rift_result(output: &str) -> Result<Option<RiftResultRecord>, &'static str> {
+    let mut records = output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("RIFT_RESULT ").map(str::trim));
+    let Some(record) = records.next() else {
+        return Ok(None);
+    };
+    if records.next().is_some() {
+        return Err("wrapper_result_multiple");
+    }
+    serde_json::from_str(record)
+        .map(Some)
+        .map_err(|_| "wrapper_result_malformed")
+}
+
+fn validate_rift_result(
+    result: &RiftResultRecord,
+    after: &ArtifactPair,
+    artifacts_changed: bool,
+    force_rebuild: bool,
+) -> Result<BuildEvidence, &'static str> {
+    if result.schema_version != 1
+        || result.command != "compile"
+        || result.status != "passed"
+        || result.evidence != "full_build"
+        || result.exit_code != 0
+        || result.reused.is_none()
+        || !Regex::new(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
+            .expect("run ID regex must be valid")
+            .is_match(&result.run_id)
+    {
+        return Err("wrapper_result_contract_mismatch");
+    }
+    if result.artifacts.len() != 2 {
+        return Err("wrapper_result_artifact_mismatch");
+    }
+    for (expected_path, snapshot) in [
+        ("artifacts/tgstation.dmb", &after.dmb),
+        ("artifacts/tgstation.rsc", &after.rsc),
+    ] {
+        let Some(artifact) = result
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == expected_path)
+        else {
+            return Err("wrapper_result_artifact_mismatch");
+        };
+        if artifact.size == 0
+            || artifact.size != snapshot.size.unwrap_or_default()
+            || snapshot.sha256.as_deref() != Some(artifact.sha256.as_str())
+            || !artifact
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || artifact.sha256.len() != 64
+        {
+            return Err("wrapper_result_artifact_mismatch");
+        }
+    }
+    match result.reused {
+        Some(true)
+            if !force_rebuild
+                && !artifacts_changed
+                && result
+                    .artifacts
+                    .iter()
+                    .all(|artifact| artifact.freshness == "reused") =>
+        {
+            Ok(BuildEvidence::ValidCacheHit)
+        }
+        Some(false)
+            if artifacts_changed
+                && result
+                    .artifacts
+                    .iter()
+                    .all(|artifact| artifact.freshness == "rebuilt") =>
+        {
+            Ok(BuildEvidence::FreshArtifacts)
+        }
+        _ => Err("wrapper_result_freshness_mismatch"),
+    }
+}
+
 fn dm_cache_regex() -> &'static Regex {
     static CACHE_REGEX: OnceLock<Regex> = OnceLock::new();
     CACHE_REGEX.get_or_init(|| {
@@ -727,6 +888,9 @@ fn recovery_for(code: &str) -> &'static str {
         "artifact_missing" => {
             "Inspect build diagnostics and confirm both tgstation.dmb and tgstation.rsc are generated."
         }
+        "wrapper_result_invalid" => {
+            "Inspect the final RIFT_RESULT record and verify its versioned artifact hashes and freshness fields."
+        }
         "insufficient_evidence" => {
             "Retry with force_rebuild=true or inspect why the wrapper produced neither changed artifacts nor the exact DM cache marker."
         }
@@ -753,6 +917,16 @@ fn network_mode_name(mode: RiftNetworkMode) -> &'static str {
 mod tests {
     use super::*;
 
+    fn artifact_snapshot(name: &str, size: u64, sha256: &str) -> ArtifactSnapshot {
+        ArtifactSnapshot {
+            path: PathBuf::from(name),
+            exists: true,
+            size: Some(size),
+            modified_unix_ms: Some(1),
+            sha256: Some(sha256.to_owned()),
+        }
+    }
+
     #[test]
     fn cache_marker_is_specific_to_the_dm_target() {
         assert_eq!(
@@ -760,6 +934,57 @@ mod tests {
             Some("Skipping 'dm' (up to date)".to_string())
         );
         assert_eq!(dm_cache_marker("Skipping 'tgui' (up to date)"), None);
+    }
+
+    #[test]
+    fn versioned_result_validates_a_reused_artifact_pair() {
+        let dmb_hash = "a".repeat(64);
+        let rsc_hash = "b".repeat(64);
+        let output = format!(
+            "RIFT_RESULT {{\"schema_version\":1,\"run_id\":\"20260831T120000Z-0123abcd\",\"command\":\"compile\",\"status\":\"passed\",\"evidence\":\"full_build\",\"exit_code\":0,\"reused\":true,\"artifacts\":[{{\"path\":\"artifacts/tgstation.dmb\",\"size\":12,\"sha256\":\"{dmb_hash}\",\"freshness\":\"reused\"}},{{\"path\":\"artifacts/tgstation.rsc\",\"size\":13,\"sha256\":\"{rsc_hash}\",\"freshness\":\"reused\"}}]}}"
+        );
+        let after = ArtifactPair {
+            dmb: artifact_snapshot("tgstation.dmb", 12, &dmb_hash),
+            rsc: artifact_snapshot("tgstation.rsc", 13, &rsc_hash),
+        };
+
+        let result = parse_rift_result(&output).unwrap().unwrap();
+        assert_eq!(
+            validate_rift_result(&result, &after, false, false).unwrap(),
+            BuildEvidence::ValidCacheHit
+        );
+    }
+
+    #[test]
+    fn versioned_result_rejects_mismatched_artifact_evidence() {
+        let output = format!(
+            "RIFT_RESULT {{\"schema_version\":1,\"run_id\":\"20260831T120000Z-0123abcd\",\"command\":\"compile\",\"status\":\"passed\",\"evidence\":\"full_build\",\"exit_code\":0,\"reused\":true,\"artifacts\":[{{\"path\":\"artifacts/tgstation.dmb\",\"size\":12,\"sha256\":\"{}\",\"freshness\":\"reused\"}},{{\"path\":\"artifacts/tgstation.rsc\",\"size\":13,\"sha256\":\"{}\",\"freshness\":\"reused\"}}]}}",
+            "c".repeat(64),
+            "b".repeat(64),
+        );
+        let after = ArtifactPair {
+            dmb: artifact_snapshot("tgstation.dmb", 12, &"a".repeat(64)),
+            rsc: artifact_snapshot("tgstation.rsc", 13, &"b".repeat(64)),
+        };
+
+        let result = parse_rift_result(&output).unwrap().unwrap();
+        assert_eq!(
+            validate_rift_result(&result, &after, false, false),
+            Err("wrapper_result_artifact_mismatch")
+        );
+    }
+
+    #[test]
+    fn controller_timeout_policy_reserves_outer_cleanup_and_inner_idle() {
+        let policy = controller_timeout_policy(1_800_000, 120_000);
+
+        assert_eq!(policy.inner_wall_seconds, 1740);
+        assert_eq!(policy.inner_idle_seconds, 120);
+        assert_eq!(policy.outer_idle_timeout, Duration::from_millis(1_800_000));
+        assert_eq!(
+            controller_timeout_policy(2_000, 1_999).inner_idle_seconds,
+            2
+        );
     }
 
     #[cfg(windows)]

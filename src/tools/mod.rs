@@ -25,6 +25,25 @@ use crate::state::ServerState;
 use crate::tracy::TracyInstallation;
 use crate::{contracts_for_configuration, CapabilityMode, PathPolicy, RiftBuildAccess};
 
+pub(crate) fn bounded_u64(
+    args: &Value,
+    name: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64> {
+    let value = match args.get(name) {
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| anyhow!("{name} must be an integer"))?,
+        None => default,
+    };
+    if !(minimum..=maximum).contains(&value) {
+        return Err(anyhow!("{name} must be between {minimum} and {maximum}"));
+    }
+    Ok(value)
+}
+
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     mode: CapabilityMode,
@@ -289,6 +308,18 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "max_depth": {
                     "type": "integer",
                     "description": "Maximum depth to traverse (default: unlimited)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 100,
+                    "description": "Maximum types returned in one page"
+                },
+                "cursor": {
+                    "type": "string",
+                    "pattern": "^[0-9]+$",
+                    "description": "Opaque next_cursor from a previous response"
                 }
             }
         }),
@@ -311,6 +342,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "limit": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
                     "description": "Maximum number of results (default: 50)"
                 }
             },
@@ -679,6 +713,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "port": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
                     "description": "Port to run the server on (default: 1337)"
                 },
                 "working_directory": {
@@ -700,6 +736,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "startup_timeout_ms": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300000,
                     "description": "Maximum wait for wait_for in milliseconds (default: 30000)"
                 },
                 "require_verified_provenance": {
@@ -1328,7 +1366,7 @@ fn policy_error(
 
 #[cfg(test)]
 mod tests {
-    use super::get_tool_definitions;
+    use super::{bounded_u64, get_tool_definitions};
     use serde_json::json;
 
     #[test]
@@ -1407,5 +1445,40 @@ mod tests {
             diagnostics.input_schema["properties"]["component"]["enum"],
             json!(["parser", "dreamchecker"])
         );
+    }
+
+    #[test]
+    fn enumeration_schemas_expose_hard_result_bounds() {
+        let definitions = get_tool_definitions();
+        let types = definitions
+            .iter()
+            .find(|tool| tool.name == "dm_list_types")
+            .expect("type listing tool should be registered");
+        let symbols = definitions
+            .iter()
+            .find(|tool| tool.name == "dm_search_symbols")
+            .expect("symbol search tool should be registered");
+
+        assert_eq!(types.input_schema["properties"]["limit"]["maximum"], 500);
+        assert_eq!(
+            types.input_schema["properties"]["cursor"]["pattern"],
+            "^[0-9]+$"
+        );
+        assert_eq!(symbols.input_schema["properties"]["limit"]["maximum"], 200);
+    }
+
+    #[test]
+    fn bounded_numeric_arguments_enforce_type_and_range() {
+        assert_eq!(
+            bounded_u64(&json!({}), "timeout_ms", 30, 1, 60).unwrap(),
+            30
+        );
+        assert_eq!(
+            bounded_u64(&json!({"timeout_ms":60}), "timeout_ms", 30, 1, 60).unwrap(),
+            60
+        );
+        assert!(bounded_u64(&json!({"timeout_ms":0}), "timeout_ms", 30, 1, 60).is_err());
+        assert!(bounded_u64(&json!({"timeout_ms":61}), "timeout_ms", 30, 1, 60).is_err());
+        assert!(bounded_u64(&json!({"timeout_ms":"60"}), "timeout_ms", 30, 1, 60).is_err());
     }
 }
