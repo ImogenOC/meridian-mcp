@@ -69,6 +69,24 @@ Development mode should use the repository's installer and configuration updater
 
 The complete packaging example is in [Operator and contributor reference](#operator-and-contributor-reference). At minimum, development configuration sets `MERIDIAN_MCP_MODE=development`, supplies one or more roots, allowlists the compiler, and points `MERIDIAN_MCP_STATE_DIR` to an existing writable directory outside every workspace root. Restart the MCP client after changing startup authorization.
 
+### Verify a Codex installation
+
+Fully quit and reopen Codex after installing a new binary or changing MCP configuration. Closing only the current task does not restart the stdio server. Verify the active registration from a terminal before relying on in-app results:
+
+```powershell
+codex mcp get meridian-mcp
+```
+
+Confirm that the entry is enabled and that `command` names the intended installed binary. Then verify the live server through Codex:
+
+1. Call `dm_server_status`. Confirm that `mcp_build.complete` is `true`, its source revision and executable hash identify the installed release, and the expected optional capabilities are enabled.
+2. Call `dm_parse_environment` with an absolute contained `.dme` path. A successful cold parse returns `success: true`, a new `state_generation`, symbol/type counts, and `retrieval.lexical.status: ready`.
+3. Repeat the same parse without changing the checkout. It should return `reused: true` with the same state generation.
+4. Call `dm_check_errors` and confirm that it reports `analysis.source: cached_snapshot` and `recomputed: false` for that generation.
+5. Call `dm_search_context` with a repository-specific query and verify promising results with an exact inspection tool.
+
+A parse rejection is not automatically an MCP installation failure. Read its structured error first: missing includes, generated test fixtures left referenced by a `.dme`, and other source errors belong to the selected checkout. Preserve an unrelated dirty checkout; repair it only when that work is in scope, or repeat the verification against another authorized clean checkout. Parser success verifies analysis availability, not DreamMaker compilation or repository acceptance.
+
 ## Common workflows
 
 ### Analyze code
