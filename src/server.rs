@@ -13,6 +13,10 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::Value;
 use std::sync::Arc;
 
+#[cfg(all(test, any(windows, target_os = "linux")))]
+#[path = "runtime_ownership_tests.rs"]
+mod runtime_ownership_tests;
+
 #[derive(Clone)]
 pub struct MeridianServer {
     config: Arc<ServerConfig>,
@@ -21,6 +25,20 @@ pub struct MeridianServer {
 }
 
 impl MeridianServer {
+    /// Finalize the owned runtime after transport shutdown, with a bounded wait.
+    pub async fn shutdown(&self) -> Result<()> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tools::runtime::stop(&self.state, serde_json::json!({})).await?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "runtime shutdown exceeded five seconds; process-owner containment remains active"
+            )
+        })?
+    }
+
     pub fn new(config: ServerConfig) -> Result<Self> {
         let debugger = (config.debugger_access() == crate::DebuggerAccess::Auxtools)
             .then(|| crate::spaceman::debugger::validate_installation(config.compiler_allowlist()))

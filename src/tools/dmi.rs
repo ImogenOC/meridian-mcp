@@ -12,25 +12,143 @@ use crate::limits::ServerLimits;
 use crate::mcp::ToolResult;
 use crate::result::{json_success, ToolMetadata};
 use crate::spaceman::dmi::{
-    compare_states, discover_dmis, prepare_dmi, profile_dmi, state_candidate_signatures,
+    compare_states, discover_dmis_with_policy, profile_dmi, read_dmi, state_candidate_signatures,
     DecodedDmi, DmiError, IconReferenceResolution, MatchKind, StateLocator,
 };
 use crate::state::ServerState;
 use crate::tools::ToolExecutionContext;
 
-async fn load(state: &ServerState, path: &Path) -> Result<DecodedDmi> {
-    let path = path.to_owned();
-    let limits = ServerLimits::default();
-    let prepared = tokio::task::spawn_blocking(move || prepare_dmi(&path, &limits)).await??;
-    Ok(state
-        .assets()
-        .await
-        .install(prepared, &ServerLimits::default()))
+async fn load(
+    context: &ToolExecutionContext,
+    state: &ServerState,
+    path: &Path,
+) -> Result<DecodedDmi> {
+    load_with_budget(
+        context,
+        state,
+        path,
+        usize::MAX,
+        state.asset_limits().clone(),
+    )
+    .await
 }
 
-pub async fn info(state: &ServerState, args: Value) -> Result<ToolResult> {
+async fn load_with_budget(
+    context: &ToolExecutionContext,
+    state: &ServerState,
+    path: &Path,
+    remaining_decoded_bytes: usize,
+    limits: ServerLimits,
+) -> Result<DecodedDmi> {
+    let path = path.to_owned();
+    let policy = context.policy().clone();
+    let cache = state.asset_cache();
+    state
+        .run_asset_job(move || {
+            let checked = policy.read_path(&path)?;
+            let input = read_dmi(&checked, &limits)?;
+            Ok(cache
+                .blocking_lock()
+                .load_input(input, &limits, remaining_decoded_bytes)?)
+        })
+        .await
+}
+
+#[derive(Default)]
+struct AssetScan {
+    assets: BTreeMap<PathBuf, DecodedDmi>,
+    decoded_bytes: usize,
+    metadata_bytes: usize,
+    states: usize,
+    frames: usize,
+}
+
+impl AssetScan {
+    async fn load(
+        &mut self,
+        context: &ToolExecutionContext,
+        state: &ServerState,
+        path: &Path,
+        reasons: &mut Vec<String>,
+    ) -> Result<Option<DecodedDmi>> {
+        let path = context.policy().read_path(path)?;
+        if let Some(asset) = self.assets.get(&path) {
+            return Ok(Some(asset.clone()));
+        }
+        let remaining = state
+            .asset_limits()
+            .max_dmi_scan_decoded_bytes
+            .saturating_sub(self.decoded_bytes);
+        let mut limits = state.asset_limits().clone();
+        limits.max_dmi_metadata_bytes = limits.max_dmi_metadata_bytes.min(
+            limits
+                .max_dmi_scan_metadata_bytes
+                .saturating_sub(self.metadata_bytes),
+        );
+        limits.max_dmi_states = limits
+            .max_dmi_states
+            .min(limits.max_dmi_scan_states.saturating_sub(self.states));
+        limits.max_dmi_frames = limits
+            .max_dmi_frames
+            .min(limits.max_dmi_scan_frames.saturating_sub(self.frames));
+        let budget_limits = limits.clone();
+        match load_with_budget(context, state, &path, remaining, limits).await {
+            Ok(asset) => {
+                self.decoded_bytes += asset.decoded_bytes();
+                self.metadata_bytes += asset.metadata_bytes;
+                self.states += asset.icon.metadata.states.len();
+                self.frames += asset
+                    .icon
+                    .metadata
+                    .states
+                    .iter()
+                    .map(|state| state.dirs.count() * state.frames.count())
+                    .sum::<usize>();
+                self.assets.insert(path, asset.clone());
+                Ok(Some(asset))
+            }
+            Err(error) => {
+                let reason = match error.downcast_ref::<DmiError>() {
+                    Some(DmiError::Limit(reason)) => match reason.as_str() {
+                        "max_dmi_metadata_bytes"
+                            if budget_limits.max_dmi_metadata_bytes
+                                < state.asset_limits().max_dmi_metadata_bytes =>
+                        {
+                            "max_dmi_scan_metadata_bytes".into()
+                        }
+                        "max_dmi_states"
+                            if budget_limits.max_dmi_states
+                                < state.asset_limits().max_dmi_states =>
+                        {
+                            "max_dmi_scan_states".into()
+                        }
+                        "max_dmi_frames"
+                            if budget_limits.max_dmi_frames
+                                < state.asset_limits().max_dmi_frames =>
+                        {
+                            "max_dmi_scan_frames".into()
+                        }
+                        _ => reason.clone(),
+                    },
+                    Some(_) => "dmi_load_failed".into(),
+                    None => return Err(error),
+                };
+                if !reasons.contains(&reason) {
+                    reasons.push(reason);
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+pub async fn info(
+    context: &ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
     let path = required_path(&args, "dmi_path")?;
-    let asset = load(state, &path).await?;
+    let asset = load(context, state, &path).await?;
     let profile = profile_dmi(&asset, &ServerLimits::default())?;
     let mut metadata = ToolMetadata::complete(
         state
@@ -42,9 +160,13 @@ pub async fn info(state: &ServerState, args: Value) -> Result<ToolResult> {
     Ok(json_success(metadata, json!({ "profile": profile })))
 }
 
-pub async fn compare(state: &ServerState, args: Value) -> Result<ToolResult> {
-    let left = load(state, &required_path(&args, "left_dmi_path")?).await?;
-    let right = load(state, &required_path(&args, "right_dmi_path")?).await?;
+pub async fn compare(
+    context: &ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
+    let left = load(context, state, &required_path(&args, "left_dmi_path")?).await?;
+    let right = load(context, state, &required_path(&args, "right_dmi_path")?).await?;
     let comparison = compare_states(
         &left,
         required_str(&args, "left_state")?,
@@ -189,17 +311,19 @@ fn match_kind_rank(kind: &MatchKind) -> u8 {
 }
 
 async fn duplicate_clusters(
+    context: &ToolExecutionContext,
     state: &ServerState,
     root: &Path,
     glob: Option<&str>,
     minimum: f32,
     max_matches: usize,
+    scan: &mut AssetScan,
 ) -> Result<(Vec<DuplicateCluster>, Vec<String>, usize)> {
-    let limits = ServerLimits::default();
-    let (files, mut reasons) = discover_dmis(root, glob, &limits)?;
+    let limits = state.asset_limits();
+    let (files, mut reasons) = discover_dmis_with_policy(context.policy(), root, glob, limits)?;
     let mut assets = Vec::new();
     for file in files {
-        if let Ok(asset) = load(state, &file).await {
+        if let Some(asset) = scan.load(context, state, &file, &mut reasons).await? {
             assets.push(asset);
         }
     }
@@ -255,7 +379,11 @@ async fn duplicate_clusters(
     Ok((clusters, reasons, candidates))
 }
 
-pub async fn find_duplicates(state: &ServerState, args: Value) -> Result<ToolResult> {
+pub async fn find_duplicates(
+    context: &ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
     let root = match args.get("scope_path").and_then(Value::as_str) {
         Some(path) => PathBuf::from(path),
         None => state
@@ -266,7 +394,9 @@ pub async fn find_duplicates(state: &ServerState, args: Value) -> Result<ToolRes
             .ok_or_else(|| anyhow!("parsed environment has no root"))?
             .to_owned(),
     };
+    let mut scan = AssetScan::default();
     let (clusters, reasons, candidates) = duplicate_clusters(
+        context,
         state,
         &root,
         args.get("include_glob").and_then(Value::as_str),
@@ -276,6 +406,7 @@ pub async fn find_duplicates(state: &ServerState, args: Value) -> Result<ToolRes
         args.get("max_matches")
             .and_then(Value::as_u64)
             .unwrap_or(10_000) as usize,
+        &mut scan,
     )
     .await?;
     let mut metadata = ToolMetadata::complete(
@@ -292,7 +423,11 @@ pub async fn find_duplicates(state: &ServerState, args: Value) -> Result<ToolRes
     ))
 }
 
-pub async fn audit_icons(state: &ServerState, args: Value) -> Result<ToolResult> {
+pub async fn audit_icons(
+    context: &ToolExecutionContext,
+    state: &ServerState,
+    args: Value,
+) -> Result<ToolResult> {
     let snapshot = state.snapshot().await?;
     let root = args
         .get("scope_path")
@@ -305,7 +440,9 @@ pub async fn audit_icons(state: &ServerState, args: Value) -> Result<ToolResult>
                 .unwrap_or(Path::new("."))
                 .to_owned()
         });
+    let mut scan = AssetScan::default();
     let (clusters, mut reasons, candidates) = duplicate_clusters(
+        context,
         state,
         &root,
         args.get("include_glob").and_then(Value::as_str),
@@ -315,6 +452,7 @@ pub async fn audit_icons(state: &ServerState, args: Value) -> Result<ToolResult>
         args.get("max_matches")
             .and_then(Value::as_u64)
             .unwrap_or(10_000) as usize,
+        &mut scan,
     )
     .await?;
     let mut dynamic_references = Vec::new();
@@ -338,7 +476,10 @@ pub async fn audit_icons(state: &ServerState, args: Value) -> Result<ToolResult>
                     continue;
                 }
                 if let Some(icon_state) = icon_state {
-                    let asset = load(state, dmi_path).await?;
+                    let Some(asset) = scan.load(context, state, dmi_path, &mut reasons).await?
+                    else {
+                        continue;
+                    };
                     if !asset
                         .icon
                         .metadata
@@ -366,10 +507,11 @@ pub async fn audit_icons(state: &ServerState, args: Value) -> Result<ToolResult>
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        let (files, unused_reasons) = discover_dmis(
+        let (files, unused_reasons) = discover_dmis_with_policy(
+            context.policy(),
             &root,
             args.get("include_glob").and_then(Value::as_str),
-            &ServerLimits::default(),
+            state.asset_limits(),
         )?;
         for reason in unused_reasons {
             if !reasons.contains(&reason) {
@@ -377,7 +519,9 @@ pub async fn audit_icons(state: &ServerState, args: Value) -> Result<ToolResult>
             }
         }
         for file in files {
-            let asset = load(state, &file).await?;
+            let Some(asset) = scan.load(context, state, &file, &mut reasons).await? else {
+                continue;
+            };
             for icon_state in &asset.icon.metadata.states {
                 if !referenced_states
                     .contains(&(asset.identity.path.clone(), icon_state.name.clone()))
@@ -409,7 +553,7 @@ pub async fn extract(
 ) -> Result<ToolResult> {
     let source = required_path(&args, "dmi_path")?;
     let output = required_path(&args, "output_path")?;
-    let asset = load(state, &source).await?;
+    let asset = load(context, state, &source).await?;
     let state_name = required_str(&args, "state")?;
     let duplicate = args
         .get("duplicate_index")

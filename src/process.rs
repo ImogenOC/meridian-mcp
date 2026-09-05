@@ -15,6 +15,154 @@ pub const MAX_PROCESS_INPUT_BYTES: usize = 1024 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(unix)]
+mod unix_owner;
+
+/// Configure the absolute Meridian executable used by Unix runtime guardians.
+#[cfg(unix)]
+pub fn initialize_runtime_owner_with_executable(path: &std::path::Path) -> Result<()> {
+    unix_owner::initialize(path)
+}
+
+/// Dispatch the private guardian entry point before creating threads or services.
+#[cfg(unix)]
+pub fn dispatch_runtime_guardian() -> bool {
+    unix_owner::dispatch()
+}
+
+#[cfg(windows)]
+static RUNTIME_OWNER_JOB: std::sync::Mutex<Option<ProcessContainment>> =
+    std::sync::Mutex::new(None);
+
+/// Opt this process and its future children into cleanup when this process exits.
+///
+/// Call once at the entry point of a dedicated runtime owner, before spawning any
+/// runtime. The Windows job handle is intentionally retained for the process
+/// lifetime. Library hosts must explicitly opt in: subsequent children inherit
+/// this job, including children launched outside Meridian-MCP.
+pub fn initialize_runtime_owner() -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut owner = RUNTIME_OWNER_JOB
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if owner.is_some() {
+            return Ok(());
+        }
+        let job = ProcessContainment::new()?;
+        // The current-process pseudo handle cannot fail to close after successful
+        // assignment: there must be no fallible operation before retaining job.
+        let assigned = unsafe {
+            windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
+                job.handle,
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            )
+        };
+        if assigned == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("cannot establish runtime owner job");
+        }
+        *owner = Some(job);
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        let executable = std::env::current_exe()?;
+        anyhow::ensure!(executable.file_name().is_some_and(|name| name == "meridian-mcp"),
+            "library hosts must configure initialize_runtime_owner_with_executable with the Meridian executable");
+        initialize_runtime_owner_with_executable(&executable)
+    }
+    #[cfg(not(any(windows, unix)))]
+    anyhow::bail!("runtime tree ownership requires a native owner-loss supervisor; this platform is not yet supported")
+}
+
+/// Spawn without allowing user code to execute before per-runtime containment.
+pub(crate) fn spawn_runtime_process(
+    command: &mut Command,
+) -> Result<(Child, std::sync::Arc<ProcessContainment>)> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        if RUNTIME_OWNER_JOB
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_none()
+        {
+            anyhow::bail!("runtime owner is not initialized; call initialize_runtime_owner in a dedicated host before launching DreamDaemon");
+        }
+        let mut runtime_containment = ProcessContainment::new()?;
+        *runtime_containment.completion_handles.get_mut().unwrap() = Some(Vec::new());
+        let containment = std::sync::Arc::new(runtime_containment);
+        command
+            .kill_on_drop(true)
+            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+        let mut child = command.spawn()?;
+        let pid = child
+            .id()
+            .context("spawned runtime has no process identity")?;
+        if let Err(error) = containment
+            .assign(pid)
+            .and_then(|()| resume_suspended_process(pid))
+        {
+            let _ = containment.terminate(1);
+            let _ = child.start_kill();
+            return Err(error).context("refusing to execute runtime outside containment");
+        }
+        Ok((child, containment))
+    }
+    #[cfg(unix)]
+    {
+        unix_owner::spawn(command)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = command;
+        anyhow::bail!("runtime tree ownership requires a native owner-loss supervisor; this platform is not yet supported")
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> Result<()> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let snapshot = OwnedHandle::from_raw_handle(snapshot);
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut available = Thread32First(snapshot.as_raw_handle(), &mut entry);
+        while available != 0 {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if thread.is_null() {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                let thread = OwnedHandle::from_raw_handle(thread);
+                let previous_count = ResumeThread(thread.as_raw_handle());
+                if previous_count == u32::MAX {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                anyhow::ensure!(
+                    previous_count == 1,
+                    "runtime primary thread had an unexpected suspension count"
+                );
+                return Ok(());
+            }
+            available = Thread32Next(snapshot.as_raw_handle(), &mut entry);
+        }
+    }
+    anyhow::bail!("suspended runtime primary thread was not found")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BoundedOutput {
     pub text: String,
@@ -340,17 +488,55 @@ async fn drain_output(
 }
 
 #[cfg(not(windows))]
-pub(crate) struct ProcessContainment;
+pub(crate) struct ProcessContainment {
+    #[cfg(test)]
+    cleanup_fault: std::sync::atomic::AtomicU8,
+    #[cfg(unix)]
+    runtime: Option<unix_owner::RuntimeOwner>,
+}
 
 #[cfg(not(windows))]
 impl ProcessContainment {
+    pub(crate) fn request_termination(&self) -> Result<()> {
+        #[cfg(test)]
+        self.check_cleanup_fault(1)?;
+        #[cfg(unix)]
+        if let Some(runtime) = &self.runtime {
+            return runtime.request_termination();
+        }
+        self.terminate(1)
+    }
+
+    pub(crate) fn is_terminated(&self) -> Result<bool> {
+        #[cfg(test)]
+        self.check_cleanup_fault(2)?;
+        #[cfg(test)]
+        if self.cleanup_fault.load(std::sync::atomic::Ordering::SeqCst) == 3 {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        if let Some(runtime) = &self.runtime {
+            return runtime.is_terminated();
+        }
+        Ok(true)
+    }
+
     pub(crate) fn new() -> Result<Self> {
-        Ok(Self)
+        Ok(Self {
+            #[cfg(test)]
+            cleanup_fault: std::sync::atomic::AtomicU8::new(0),
+            #[cfg(unix)]
+            runtime: None,
+        })
     }
     pub(crate) fn assign(&self, _process_id: u32) -> Result<()> {
         Ok(())
     }
     pub(crate) fn terminate(&self, _exit_code: u32) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(runtime) = &self.runtime {
+            return runtime.terminate();
+        }
         Ok(())
     }
     fn cpu_time_100ns(&self) -> Option<u64> {
@@ -363,7 +549,11 @@ impl ProcessContainment {
 
 #[cfg(windows)]
 pub(crate) struct ProcessContainment {
+    #[cfg(test)]
+    cleanup_fault: std::sync::atomic::AtomicU8,
     handle: windows_sys::Win32::Foundation::HANDLE,
+    completion_handles: std::sync::Mutex<Option<Vec<std::os::windows::io::OwnedHandle>>>,
+    termination_requested: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(windows)]
@@ -373,6 +563,71 @@ unsafe impl Sync for ProcessContainment {}
 
 #[cfg(windows)]
 impl ProcessContainment {
+    pub(crate) fn request_termination(&self) -> Result<()> {
+        #[cfg(test)]
+        self.check_cleanup_fault(1)?;
+        self.terminate(1)
+    }
+
+    pub(crate) fn is_terminated(&self) -> Result<bool> {
+        #[cfg(test)]
+        self.check_cleanup_fault(2)?;
+        #[cfg(test)]
+        if self.cleanup_fault.load(std::sync::atomic::Ordering::SeqCst) == 3 {
+            return Ok(false);
+        }
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        let mut captured = self
+            .completion_handles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(handles) = captured.as_mut() {
+            let mut wait_error = None;
+            handles.retain(|handle| {
+                match unsafe {
+                    windows_sys::Win32::System::Threading::WaitForSingleObject(
+                        handle.as_raw_handle(),
+                        0,
+                    )
+                } {
+                    WAIT_OBJECT_0 => false,
+                    WAIT_TIMEOUT => true,
+                    _ => {
+                        wait_error = Some(std::io::Error::last_os_error());
+                        true
+                    }
+                }
+            });
+            if let Some(error) = wait_error {
+                return Err(error.into());
+            }
+            if !handles.is_empty() {
+                return Ok(false);
+            }
+        }
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        };
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        let result = unsafe {
+            QueryInformationJobObject(
+                self.handle,
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                std::mem::size_of_val(&accounting) as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        anyhow::ensure!(
+            result != 0,
+            "cannot query runtime job cleanup: {}",
+            std::io::Error::last_os_error()
+        );
+        Ok(accounting.ActiveProcesses == 0)
+    }
+
     pub(crate) fn new() -> Result<Self> {
         use std::mem::size_of;
         use std::ptr;
@@ -399,7 +654,13 @@ impl ProcessContainment {
                 windows_sys::Win32::Foundation::CloseHandle(handle);
                 return Err(error.into());
             }
-            Ok(Self { handle })
+            Ok(Self {
+                handle,
+                completion_handles: std::sync::Mutex::new(None),
+                termination_requested: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                cleanup_fault: std::sync::atomic::AtomicU8::new(0),
+            })
         }
     }
 
@@ -433,14 +694,99 @@ impl ProcessContainment {
     }
 
     pub(crate) fn terminate(&self, exit_code: u32) -> Result<()> {
+        let mut captured = self
+            .completion_handles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(handles) = captured.as_mut() {
+            if !self
+                .termination_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                *handles = self.capture_job_process_handles()?;
+            }
+        }
         let terminated = unsafe {
             windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, exit_code)
         };
         if terminated == 0 {
             Err(std::io::Error::last_os_error().into())
         } else {
+            self.termination_requested
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    fn capture_job_process_handles(&self) -> Result<Vec<std::os::windows::io::OwnedHandle>> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, ERROR_MORE_DATA};
+        use windows_sys::Win32::System::JobObjects::{
+            IsProcessInJob, JobObjectBasicProcessIdList, QueryInformationJobObject,
+            JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        let mut storage = vec![0_usize; 65];
+        loop {
+            let result = unsafe {
+                QueryInformationJobObject(
+                    self.handle,
+                    JobObjectBasicProcessIdList,
+                    storage.as_mut_ptr().cast(),
+                    std::mem::size_of_val(storage.as_slice()) as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if result != 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                return Err(error.into());
+            }
+            anyhow::ensure!(
+                storage.len() < 65537,
+                "runtime job exceeds bounded cleanup enumeration"
+            );
+            storage.resize((storage.len() * 2).min(65537), 0);
+        }
+        let list = unsafe { &*storage.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+        let count = list.NumberOfProcessIdsInList as usize;
+        anyhow::ensure!(
+            count < storage.len(),
+            "invalid runtime job membership count"
+        );
+        let ids = unsafe { std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count) };
+        let mut handles = Vec::with_capacity(count);
+        for &pid in ids {
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                    0,
+                    pid as u32,
+                )
+            };
+            if handle.is_null() {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                    continue;
+                }
+                return Err(error.into());
+            }
+            let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+            let mut member = 0;
+            anyhow::ensure!(
+                unsafe { IsProcessInJob(handle.as_raw_handle(), self.handle, &mut member) } != 0,
+                "cannot validate runtime cleanup process: {}",
+                std::io::Error::last_os_error()
+            );
+            if member != 0 {
+                handles.push(handle);
+            }
+        }
+        Ok(handles)
     }
 
     fn cpu_time_100ns(&self) -> Option<u64> {
@@ -506,5 +852,76 @@ impl Drop for ProcessContainment {
     fn drop(&mut self) {
         let closed = unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
         debug_assert_ne!(closed, 0, "failed to close Windows Job Object handle");
+    }
+}
+
+#[cfg(test)]
+impl ProcessContainment {
+    pub(crate) fn inject_cleanup_fault(&self, operation: u8) {
+        self.cleanup_fault
+            .store(operation, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn check_cleanup_fault(&self, operation: u8) -> Result<()> {
+        anyhow::ensure!(
+            self.cleanup_fault.load(std::sync::atomic::Ordering::SeqCst) != operation,
+            "injected containment cleanup failure"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod runtime_ownership_tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_runtime_preserves_real_child_exit() {
+        let executable = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("meridian-mcp");
+        super::initialize_runtime_owner_with_executable(&executable).unwrap();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 37"]);
+        let (mut child, containment) = super::spawn_runtime_process(&mut command).unwrap();
+        assert!(child.id().is_some());
+        assert_eq!(child.wait().await.unwrap().code(), Some(37));
+        containment.terminate(1).unwrap();
+    }
+    #[cfg(not(any(windows, unix)))]
+    #[test]
+    fn unsupported_owner_loss_supervision_refuses_before_spawn() {
+        let marker = std::env::temp_dir().join(format!(
+            "meridian-unsupported-runtime-{}",
+            std::process::id()
+        ));
+        let mut command = tokio::process::Command::new("touch");
+        command.arg(&marker);
+        assert!(super::initialize_runtime_owner().is_err());
+        assert!(super::spawn_runtime_process(&mut command).is_err());
+        assert!(!marker.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn library_host_must_explicitly_opt_into_runtime_ownership() {
+        if std::env::var_os("MERIDIAN_UNINITIALIZED_OWNER_FIXTURE").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "process::runtime_ownership_tests::library_host_must_explicitly_opt_into_runtime_ownership"])
+                .env("MERIDIAN_UNINITIALIZED_OWNER_FIXTURE", "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut command = tokio::process::Command::new("not-a-real-executable");
+        let error = super::spawn_runtime_process(&mut command).err().unwrap();
+        assert!(error.to_string().contains("initialize_runtime_owner"));
     }
 }

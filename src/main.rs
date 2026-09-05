@@ -7,8 +7,21 @@ fn default_rust_log_filter() -> String {
     std::env::var("RUST_LOG").unwrap_or_else(|_| "meridian_mcp=info".into())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    #[cfg(unix)]
+    {
+        if meridian_mcp::process::dispatch_runtime_guardian() {
+            return Ok(());
+        }
+        meridian_mcp::process::initialize_runtime_owner_with_executable(&std::env::current_exe()?)?;
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(default_rust_log_filter()))
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

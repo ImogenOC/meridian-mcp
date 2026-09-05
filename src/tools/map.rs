@@ -119,11 +119,12 @@ pub async fn render_map(
         .parent()
         .ok_or_else(|| anyhow!("Parsed environment has no parent directory"))?;
 
-    let map = dmm::Map::from_file(&path)?;
+    let map = dmm::Map::from_file(&execution.policy().read_path(&path)?)?;
     let (z_level, min, max) = validated_render_bounds(&args, map.dim_xyz())?;
     info!("Rendering map: {dmm_path} z-level {z_level} to {output_path:?}");
 
-    let mut icon_cache = IconCache::default();
+    let mut icon_cache =
+        IconCache::with_read_policy(std::sync::Arc::new(execution.policy().clone()));
     icon_cache.set_icons_root(environment_root);
     let (enabled, disabled) = pass_selection(&args)?;
     let render_passes =
@@ -145,6 +146,11 @@ pub async fn render_map(
         &icon_cache,
     )
     .map_err(|()| anyhow!("SpacemanDMM could not render the requested map"))?;
+    if icon_cache.read_denied() {
+        return Err(anyhow!(
+            "path_outside_workspace: map resource read denied by startup policy"
+        ));
+    }
     let non_transparent_pixels = image.data.iter().filter(|pixel| pixel.a > 0).count();
 
     let mut encoded = Vec::new();

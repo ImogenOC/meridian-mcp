@@ -31,6 +31,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Image handling for map screenshots
 image = "0.24"
 png = "0.17"
+fdeflate = "0.3.7"
 
 # Process handling for compiler
 which = "6.0"
@@ -54,6 +55,13 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = true
+
+[patch."https://github.com/SpaceManiac/SpacemanDMM"]
+dreammaker = { path = "vendor/spacemandmm/dreammaker" }
+dmm-tools = { path = "vendor/spacemandmm/dmm-tools" }

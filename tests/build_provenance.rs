@@ -67,7 +67,7 @@ impl ProvenanceFixture {
 
     fn success(&self, store: &BuildProvenanceStore) -> BuildRecord {
         BuildRecord {
-            schema: 1,
+            schema: 2,
             record_id: "record-success".to_owned(),
             artifact_key: store.artifact_key(&self.dmb).unwrap(),
             mcp_build: meridian_mcp::build_identity::current().clone(),
@@ -76,6 +76,12 @@ impl ProvenanceFixture {
             inputs: vec![
                 BuildInputIdentity::capture(&self.workspace, &self.input, "source").unwrap(),
             ],
+            verification: Some(meridian_mcp::build_provenance::BuildVerification {
+                method: "literal_dm_closure_v1".to_owned(),
+                arguments: vec!["fixture.dme".to_owned()],
+                working_directory: self.workspace.clone(),
+                absent_inputs: Vec::new(),
+            }),
             dmb: FileIdentity::capture(&self.dmb).unwrap(),
             rsc: Some(FileIdentity::capture(&self.rsc).unwrap()),
             fixture_manifest_sha256: None,
@@ -181,4 +187,48 @@ fn not_yet_compiled_artifact_is_unverified_instead_of_an_io_error() {
         .unwrap();
     assert_eq!(decision.status, ProvenanceStatus::Unverified);
     assert!(decision.allowed);
+}
+
+#[test]
+fn legacy_records_remain_readable_unverified_and_stale_checks_still_apply() {
+    let fixture = ProvenanceFixture::new("legacy");
+    let store = fixture.store("repo-a");
+    let mut record = fixture.success(&store);
+    record.schema = 1;
+    record.verification = None;
+    store.record_success(&record).unwrap();
+    let decision = store.evaluate_launch(&fixture.dmb, true).unwrap();
+    assert_eq!(decision.status, ProvenanceStatus::Unverified);
+    assert!(!decision.allowed);
+    std::fs::write(&fixture.input, "source-v2").unwrap();
+    assert_eq!(
+        store.evaluate_launch(&fixture.dmb, false).unwrap().status,
+        ProvenanceStatus::Stale
+    );
+}
+
+#[test]
+fn appearing_configuration_input_invalidates_a_verified_record() {
+    let fixture = ProvenanceFixture::new("config-appeared");
+    let store = fixture.store("repo-a");
+    let mut record = fixture.success(&store);
+    let optional = fixture.workspace.join("SpacemanDMM.toml");
+    record
+        .verification
+        .as_mut()
+        .unwrap()
+        .absent_inputs
+        .push(optional.clone());
+    store.record_success(&record).unwrap();
+    assert_eq!(
+        store.evaluate_launch(&fixture.dmb, true).unwrap().status,
+        ProvenanceStatus::Verified
+    );
+    std::fs::write(optional, "[environment]\n").unwrap();
+    let decision = store.evaluate_launch(&fixture.dmb, false).unwrap();
+    assert_eq!(decision.status, ProvenanceStatus::Stale);
+    assert!(decision
+        .reasons
+        .iter()
+        .any(|reason| reason.code == "input_appeared"));
 }

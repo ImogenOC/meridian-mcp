@@ -1,0 +1,32 @@
+# SpacemanDMM local read-policy patch
+
+Baseline: SpaceManiac/SpacemanDMM revision `351ddc0ffb2439876d4565ce5130bb6b027ee605`.
+Local delta identity: `meridian-read-policy-v2`.
+
+Only the `dreammaker` and `dmm-tools` crate directories are vendored. The upstream LICENSE is retained verbatim beside them. Existing upstream author and source notices remain intact. Adjacent crates remain exact-revision Git dependencies; no registry versions or upstream revision were upgraded. Package manifests expand the inherited edition 2024 and Rust 1.95 metadata and replace sibling paths with exact-revision dependencies. The root Cargo patch unifies dreamchecker's dreammaker types with the local crate.
+
+`local-delta.patch` is the complete text delta from the baseline crate directories, with LF line endings. `local-delta.sha256` records its SHA-256 (UTF-8, LF). Parse and server-status responses expose the delta name and hash separately from the upstream revision. Independently built dmdoc/debugger helpers remain upstream builds and do not inherit these in-process loader hooks.
+
+`source-files.json` binds that delta identity to the complete shipped crate inventory and LICENSE using SHA-256 over UTF-8 text with LF normalization. The capability audit rejects changed, missing, or additional files, while accepting LF and CRLF checkouts. After a reviewed vendor change, regenerate both the delta and source inventory; a patch-document checksum alone is not source verification.
+
+## Boundary
+
+`dreammaker::ReadPolicy` delegates canonical path resolution to a host-owned immutable policy. Context checks the initial lexer input, every preprocessor DM include, and configuration loads immediately before opening the resolved path. A separate denial flag survives disabled diagnostics and makes Meridian discard the whole candidate parse. Search indexing reuses the same checked resolver. Parsed contexts retain the startup policy for subsequent source inspection.
+
+`dmm-tools::IconCache` accepts an owned policy when constructed and checks each icon load before decoding. Its independent denial flag is checked before Meridian encodes or writes the rendered artifact. DMI analysis checks every discovered file before loading, and directory traversal checks each directory before listing it.
+
+These are canonicalization-before-open checks, matching the project's PathPolicy contract. They are not OS-handle-based protection against an adversary concurrently replacing directories between canonicalization and open.
+
+## Review and renewal
+
+Compare the vendored files against the exact baseline and review `local-delta.patch`; do not edit Cargo's cache. Keep upstream helper/CI pins unchanged for this patch. Re-run containment, snapshot, map, DMI, stdio, and the repository's full Rust qualification before promoting compatibility. Any upstream revision change requires the normal dependency-update matrix and a fresh delta/hash.
+
+Changed baseline files:
+
+- `dreammaker/Cargo.toml`
+- `dreammaker/src/error.rs`
+- `dreammaker/src/lexer.rs`
+- `dreammaker/src/lib.rs`
+- `dreammaker/src/preprocessor.rs`
+- `dmm-tools/Cargo.toml`
+- `dmm-tools/src/icon_cache.rs`

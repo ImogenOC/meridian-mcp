@@ -15,9 +15,18 @@ use crate::process_environment::minimal_runtime_environment;
 
 const DEFAULT_OUTPUT_WAIT_TIMEOUT_MS: u64 = 30_000;
 const MAX_OUTPUT_WAIT_TIMEOUT_MS: u64 = 300_000;
-const OUTPUT_WAIT_POLL_INTERVAL_MS: u64 = 100;
 const OUTPUT_READ_CHUNK_BYTES: usize = 8 * 1024;
 const LOG_FILE_POLL_INTERVAL_MS: u64 = 50;
+
+struct StartupOwnership(Option<Arc<crate::process::ProcessContainment>>);
+
+impl Drop for StartupOwnership {
+    fn drop(&mut self) {
+        if let Some(containment) = self.0.take() {
+            let _ = containment.terminate(1);
+        }
+    }
+}
 
 use crate::mcp::ToolResult;
 use crate::state::{
@@ -109,13 +118,13 @@ pub async fn run(
     state: &ServerState,
     args: Value,
 ) -> Result<ToolResult> {
-    let _lifecycle = state.lifecycle().await;
+    let lifecycle = state.lifecycle().await;
     if state.debugger().await.is_some() {
         return Err(anyhow!(
             "a debugger session is active; stop it before launching DreamDaemon"
         ));
     }
-    run_internal(context, state, args, None).await
+    run_internal(context, state, args, None, Some(lifecycle)).await
 }
 
 pub(crate) async fn run_profiled_with_lifecycle(
@@ -129,27 +138,30 @@ pub(crate) async fn run_profiled_with_lifecycle(
             "a debugger session is active; stop it before launching Tracy"
         ));
     }
-    run_internal(context, state, args, Some(profiler_port)).await
+    run_internal(context, state, args, Some(profiler_port), None).await
 }
 
 async fn run_internal(
     context: &super::ToolExecutionContext,
-    state: &ServerState,
+    server_state: &ServerState,
     args: Value,
     profiler_port: Option<u16>,
+    lifecycle: Option<tokio::sync::MutexGuard<'_, ()>>,
 ) -> Result<ToolResult> {
     let active_snapshot = if profiler_port.is_none() {
-        state.active_snapshot().await
+        server_state.active_snapshot().await
     } else {
         None
     };
-    let mut state = state.runtime().await;
+    let mut state = server_state.runtime().await;
     // Check if already running
     if state.is_game_running() {
         return Ok(ToolResult::error(
             "A game instance is already running. Use dm_stop first.",
         ));
     }
+
+    finalize_standard_integrity(&mut state, "natural_exit").await?;
 
     let dmb_path = args
         .get("dmb_path")
@@ -268,13 +280,15 @@ async fn run_internal(
             .env("UTRACY_BIND_ADDRESS", "127.0.0.1")
             .env("UTRACY_BIND_PORT", profiler_port.to_string());
     }
-    let mut child = match command.spawn() {
+    let (mut child, containment) = match crate::process::spawn_runtime_process(&mut command) {
         Ok(child) => child,
         Err(error) => {
             let _ = finalize_standard_integrity(&mut state, "spawn_failed").await;
-            return Err(error.into());
+            return Err(error);
         }
     };
+    let mut startup_ownership = StartupOwnership(Some(Arc::clone(&containment)));
+    state.containment = Some(containment);
 
     let pid = child.id();
 
@@ -316,10 +330,21 @@ async fn run_internal(
     ));
     state.add_runtime_output_task(task);
 
+    server_state.observe_runtime(&mut state);
+    let observation = Arc::clone(&state.output_log);
+    drop(state);
+    drop(lifecycle);
+
     // Give the child process a short window to fail before returning control to the caller.
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     // Check if it's actually running
+    let mut state = server_state.runtime().await;
+    if !Arc::ptr_eq(&observation, &state.output_log) {
+        return Ok(ToolResult::error(
+            "Runtime session was replaced during launch.",
+        ));
+    }
     if !state.is_game_running() {
         let integrity = finalize_standard_integrity(&mut state, "launch_failed").await?;
         return Ok(ToolResult::error(
@@ -344,6 +369,7 @@ async fn run_internal(
         "launch_provenance": launch_provenance,
         "message": format!("DreamDaemon started on port {}", port)
     });
+    drop(state);
 
     if let Some(pattern) = args.get("wait_for").and_then(|value| value.as_str()) {
         let use_regex = args
@@ -351,23 +377,33 @@ async fn run_internal(
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         let wait_result =
-            wait_for_output_value(&mut state, pattern, use_regex, startup_timeout_ms).await?;
+            wait_for_output_value(&observation, pattern, use_regex, startup_timeout_ms).await?;
         result["readiness"] = wait_result;
         if !readiness_succeeded(&result["readiness"]) {
+            let _lifecycle = server_state.lifecycle().await;
+            let mut state = server_state.runtime().await;
             result["success"] = json!(false);
-            result["process_stopped"] = json!(state.stop_game_process().await.is_ok());
-            result["integrity"] =
-                json!(finalize_standard_integrity(&mut state, "launch_failed").await?);
+            if Arc::ptr_eq(&observation, &state.output_log) {
+                state.stop_game_process().await?;
+                result["process_stopped"] = json!(true);
+                result["integrity"] =
+                    json!(finalize_standard_integrity(&mut state, "launch_failed").await?);
+            }
             return Ok(ToolResult::error(result.to_string()));
         }
     }
 
+    let mut state = server_state.runtime().await;
+    if !Arc::ptr_eq(&observation, &state.output_log) || !state.is_game_running() {
+        return Ok(ToolResult::error("Runtime session ended during launch."));
+    }
     if let Some(session) = &state.integrity {
         let summary = session.lock().await.observe_now("launch_ready").await?;
         state.integrity_summary = Some(summary.clone());
         result["integrity"] = json!(summary);
     }
 
+    startup_ownership.0 = None;
     Ok(ToolResult::text(result.to_string()))
 }
 
@@ -375,6 +411,7 @@ async fn finalize_standard_integrity(
     state: &mut RuntimeState,
     action: &'static str,
 ) -> Result<Option<crate::runtime_integrity::RuntimeIntegritySummary>> {
+    state.finish_runtime_cleanup().await?;
     if let Some(summary) = &state.integrity_summary {
         if summary.status != crate::runtime_integrity::RuntimeIntegrityStatus::Active {
             return Ok(Some(summary.clone()));
@@ -502,37 +539,71 @@ fn push_captured_output_line(
 }
 
 async fn wait_for_output_value(
-    state: &mut RuntimeState,
+    output_log: &OutputLog,
     pattern: &str,
     use_regex: bool,
     timeout_ms: u64,
 ) -> Result<Value> {
     let timeout_ms = timeout_ms.min(MAX_OUTPUT_WAIT_TIMEOUT_MS);
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let regex = use_regex
+        .then(|| regex::Regex::new(pattern))
+        .transpose()
+        .map_err(|error| anyhow!("Invalid output regex: {error}"))?;
+    let mut changes = output_log
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .changes
+        .subscribe();
 
     loop {
-        let matched = state
-            .matches_output(pattern, use_regex)
-            .map_err(|error| anyhow!("Invalid output regex: {error}"))?;
+        changes.borrow_and_update();
+        let (output, running, drained, exit_code) = {
+            let buffer = output_log
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                buffer
+                    .entries
+                    .iter()
+                    .map(|entry| entry.text.clone())
+                    .collect::<Vec<_>>(),
+                buffer.running,
+                buffer.drained,
+                buffer.last_exit_code,
+            )
+        };
+        let text = output.join("\n");
+        let matched = regex
+            .as_ref()
+            .map_or_else(|| text.contains(pattern), |regex| regex.is_match(&text));
+        let recent_output = output
+            .into_iter()
+            .rev()
+            .take(50)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
         if matched {
             return Ok(json!({
                 "matched": true,
                 "pattern": pattern,
                 "regex": use_regex,
                 "timed_out": false,
-                "recent_output": state.recent_output(50)
+                "recent_output": recent_output
             }));
         }
 
-        if !state.is_game_running() {
+        if !running && drained {
             return Ok(json!({
                 "matched": false,
                 "pattern": pattern,
                 "regex": use_regex,
                 "timed_out": false,
                 "process_exited": true,
-                "last_exit_code": state.last_exit_code,
-                "recent_output": state.recent_output(50)
+                "last_exit_code": exit_code,
+                "recent_output": recent_output
             }));
         }
 
@@ -543,11 +614,14 @@ async fn wait_for_output_value(
                 "regex": use_regex,
                 "timed_out": true,
                 "process_exited": false,
-                "recent_output": state.recent_output(50)
+                "recent_output": recent_output
             }));
         }
 
-        tokio::time::sleep(Duration::from_millis(OUTPUT_WAIT_POLL_INTERVAL_MS)).await;
+        tokio::select! {
+            _ = changes.changed() => {},
+            () = tokio::time::sleep_until(deadline) => {},
+        }
     }
 }
 
@@ -557,12 +631,15 @@ pub(crate) async fn wait_for_literal_output(
     timeout_ms: u64,
 ) -> Result<Value> {
     let mut runtime = state.runtime().await;
-    wait_for_output_value(&mut runtime, pattern, false, timeout_ms).await
+    state.observe_runtime(&mut runtime);
+    let output = Arc::clone(&runtime.output_log);
+    drop(runtime);
+    wait_for_output_value(&output, pattern, false, timeout_ms).await
 }
 
 /// Wait until DreamDaemon output contains a literal or regular-expression marker.
-pub async fn wait_for_output(state: &ServerState, args: Value) -> Result<ToolResult> {
-    let mut state = state.runtime().await;
+pub async fn wait_for_output(server_state: &ServerState, args: Value) -> Result<ToolResult> {
+    let mut state = server_state.runtime().await;
     let running = state.is_game_running();
     let has_runtime_diagnostics =
         state.last_exit_code.is_some() || !state.recent_output(1).is_empty();
@@ -590,7 +667,29 @@ pub async fn wait_for_output(state: &ServerState, args: Value) -> Result<ToolRes
         .and_then(|value| value.as_u64())
         .unwrap_or(DEFAULT_OUTPUT_WAIT_TIMEOUT_MS);
 
-    let result = wait_for_output_value(&mut state, pattern, use_regex, timeout_ms).await?;
+    server_state.observe_runtime(&mut state);
+    let output = Arc::clone(&state.output_log);
+    let provenance = state.launch_provenance.clone();
+    drop(state);
+    let result = wait_for_output_value(&output, pattern, use_regex, timeout_ms).await?;
+    let mut state = server_state.runtime().await;
+    if !Arc::ptr_eq(&output, &state.output_log) {
+        let mut result = result;
+        result["launch_provenance"] = json!(provenance);
+        result["recent_output_entries"] = json!(output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .iter()
+            .rev()
+            .take(50)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>());
+        return Ok(ToolResult::text(result.to_string()));
+    }
     let integrity = if state.is_game_running() {
         if let Some(session) = &state.integrity {
             Some(session.lock().await.observe_now("wait_for_output").await?)
@@ -737,6 +836,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exited_session_drains_final_output_before_reporting_missing_marker() {
+        let state = ServerState::new();
+        {
+            let mut runtime = state.runtime().await;
+            runtime.last_exit_code = Some(7);
+            let output = Arc::clone(&runtime.output_log);
+            output.lock().unwrap().drained = false;
+            runtime.add_runtime_output_task(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                capture_output_stream(&b"FINAL_READY"[..], output).await;
+            }));
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_output(
+                &state,
+                json!({"pattern":"FINAL_READY", "timeout_ms":300000}),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let ToolContent::Text { text } = &result.content[0];
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["matched"], true);
+        assert_eq!(result["recent_output"], json!(["FINAL_READY"]));
+    }
+
+    #[tokio::test]
     async fn output_capture_emits_complete_lines_and_final_unterminated_line() {
         let log = crate::state::OutputLog::default();
         let input = b"ready\npartial without newline";
@@ -860,12 +988,13 @@ pub async fn stop(state: &ServerState, _args: Value) -> Result<ToolResult> {
 async fn stop_with_lifecycle(state: &ServerState) -> Result<ToolResult> {
     let mut state = state.runtime().await;
     let was_running = state.is_game_running();
-    if !was_running && state.integrity.is_none() {
+    if !was_running && state.integrity.is_none() && state.containment.is_none() {
         return Ok(ToolResult::error("No game instance is currently running."));
     }
 
     let process_stopped = if was_running {
-        state.stop_game_process().await.is_ok()
+        state.stop_game_process().await?;
+        true
     } else {
         false
     };

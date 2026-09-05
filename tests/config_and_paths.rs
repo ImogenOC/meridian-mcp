@@ -164,6 +164,19 @@ fn traversal_and_unlisted_executables_are_rejected() {
 }
 
 #[test]
+fn compiler_allowlist_exposes_only_canonical_startup_configuration() {
+    let root = fixture();
+    let compiler = std::env::current_exe().unwrap();
+    let policy = PathPolicy::new(vec![root.clone()], vec![compiler.clone()]).unwrap();
+
+    assert_eq!(
+        policy.compiler_allowlist(),
+        &[compiler.canonicalize().unwrap()]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn path_failures_report_the_effective_immutable_policy() {
     let first = fixture();
     let second = fixture();
@@ -203,5 +216,42 @@ fn outputs_require_containment_and_explicit_overwrite() {
         policy.output_path(&output, true).unwrap(),
         output.canonicalize().unwrap()
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn parser_config_loader_rejects_junction_or_symlink_escape() {
+    let root = fixture();
+    let allowed = root.join("allowed");
+    let external = root.join("external");
+    std::fs::create_dir(&allowed).unwrap();
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(
+        external.join("SpacemanDMM.toml"),
+        "[display]\nerror_level = \"off\"\n",
+    )
+    .unwrap();
+    let link = allowed.join("linked");
+    #[cfg(windows)]
+    assert!(std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&external)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&external, &link).unwrap();
+    let mut context = dreammaker::Context::default();
+    context.set_read_policy(std::sync::Arc::new(
+        PathPolicy::new(vec![allowed], vec![]).unwrap(),
+    ));
+    context.force_config(&link.join("SpacemanDMM.toml"));
+    assert!(context.read_denied());
+    #[cfg(windows)]
+    std::fs::remove_dir(&link).unwrap();
+    #[cfg(unix)]
+    std::fs::remove_file(&link).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }

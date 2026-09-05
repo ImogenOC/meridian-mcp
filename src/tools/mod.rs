@@ -10,7 +10,7 @@ mod map;
 mod native_evidence;
 mod parse;
 pub mod rift;
-mod runtime;
+pub(crate) mod runtime;
 mod search;
 mod server_status;
 mod tracy;
@@ -207,7 +207,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1800000,
-                    "description": "Abandon the parse after this many milliseconds (default 600000)."
+                    "description": "Total request budget including admission, blocking scheduling, reuse validation, parsing, and installation (default 600000). Unfinished workers retain exclusive admission after timeout or cancellation."
                 }
             },
             "required": ["dme_path"],
@@ -1059,7 +1059,9 @@ pub async fn call_tool(
     match name {
         // Parsing tools
         "dm_server_status" => server_status::status(context, state).await,
-        "dm_parse_environment" => parse::parse_environment(state, args).await,
+        "dm_parse_environment" => {
+            parse::parse_environment_with_policy(state, args, context.policy()).await
+        }
         "dm_check_fixture_sync" => fixture::check_sync(context, state, args).await,
         "dm_native_evidence_summary" => native_evidence::summary(context, args).await,
         "dm_native_evidence_compare" => native_evidence::compare(context, args).await,
@@ -1077,10 +1079,10 @@ pub async fn call_tool(
         "dm_document_symbols" => language::document_symbols(state, args).await,
         "dm_find_references" => language::find_references(state, args).await,
         "dm_find_implementations" => language::find_implementations(state, args).await,
-        "dm_dmi_info" => dmi::info(state, args).await,
-        "dm_compare_dmi_states" => dmi::compare(state, args).await,
-        "dm_find_dmi_duplicates" => dmi::find_duplicates(state, args).await,
-        "dm_audit_icons" => dmi::audit_icons(state, args).await,
+        "dm_dmi_info" => dmi::info(context, state, args).await,
+        "dm_compare_dmi_states" => dmi::compare(context, state, args).await,
+        "dm_find_dmi_duplicates" => dmi::find_duplicates(context, state, args).await,
+        "dm_audit_icons" => dmi::audit_icons(context, state, args).await,
         "dm_extract_dmi" => dmi::extract(context, state, args).await,
 
         // Compile tool

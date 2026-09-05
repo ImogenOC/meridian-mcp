@@ -8,6 +8,183 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+async fn owned_collector(
+    mode: &str,
+) -> (
+    std::path::PathBuf,
+    std::sync::Arc<meridian_mcp::tracy_collector::TracyCollector>,
+) {
+    use meridian_mcp::tracy_collector::{TracyCollector, TracyCollectorSpec};
+    let root = std::env::temp_dir().join(format!(
+        "meridian-collector-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let helper = root.join(format!("collector{}", std::env::consts::EXE_SUFFIX));
+    assert!(std::process::Command::new("rustup")
+        .args([
+            "run",
+            "1.95.0",
+            "rustc",
+            "--edition=2021",
+            "tests/fixtures/tracy/blocked_collector.rs",
+            "-o"
+        ])
+        .arg(&helper)
+        .status()
+        .unwrap()
+        .success());
+    let collector = TracyCollector::spawn(TracyCollectorSpec {
+        helper,
+        working_directory: root.clone(),
+        environment: vec![("COLLECTOR_MODE".into(), mode.into())],
+        request_timeout: std::time::Duration::from_secs(5),
+    })
+    .await
+    .unwrap();
+    (root, std::sync::Arc::new(collector))
+}
+
+#[tokio::test]
+async fn collector_stop_closes_stdin_after_session_stop_response() {
+    let (root, collector) = owned_collector("respond").await;
+    collector
+        .stop(std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(!collector.is_running().await);
+    assert_eq!(collector.exit_code().await, Some(37));
+    drop(collector);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_stop_still_terminates_the_owned_child() {
+    use std::time::Duration;
+    let (root, collector) = owned_collector("blocked").await;
+    let stopping = tokio::spawn({
+        let collector = collector.clone();
+        async move { collector.stop(Duration::from_millis(100)).await }
+    });
+    tokio::task::yield_now().await;
+    stopping.abort();
+    let _ = stopping.await;
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while collector.is_running().await {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("armed stop survives caller cancellation");
+    drop(collector);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn collector_stderr_is_utf8_safe_and_keeps_a_bounded_tail() {
+    use std::time::Duration;
+    let (root, collector) = owned_collector("stderr").await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let tail = collector.stderr_tail().await;
+            assert!(tail.len() <= 64);
+            assert!(tail
+                .iter()
+                .all(|line| line.len() <= 4096 + "... [truncated]".len()));
+            if tail.last().is_some_and(|line| line == "line69") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("stderr reader survived split UTF-8 and oversized line");
+    let _ = collector.stop(Duration::from_millis(100)).await;
+    assert!(!collector.is_running().await);
+    drop(collector);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn collector_stop_terminates_owned_child_with_blocked_protocol_writer() {
+    use meridian_mcp::tracy_collector::{TracyCollector, TracyCollectorSpec};
+    use std::time::Duration;
+    let root = std::env::temp_dir().join(format!("meridian-collector-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let helper = root.join(format!("blocked-collector{}", std::env::consts::EXE_SUFFIX));
+    assert!(std::process::Command::new("rustup")
+        .args([
+            "run",
+            "1.95.0",
+            "rustc",
+            "--edition=2021",
+            "tests/fixtures/tracy/blocked_collector.rs",
+            "-o"
+        ])
+        .arg(&helper)
+        .status()
+        .unwrap()
+        .success());
+    let collector = std::sync::Arc::new(
+        TracyCollector::spawn(TracyCollectorSpec {
+            helper,
+            working_directory: root.clone(),
+            environment: vec![],
+            request_timeout: Duration::from_secs(30),
+        })
+        .await
+        .unwrap(),
+    );
+    let mut captures = Vec::new();
+    for _ in 0..8 {
+        let collector = collector.clone();
+        captures.push(tokio::spawn(async move {
+            collector
+                .capture_window(
+                    1,
+                    64,
+                    std::path::Path::new(&"x".repeat(32768)),
+                    "fixture",
+                    1,
+                )
+                .await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        collector.stop(Duration::from_millis(50)),
+    )
+    .await;
+    for capture in captures {
+        capture.abort();
+        let _ = capture.await;
+    }
+    assert!(
+        result.is_ok(),
+        "stop must not await the blocked protocol writer"
+    );
+    if !collector.cleanup_confirmed() {
+        assert!(
+            result.as_ref().unwrap().is_err(),
+            "unconfirmed cleanup cannot report success"
+        );
+    }
+    let exited = tokio::time::timeout(Duration::from_millis(500), async {
+        while collector.is_running().await {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    drop(collector);
+    assert!(
+        exited.is_ok(),
+        "owned child must exit after the independent kill request"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn fixture() -> (std::path::PathBuf, ToolExecutionContext) {
     let root = std::env::temp_dir().join(format!(
         "meridian-tracy-tools-{}-{}",

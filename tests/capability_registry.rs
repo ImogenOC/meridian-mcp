@@ -6,6 +6,118 @@ use meridian_mcp::capabilities::{
 use std::collections::HashSet;
 
 #[test]
+fn vendor_audit_rejects_changed_missing_and_unrecorded_sources() {
+    use std::path::Path;
+    use std::process::Command;
+
+    fn copy_tree(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    struct OwnedFixture(std::path::PathBuf);
+    impl Drop for OwnedFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let fixture = OwnedFixture(std::env::temp_dir().join(format!(
+        "meridian-vendor-audit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    copy_tree(&root.join("vendor"), &fixture.0.join("vendor"));
+    std::fs::create_dir_all(fixture.0.join("scripts")).unwrap();
+    let script = fixture.0.join("scripts/audit-spacemandmm-capabilities.ps1");
+    std::fs::copy(
+        root.join("scripts/audit-spacemandmm-capabilities.ps1"),
+        &script,
+    )
+    .unwrap();
+    std::fs::copy(
+        root.join("spacemandmm-capabilities.json"),
+        fixture.0.join("spacemandmm-capabilities.json"),
+    )
+    .unwrap();
+    let audit = || {
+        Command::new("pwsh")
+            .args(["-NoLogo", "-NoProfile", "-File"])
+            .arg(&script)
+            .arg("-Check")
+            .output()
+            .expect("PowerShell must launch")
+    };
+    let baseline = audit();
+    assert!(
+        baseline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+
+    let source = fixture.0.join("vendor/spacemandmm/dreammaker/src/error.rs");
+    let original = std::fs::read_to_string(&source)
+        .unwrap()
+        .replace("\r\n", "\n");
+    std::fs::write(&source, original.replace('\n', "\r\n")).unwrap();
+    assert!(
+        audit().status.success(),
+        "CRLF checkout must retain source identity"
+    );
+
+    std::fs::write(&source, format!("{original}\n// unrecorded change\n")).unwrap();
+    assert!(
+        !audit().status.success(),
+        "changed shipped source was accepted"
+    );
+    std::fs::write(&source, &original).unwrap();
+    let extra = source.with_file_name("unrecorded.rs");
+    std::fs::write(&extra, "// unrecorded source\n").unwrap();
+    assert!(!audit().status.success(), "unrecorded source was accepted");
+    std::fs::remove_file(extra).unwrap();
+    #[cfg(windows)]
+    {
+        let hidden = fixture.0.join("vendor/spacemandmm/dmm-tools/build.rs");
+        std::fs::write(&hidden, "fn main() {}\n").unwrap();
+        let hide_script = fixture.0.join("hide-source.ps1");
+        std::fs::write(
+            &hide_script,
+            "$item = Get-Item -LiteralPath $args[0]\n$item.Attributes = $item.Attributes -bor [IO.FileAttributes]::Hidden\n",
+        )
+        .unwrap();
+        assert!(Command::new("pwsh")
+            .args(["-NoLogo", "-NoProfile", "-File"])
+            .arg(hide_script)
+            .arg(&hidden)
+            .status()
+            .unwrap()
+            .success());
+        assert!(
+            !audit().status.success(),
+            "hidden Cargo build script was accepted"
+        );
+        std::fs::remove_file(hidden).unwrap();
+    }
+    std::fs::remove_file(source).unwrap();
+    assert!(
+        !audit().status.success(),
+        "missing shipped source was accepted"
+    );
+}
+
+#[test]
 fn checked_in_registry_is_complete_and_consistent() {
     let registry = capability_registry().expect("checked-in capability registry should parse");
 

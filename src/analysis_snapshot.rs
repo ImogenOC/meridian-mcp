@@ -48,6 +48,7 @@ pub struct MacroDefinitionRecord {
 
 #[derive(Clone, Debug)]
 pub struct AnalysisContext {
+    pub path_policy: crate::PathPolicy,
     pub config: Config,
     file_paths: HashMap<FileId, PathBuf>,
 }
@@ -60,7 +61,7 @@ impl AnalysisContext {
             .unwrap_or_else(|| Path::new("(unknown)"))
     }
 
-    fn extract(context: &Context, environment_path: &Path) -> Self {
+    fn extract(context: &Context, environment_path: &Path, path_policy: crate::PathPolicy) -> Self {
         let project_root = environment_path.parent().unwrap_or_else(|| Path::new("."));
         let mut file_paths = HashMap::new();
         context.file_list().for_each(|reported| {
@@ -76,6 +77,7 @@ impl AnalysisContext {
         });
 
         Self {
+            path_policy,
             config: context.config().clone(),
             file_paths,
         }
@@ -115,9 +117,10 @@ impl AnalysisBuild {
         diagnostics: Vec<DiagnosticRecord>,
         project_profile: Option<ProjectProfile>,
         parse_started_at: SystemTime,
+        path_policy: crate::PathPolicy,
     ) -> (Self, AnalysisBuildTimings) {
         let indexes_started = Instant::now();
-        let extracted_context = AnalysisContext::extract(context, &environment_path);
+        let extracted_context = AnalysisContext::extract(context, &environment_path, path_policy);
         let project_root = environment_path.parent().unwrap_or_else(|| Path::new("."));
         let macro_definitions: Vec<MacroDefinitionRecord> = defines
             .iter()
@@ -186,7 +189,15 @@ impl AnalysisBuild {
         );
         let analysis_indexes = indexes_started.elapsed().as_millis() as u64;
         let fingerprint_started = Instant::now();
-        let source_fingerprint = SourceFingerprint::capture(&source_inputs, parse_started_at);
+        let config_candidate = project_profile
+            .as_ref()
+            .map(ProjectProfile::spaceman_config_candidate)
+            .unwrap_or_else(|| project_root.join("SpacemanDMM.toml"));
+        let source_fingerprint = SourceFingerprint::capture_with_discovery(
+            &source_inputs,
+            &[config_candidate],
+            parse_started_at,
+        );
         let fingerprint = fingerprint_started.elapsed().as_millis() as u64;
         (
             Self {
@@ -287,20 +298,19 @@ fn build_source_inputs(
     environment_path: &Path,
     profile: Option<&ProjectProfile>,
 ) -> Vec<PathBuf> {
-    let project_root = environment_path.parent().unwrap_or_else(|| Path::new("."));
-    let project_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_owned());
     let mut inputs = context.file_paths.values().cloned().collect::<Vec<_>>();
     inputs.push(environment_path.to_owned());
     if let Some(config) = profile.and_then(ProjectProfile::spaceman_config) {
         inputs.push(config.to_owned());
     }
-    inputs = inputs
-        .into_iter()
+    // Actual parser opens were authorized by the context's read policy. Keep
+    // requested paths, including failed inputs and aliases, so disappearance or
+    // alias retargeting cannot silently remove a dependency from reuse checks.
+    let resolved = inputs
+        .iter()
         .filter_map(|path| path.canonicalize().ok())
-        .filter(|path| path.is_file() && path.starts_with(&project_root))
-        .collect();
+        .collect::<Vec<_>>();
+    inputs.extend(resolved);
     inputs.sort();
     inputs.dedup();
     inputs
@@ -387,11 +397,21 @@ fn static_icon_resolution(
     IconReferenceResolution::Static { dmi_path, state }
 }
 
-pub(crate) fn configured_diagnostic_rules(environment_path: &Path) -> HashSet<String> {
+pub(crate) fn configured_diagnostic_rules(
+    environment_path: &Path,
+    context: &Context,
+) -> HashSet<String> {
     let Some(root) = environment_path.parent() else {
         return HashSet::new();
     };
-    let Ok(source) = std::fs::read_to_string(root.join("SpacemanDMM.toml")) else {
+    let config_path = root.join("SpacemanDMM.toml");
+    if !config_path.exists() {
+        return HashSet::new();
+    }
+    let Ok(config_path) = context.resolve_read_path(&config_path) else {
+        return HashSet::new();
+    };
+    let Ok(source) = std::fs::read_to_string(config_path) else {
         return HashSet::new();
     };
     let Ok(value) = source.parse::<toml::Value>() else {

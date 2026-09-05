@@ -15,7 +15,26 @@ pub struct ToolDefinition {
 }
 
 pub async fn run_server(config: ServerConfig) -> Result<()> {
-    let service = MeridianServer::new(config)?.serve(stdio()).await?;
-    service.waiting().await?;
+    #[cfg(windows)]
+    crate::process::initialize_runtime_owner()?;
+    run_transport(MeridianServer::new(config)?, stdio()).await
+}
+
+pub(crate) async fn run_transport<R, W>(server: MeridianServer, transport: (R, W)) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let outcome = match server.clone().serve(transport).await {
+        Ok(service) => service
+            .waiting()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from),
+        Err(error) => Err(error.into()),
+    };
+    let shutdown = server.shutdown().await;
+    outcome?;
+    shutdown?;
     Ok(())
 }

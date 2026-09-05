@@ -1315,8 +1315,18 @@ async fn stop_with_lifecycle(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    if let Some(collector) = state.tracy_capture().await.collector.take() {
-        let _ = collector.stop(Duration::from_secs(10)).await;
+    let collector = state.tracy_capture().await.collector.clone();
+    let mut collector_cleanup_error = None;
+    if let Some(collector) = collector {
+        let stopped = collector.stop(Duration::from_secs(10)).await;
+        if collector.cleanup_confirmed() {
+            state.tracy_capture().await.collector = None;
+        } else {
+            collector_cleanup_error = Some(anyhow!(
+                "collector cleanup remains unconfirmed: {:?}",
+                stopped.err()
+            ));
+        }
     }
     if let Some(client) = state.tracy_capture().await.wake_client.take() {
         stop_wake_client(client).await;
@@ -1327,7 +1337,13 @@ async fn stop_with_lifecycle(
     if runtime_was_running && runtime_was_profiled {
         runtime.stop_game_process().await?;
     }
+    if !runtime_was_running {
+        runtime.finish_runtime_cleanup().await?;
+    }
     drop(runtime);
+    if let Some(error) = collector_cleanup_error {
+        return Err(error);
+    }
     let (
         memory_series,
         memory_task,
@@ -2280,6 +2296,50 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
         assert_eq!(journal["status"], "finalized");
         assert!(state.tracy_capture().await.integrity_journal.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_collector_cleanup_preserves_integrity_journal_for_retry() {
+        let (root, collector) = crate::tracy_collector::tests::owned_fixture().await;
+        let experiment_directory = root.join("experiment");
+        std::fs::create_dir_all(&experiment_directory).unwrap();
+        let context = ToolExecutionContext::with_features(
+            CapabilityMode::Development,
+            PathPolicy::new(vec![root.clone()], vec![]).unwrap(),
+            RiftBuildAccess::Disabled,
+            None,
+            None,
+            None,
+        );
+        let baseline = crate::workspace_integrity::IntegrityBaseline::capture(&root).unwrap();
+        let journal = crate::workspace_integrity::IntegrityJournal::create(
+            context.policy(),
+            &experiment_directory,
+            &baseline,
+        )
+        .unwrap();
+        let state = crate::state::ServerState::new();
+        {
+            let mut capture = state.tracy_capture().await;
+            capture.integrity = Some(baseline);
+            capture
+                .integrity_owned_paths
+                .push(journal.path().to_owned());
+            capture.integrity_journal = Some(journal);
+            capture.collector = Some(collector.clone());
+        }
+        collector.inject_cleanup_fault(2);
+        let result = stop(&context, &state).await;
+        let retained = state.tracy_capture().await.integrity_journal.is_some();
+        let retained_collector = state.tracy_capture().await.collector.is_some();
+        collector.inject_cleanup_fault(0);
+        let _ = collector.stop(std::time::Duration::from_millis(100)).await;
+        assert!(result.is_err());
+        assert!(retained && retained_collector);
+        stop(&context, &state).await.unwrap();
+        assert!(state.tracy_capture().await.integrity_journal.is_none());
+        drop(collector);
         std::fs::remove_dir_all(root).unwrap();
     }
 

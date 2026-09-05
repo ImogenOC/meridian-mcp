@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -11,7 +10,7 @@ use tracing::info;
 use super::ToolExecutionContext;
 use crate::artifact::{ArtifactSnapshot, FileIdentity};
 use crate::build_provenance::{
-    BuildAttempt, BuildAttemptOutcome, BuildInputIdentity, BuildRecord, ProvenanceStatus,
+    BuildAttempt, BuildAttemptOutcome, BuildRecord, PreparedBuild, ProvenanceStatus,
 };
 use crate::fixture_manifest::{FixtureManifest, VerifiedFixtureManifest};
 use crate::mcp::ToolResult;
@@ -191,36 +190,6 @@ mod tests {
     }
 }
 
-/// Find the DreamMaker compiler
-fn find_dm_compiler() -> Option<PathBuf> {
-    // Try common locations
-    let possible_paths = [
-        // Windows BYOND installation
-        r"C:\Program Files (x86)\BYOND\bin\dm.exe",
-        r"C:\Program Files\BYOND\bin\dm.exe",
-        // Linux/WSL
-        "/usr/local/byond/bin/DreamMaker",
-        "/opt/byond/bin/DreamMaker",
-    ];
-
-    for path in &possible_paths {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    // Try PATH
-    if let Ok(path) = which::which("dm") {
-        return Some(path);
-    }
-    if let Ok(path) = which::which("DreamMaker") {
-        return Some(path);
-    }
-
-    None
-}
-
 fn resolve_requested_path(requested_path: &Path, working_directory: Option<&Path>) -> PathBuf {
     if requested_path.is_absolute() {
         requested_path.to_path_buf()
@@ -298,13 +267,46 @@ pub async fn compile(
         }
     }
 
-    let compiler = args
-        .get("compiler_path")
-        .and_then(|value| value.as_str())
-        .map(PathBuf::from)
-        .or_else(find_dm_compiler)
-        .ok_or_else(|| anyhow!("DreamMaker compiler not found. Please install BYOND."))?
-        .canonicalize()?;
+    let compiler = if let Some(compiler) = args.get("compiler_path").and_then(Value::as_str) {
+        match context.policy().executable(compiler) {
+            Ok(compiler) => compiler,
+            Err(error) => {
+                return Ok(ToolResult::structured_error(
+                    error.code(),
+                    error.to_string(),
+                    "Configure an existing DreamMaker executable in MERIDIAN_MCP_COMPILERS.",
+                ));
+            }
+        }
+    } else {
+        let configured = match context.policy().compiler_allowlist() {
+            [] => {
+                return Ok(ToolResult::structured_error(
+                    "compiler_not_configured",
+                    "dm_compile requires a startup-allowlisted DreamMaker compiler when compiler_path is omitted.",
+                    "Restart Meridian-MCP with exactly one intended compiler in MERIDIAN_MCP_COMPILERS, or supply an explicitly allowlisted compiler_path.",
+                ));
+            }
+            [compiler] => compiler,
+            _ => {
+                return Ok(ToolResult::structured_error(
+                    "compiler_ambiguous",
+                    "dm_compile cannot select among multiple startup-allowlisted compilers when compiler_path is omitted.",
+                    "Supply compiler_path naming one allowlisted compiler, or restart Meridian-MCP with exactly one intended compiler in MERIDIAN_MCP_COMPILERS.",
+                ));
+            }
+        };
+        match context.policy().executable(configured) {
+            Ok(compiler) => compiler,
+            Err(error) => {
+                return Ok(ToolResult::structured_error(
+                    error.code(),
+                    error.to_string(),
+                    "Configure an existing DreamMaker executable in MERIDIAN_MCP_COMPILERS.",
+                ));
+            }
+        }
+    };
 
     let timeout_ms = args
         .get("timeout_ms")
@@ -366,8 +368,20 @@ pub async fn compile(
         .get("capture_network")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let prepared = PreparedBuild::capture(
+        context.policy(),
+        snapshot.as_deref(),
+        fixture.as_ref(),
+        &path,
+        &compiler,
+        arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect(),
+        compiler_working_directory.to_owned(),
+    )?;
     let execution = run_contained_process(ProcessSpec {
-        program: normalize_spawn_path(&compiler),
+        program: compiler.clone(),
         arguments,
         working_directory: compiler_working_directory.to_owned(),
         environment: compiler_environment(),
@@ -408,10 +422,9 @@ pub async fn compile(
     let idle = execution.termination == TerminationReason::IdleTimeout;
     let provenance = record_compile_provenance(
         context,
-        snapshot.as_deref(),
+        &prepared,
         fixture.as_ref(),
         &path,
-        &compiler,
         &dmb_path,
         &artifact_after,
         success,
@@ -467,10 +480,9 @@ pub async fn compile(
 #[allow(clippy::too_many_arguments)]
 fn record_compile_provenance(
     context: &ToolExecutionContext,
-    snapshot: Option<&crate::analysis_snapshot::AnalysisSnapshot>,
+    prepared: &PreparedBuild,
     fixture: Option<&VerifiedFixtureManifest>,
     dme_path: &Path,
-    compiler: &Path,
     dmb_path: &Path,
     artifact_after: &ArtifactSnapshot,
     success: bool,
@@ -485,43 +497,36 @@ fn record_compile_provenance(
             "retained_dmb_sha256": artifact_after.sha256,
         }));
     };
-    let matching_snapshot = snapshot.filter(|snapshot| snapshot.environment_path == dme_path);
-    let mut inputs = matching_snapshot
-        .map(|snapshot| collect_build_inputs(snapshot, fixture))
-        .transpose()?
-        .unwrap_or_default();
+    let mut inputs = prepared.inputs.clone();
+    let rsc_path = fixture
+        .and_then(|fixture| fixture.rsc_path.clone())
+        .unwrap_or_else(|| dme_path.with_extension("rsc"));
+    let verification_reason = prepared.finish_reason().or_else(|| {
+        (fixture.is_some_and(|fixture| fixture.rsc_path.is_some()) && !rsc_path.is_file())
+            .then_some("required_rsc_missing")
+    });
     let artifact_key = store.artifact_key(dmb_path)?;
     let created_at_unix_ms = unix_ms();
 
-    if success && dmb_updated && matching_snapshot.is_some() && artifact_after.exists {
+    if success && dmb_updated && verification_reason.is_none() && artifact_after.exists {
         let dmb = FileIdentity::capture(dmb_path)?;
-        let rsc_path = fixture
-            .and_then(|fixture| fixture.rsc_path.clone())
-            .unwrap_or_else(|| dme_path.with_extension("rsc"));
         let rsc = rsc_path
             .exists()
             .then(|| FileIdentity::capture(&rsc_path))
             .transpose()?;
-        if fixture.is_some_and(|fixture| fixture.rsc_path.is_some()) && rsc.is_none() {
-            return Ok(json!({
-                "status": "unverified",
-                "record_id": null,
-                "reasons": [{"code": "required_rsc_missing"}],
-                "retained_dmb_sha256": artifact_after.sha256,
-            }));
-        }
         inputs.sort_by(|left, right| {
             (&left.role, &left.relative_path).cmp(&(&right.role, &right.relative_path))
         });
         let record_id = random_id()?;
         let record = BuildRecord {
-            schema: 1,
+            schema: 2,
             record_id: record_id.clone(),
             artifact_key: artifact_key.clone(),
             mcp_build: crate::build_identity::current().clone(),
-            compiler: FileIdentity::capture(compiler)?,
+            compiler: prepared.compiler.clone(),
             project: store.project_identity(dmb_path)?,
             inputs: inputs.clone(),
+            verification: Some(prepared.verification.clone()),
             dmb,
             rsc,
             fixture_manifest_sha256: fixture.map(|fixture| fixture.identity_sha256.clone()),
@@ -545,19 +550,39 @@ fn record_compile_provenance(
         }));
     }
 
-    if !success && (artifact_after.exists || fixture.is_some()) {
+    if artifact_after.exists || fixture.is_some() {
+        let code = if success {
+            verification_reason.unwrap_or("artifact_not_fresh")
+        } else {
+            failure_code
+        };
         store.record_attempt(&BuildAttempt {
             schema: 1,
             attempt_id: random_id()?,
             artifact_key,
-            outcome: BuildAttemptOutcome::Failed {
-                code: failure_code.to_owned(),
+            outcome: if success {
+                BuildAttemptOutcome::Unverified {
+                    code: code.to_owned(),
+                }
+            } else {
+                BuildAttemptOutcome::Failed {
+                    code: code.to_owned(),
+                }
             },
             observed_inputs: inputs,
             retained_dmb_sha256: artifact_after.sha256.clone(),
             created_at_unix_ms,
         })?;
-        let decision = store.evaluate_launch(dmb_path, false)?;
+        let mut decision = store.evaluate_launch(dmb_path, false)?;
+        decision
+            .reasons
+            .push(crate::build_provenance::ProvenanceReason {
+                code: code.to_owned(),
+                message: "the build did not establish complete stable compiler input evidence"
+                    .to_owned(),
+                role: None,
+                path: None,
+            });
         return Ok(json!({
             "status": match decision.status {
                 ProvenanceStatus::Verified => "verified",
@@ -573,33 +598,9 @@ fn record_compile_provenance(
     Ok(json!({
         "status": "unverified",
         "record_id": null,
-        "reasons": [{"code": if matching_snapshot.is_none() {"matching_snapshot_required"} else {"artifact_not_fresh"}}],
+        "reasons": [{"code": verification_reason.unwrap_or("artifact_not_fresh")}],
         "retained_dmb_sha256": artifact_after.sha256,
     }))
-}
-
-fn collect_build_inputs(
-    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
-    fixture: Option<&VerifiedFixtureManifest>,
-) -> Result<Vec<BuildInputIdentity>> {
-    let project_root = snapshot
-        .environment_path
-        .parent()
-        .ok_or_else(|| anyhow!("parsed environment has no project root"))?;
-    let mut roles = BTreeMap::new();
-    for path in snapshot.source_inputs() {
-        roles.insert(path.clone(), "source".to_owned());
-    }
-    if let Some(fixture) = fixture {
-        roles.insert(fixture.manifest_path.clone(), "fixture_manifest".to_owned());
-        for input in &fixture.inputs {
-            roles.insert(input.canonical_path.clone(), input.role.as_str().to_owned());
-        }
-    }
-    roles
-        .into_iter()
-        .map(|(path, role)| BuildInputIdentity::capture(project_root, &path, role))
-        .collect()
 }
 
 fn random_id() -> Result<String> {

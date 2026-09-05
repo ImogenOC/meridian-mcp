@@ -38,7 +38,7 @@ pub async fn check_sync(
         }
     };
 
-    let snapshot = matching_or_fixture_snapshot(state, &fixture.dme_path).await?;
+    let snapshot = matching_or_fixture_snapshot(context, state, &fixture.dme_path).await?;
     let mut issues = Vec::new();
     for required in &fixture.required_procs {
         check_required_proc(&snapshot, required, &mut issues);
@@ -83,6 +83,7 @@ pub async fn check_sync(
 }
 
 async fn matching_or_fixture_snapshot(
+    context: &ToolExecutionContext,
     state: &ServerState,
     dme_path: &Path,
 ) -> Result<Arc<AnalysisSnapshot>> {
@@ -92,9 +93,10 @@ async fn matching_or_fixture_snapshot(
         }
     }
     let temporary = ServerState::new();
-    let parsed = super::parse::parse_environment(
+    let parsed = super::parse::parse_environment_with_policy(
         &temporary,
         json!({"dme_path": dme_path.display().to_string()}),
+        context.policy(),
     )
     .await?;
     if parsed.is_error == Some(true) {

@@ -17,6 +17,7 @@ const MTIME_SETTLE_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FingerprintEntry {
     path: PathBuf,
+    resolved: PathBuf,
     len: u64,
     modified: SystemTime,
 }
@@ -29,6 +30,7 @@ struct FingerprintEntry {
 #[derive(Clone, Debug)]
 pub struct SourceFingerprint {
     entries: Vec<FingerprintEntry>,
+    discovery_paths: Vec<PathBuf>,
     reusable: bool,
 }
 
@@ -39,14 +41,40 @@ impl SourceFingerprint {
     /// for a fresh parse that is the moment the parse started, so a file edited
     /// while the parser was reading it marks the result unreusable.
     pub fn capture(inputs: &[PathBuf], observed_at: SystemTime) -> Self {
+        Self::capture_with_discovery(inputs, &[], observed_at)
+    }
+
+    /// Optional discovery candidates contribute identity even while absent.
+    /// Only NotFound counts as absence; other failures prevent reuse.
+    pub fn capture_with_discovery(
+        inputs: &[PathBuf],
+        discovery_paths: &[PathBuf],
+        observed_at: SystemTime,
+    ) -> Self {
         let settled_before = observed_at
             .checked_sub(MTIME_SETTLE_WINDOW)
             .unwrap_or(observed_at);
         let mut entries = Vec::with_capacity(inputs.len());
         let mut reusable = true;
 
-        for path in inputs {
-            let Ok(metadata) = std::fs::metadata(path) else {
+        for (path, optional) in inputs
+            .iter()
+            .map(|path| (path, false))
+            .chain(discovery_paths.iter().map(|path| (path, true)))
+        {
+            let metadata = match std::fs::metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if !optional
+                        || error.kind() != std::io::ErrorKind::NotFound
+                        || std::fs::symlink_metadata(path).is_ok()
+                    {
+                        reusable = false;
+                    }
+                    continue;
+                }
+            };
+            let Ok(resolved) = path.canonicalize() else {
                 reusable = false;
                 continue;
             };
@@ -54,18 +82,23 @@ impl SourceFingerprint {
                 reusable = false;
                 continue;
             };
-            if modified >= settled_before {
+            if modified >= settled_before || !metadata.is_file() {
                 reusable = false;
             }
             entries.push(FingerprintEntry {
                 path: path.clone(),
+                resolved,
                 len: metadata.len(),
                 modified,
             });
         }
 
         entries.sort_by(|left, right| left.path.cmp(&right.path));
-        Self { entries, reusable }
+        Self {
+            entries,
+            discovery_paths: discovery_paths.to_vec(),
+            reusable,
+        }
     }
 
     /// Whether this fingerprint may take part in a reuse decision at all.
@@ -83,7 +116,14 @@ impl SourceFingerprint {
 
     /// True when both fingerprints are usable and describe identical files.
     pub fn matches(&self, other: &SourceFingerprint) -> bool {
-        self.reusable && other.reusable && self.entries == other.entries
+        self.reusable
+            && other.reusable
+            && self.entries == other.entries
+            && self.discovery_paths == other.discovery_paths
+    }
+
+    pub fn discovery_paths(&self) -> &[PathBuf] {
+        &self.discovery_paths
     }
 
     /// The inputs this fingerprint covers, for re-stat'ing on a later call.
@@ -179,6 +219,82 @@ mod tests {
         assert!(!fingerprint.is_reusable());
         assert!(fingerprint.is_empty());
 
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn optional_absence_can_be_reused_but_creation_and_deletion_cannot() {
+        let directory = scratch_directory();
+        let config = directory.join("SpacemanDMM.toml");
+        let candidates = vec![config.clone()];
+        let absent = SourceFingerprint::capture_with_discovery(&[], &candidates, SystemTime::now());
+        assert!(absent.is_reusable());
+        assert!(absent.matches(&SourceFingerprint::capture_with_discovery(
+            &[],
+            &candidates,
+            SystemTime::now()
+        )));
+        std::fs::write(&config, "[diagnostics]\n").unwrap();
+        backdate(&config);
+        let present =
+            SourceFingerprint::capture_with_discovery(&[], &candidates, SystemTime::now());
+        assert!(!absent.matches(&present));
+        std::fs::remove_file(&config).unwrap();
+        assert!(!present.matches(&SourceFingerprint::capture_with_discovery(
+            &[],
+            &candidates,
+            SystemTime::now()
+        )));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn retargeted_directory_alias_changes_identity_with_identical_metadata() {
+        let directory = scratch_directory();
+        let first = directory.join("first");
+        let second = directory.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let modified = SystemTime::now() - Duration::from_secs(60);
+        for target in [&first, &second] {
+            let path = target.join("source.dm");
+            std::fs::write(&path, "same length").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+        let link = directory.join("alias");
+        let create_link = |target: &Path| {
+            #[cfg(windows)]
+            assert!(std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(target)
+                .output()
+                .unwrap()
+                .status
+                .success());
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, &link).unwrap();
+        };
+        let remove_link = || {
+            #[cfg(windows)]
+            std::fs::remove_dir(&link).unwrap();
+            #[cfg(unix)]
+            std::fs::remove_file(&link).unwrap();
+        };
+        create_link(&first);
+        let inputs = vec![link.join("source.dm")];
+        let before = SourceFingerprint::capture(&inputs, SystemTime::now());
+        remove_link();
+        create_link(&second);
+        let after = SourceFingerprint::capture(&inputs, SystemTime::now());
+        assert!(before.is_reusable() && after.is_reusable());
+        assert!(!before.matches(&after));
+        remove_link();
         std::fs::remove_dir_all(directory).unwrap();
     }
 

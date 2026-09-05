@@ -55,6 +55,26 @@ fn profile_discovers_separate_human_and_agent_build_entrypoints() {
 }
 
 #[test]
+fn configuration_candidate_survives_absence_and_deletion() {
+    let root = fixture("config-discovery");
+    let dme = root.join("fixture.dme");
+    std::fs::write(&dme, "/datum/fixture\n").unwrap();
+    let policy = PathPolicy::new(vec![root.clone()], Vec::new()).unwrap();
+    let candidate = root.canonicalize().unwrap().join("SpacemanDMM.toml");
+    for present in [false, true, false] {
+        if present {
+            std::fs::write(&candidate, "[diagnostics]\n").unwrap();
+        } else if candidate.exists() {
+            std::fs::remove_file(&candidate).unwrap();
+        }
+        let profile = ProjectProfile::discover(&policy, &dme).unwrap();
+        assert_eq!(profile.spaceman_config_candidate(), candidate);
+        assert_eq!(profile.spaceman_config().is_some(), present);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn qualification_requires_canonical_meridian_files_and_literal_version() {
     let cases = [
         ("wrong-dme", "other.dme", None, None),

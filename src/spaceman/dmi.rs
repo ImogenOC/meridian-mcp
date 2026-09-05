@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[path = "dmi_decode.rs"]
+mod decode;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DmiError {
     #[error("DMI I/O error: {0}")]
@@ -32,6 +35,7 @@ pub struct DecodedDmi {
     pub identity: DmiAssetId,
     pub icon: Arc<IconFile>,
     pub asset_generation: u64,
+    pub metadata_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -39,6 +43,18 @@ pub struct PreparedDmi {
     identity: DmiAssetId,
     icon: IconFile,
     decoded_bytes: usize,
+    metadata_bytes: usize,
+}
+
+pub(crate) struct DmiInput {
+    identity: DmiAssetId,
+    bytes: Vec<u8>,
+}
+
+impl DecodedDmi {
+    pub fn decoded_bytes(&self) -> usize {
+        self.icon.image.data.len() * 4
+    }
 }
 
 #[derive(Debug)]
@@ -46,6 +62,7 @@ struct CacheEntry {
     asset: DecodedDmi,
     decoded_bytes: usize,
     last_use: u64,
+    metadata_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -54,11 +71,46 @@ pub struct DmiCache {
     decoded_bytes: usize,
     next_generation: u64,
     clock: u64,
+    decode_count: u64,
 }
 
 impl DmiCache {
     pub fn load(&mut self, path: &Path, limits: &ServerLimits) -> Result<DecodedDmi, DmiError> {
-        Ok(self.install(prepare_dmi(path, limits)?, limits))
+        self.load_input(read_dmi(path, limits)?, limits, usize::MAX)
+    }
+
+    pub(crate) fn load_input(
+        &mut self,
+        input: DmiInput,
+        limits: &ServerLimits,
+        remaining_decoded_bytes: usize,
+    ) -> Result<DecodedDmi, DmiError> {
+        let (_, _, decoded_bytes) = decode::dimensions(&input.bytes, limits)?;
+        if decoded_bytes > remaining_decoded_bytes {
+            return Err(DmiError::Limit("max_dmi_scan_decoded_bytes".into()));
+        }
+        if let Some(entry) = self.entries.get_mut(&input.identity.path) {
+            if entry.asset.identity.sha256 == input.identity.sha256 {
+                decode::validate_metadata(
+                    &entry.asset.icon.metadata,
+                    entry.asset.icon.image.width,
+                    entry.asset.icon.image.height,
+                    limits,
+                )?;
+                if entry.metadata_bytes > limits.max_dmi_metadata_bytes {
+                    return Err(DmiError::Limit("max_dmi_metadata_bytes".into()));
+                }
+                self.clock = self.clock.saturating_add(1);
+                entry.last_use = self.clock;
+                return Ok(entry.asset.clone());
+            }
+        }
+        let prepared = prepare_input(input, limits, || self.decode_count += 1)?;
+        Ok(self.install(prepared, limits))
+    }
+
+    pub fn decode_count(&self) -> u64 {
+        self.decode_count
     }
 
     pub fn install(&mut self, prepared: PreparedDmi, limits: &ServerLimits) -> DecodedDmi {
@@ -66,6 +118,7 @@ impl DmiCache {
             identity,
             icon,
             decoded_bytes,
+            metadata_bytes,
         } = prepared;
         let path = identity.path.clone();
         self.clock = self.clock.saturating_add(1);
@@ -80,6 +133,7 @@ impl DmiCache {
             identity,
             icon: Arc::new(icon),
             asset_generation: self.next_generation,
+            metadata_bytes,
         };
         if let Some(old) = self.entries.insert(
             path,
@@ -87,6 +141,7 @@ impl DmiCache {
                 asset: asset.clone(),
                 decoded_bytes,
                 last_use: self.clock,
+                metadata_bytes,
             },
         ) {
             self.decoded_bytes = self.decoded_bytes.saturating_sub(old.decoded_bytes);
@@ -112,42 +167,68 @@ impl DmiCache {
 }
 
 pub fn prepare_dmi(path: &Path, limits: &ServerLimits) -> Result<PreparedDmi, DmiError> {
+    prepare_input(read_dmi(path, limits)?, limits, || {})
+}
+
+pub(crate) fn read_dmi(path: &Path, limits: &ServerLimits) -> Result<DmiInput, DmiError> {
     let path = std::fs::canonicalize(path)?;
-    let bytes = std::fs::read(&path)?;
-    if bytes.len() as u64 > limits.max_dmi_file_bytes {
-        return Err(DmiError::Limit("max_dmi_file_bytes".to_owned()));
-    }
+    let bytes = read_dmi_bytes(std::fs::File::open(&path)?, limits.max_dmi_file_bytes)?;
     let sha256 = hex_sha256(&bytes);
-    let icon = IconFile::from_bytes(&bytes)?;
-    let pixels = u64::from(icon.image.width) * u64::from(icon.image.height);
-    if pixels > limits.max_dmi_decoded_pixels {
-        return Err(DmiError::Limit("max_dmi_decoded_pixels".to_owned()));
-    }
-    if icon.metadata.states.len() > limits.max_dmi_states {
-        return Err(DmiError::Limit("max_dmi_states".to_owned()));
-    }
-    let frames = icon
-        .metadata
-        .states
-        .iter()
-        .map(State::num_sprites)
-        .sum::<usize>();
-    if frames > limits.max_dmi_frames {
-        return Err(DmiError::Limit("max_dmi_frames".to_owned()));
-    }
     let modified = std::fs::metadata(&path)
         .ok()
         .and_then(|value| value.modified().ok());
-    Ok(PreparedDmi {
+    Ok(DmiInput {
         identity: DmiAssetId {
             path,
             sha256,
             size: bytes.len() as u64,
             modified,
         },
-        icon,
-        decoded_bytes: pixels as usize * 4,
+        bytes,
     })
+}
+
+fn prepare_input(
+    input: DmiInput,
+    limits: &ServerLimits,
+    before_decode: impl FnOnce(),
+) -> Result<PreparedDmi, DmiError> {
+    let (icon, metadata_bytes) = decode::decode(&input.bytes, limits, before_decode)?;
+    let decoded_bytes = icon.image.data.len() * 4;
+    Ok(PreparedDmi {
+        identity: input.identity,
+        icon,
+        decoded_bytes,
+        metadata_bytes,
+    })
+}
+
+fn read_dmi_bytes(mut reader: impl std::io::Read, limit: u64) -> Result<Vec<u8>, DmiError> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let remaining = limit.saturating_add(1).saturating_sub(bytes.len() as u64);
+        let count = reader.read(&mut buffer[..remaining.min(8192) as usize])?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        let next_len = bytes
+            .len()
+            .checked_add(count)
+            .ok_or_else(|| DmiError::Limit("max_dmi_file_bytes".into()))?;
+        if next_len as u64 > limit {
+            return Err(DmiError::Limit("max_dmi_file_bytes".into()));
+        }
+        if next_len > bytes.capacity() {
+            let capacity = bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(next_len)
+                .min(usize::try_from(limit).unwrap_or(usize::MAX));
+            bytes.reserve_exact(capacity - bytes.len());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -764,6 +845,17 @@ pub fn discover_dmis(
     include_glob: Option<&str>,
     limits: &ServerLimits,
 ) -> Result<(Vec<PathBuf>, Vec<String>), DmiError> {
+    let policy = crate::PathPolicy::new(vec![root.to_owned()], vec![])
+        .map_err(|error| DmiError::Invalid(error.to_string()))?;
+    discover_dmis_with_policy(&policy, root, include_glob, limits)
+}
+
+pub fn discover_dmis_with_policy(
+    policy: &crate::PathPolicy,
+    root: &Path,
+    include_glob: Option<&str>,
+    limits: &ServerLimits,
+) -> Result<(Vec<PathBuf>, Vec<String>), DmiError> {
     let matcher = glob_regex(include_glob.unwrap_or("**/*.dmi"))?;
     let root = std::fs::canonicalize(root)?;
     let mut stack = vec![root.clone()];
@@ -771,7 +863,10 @@ pub fn discover_dmis(
     let mut bytes = 0u64;
     let mut reasons = Vec::new();
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(dir)? {
+        let checked = policy
+            .read_path(&dir)
+            .map_err(|error| DmiError::Invalid(error.to_string()))?;
+        for entry in std::fs::read_dir(checked)? {
             let entry = entry?;
             let path = entry.path();
             let ty = entry.file_type()?;
@@ -909,6 +1004,14 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_reader_never_consumes_past_detection_byte() {
+        let input = vec![0_u8; 4096];
+        let mut reader = std::io::Cursor::new(input);
+        assert!(read_dmi_bytes(&mut reader, 16).is_err());
+        assert_eq!(reader.position(), 17);
+    }
 
     fn frame(width: u32, height: u32, pixels: &[[u8; 4]]) -> NormalizedFrame {
         normalize_frame(width, height, pixels.iter().copied())

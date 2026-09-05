@@ -1,7 +1,7 @@
 use super::ToolExecutionContext;
-use crate::artifact::{ArtifactSnapshot, FileIdentity};
+use crate::artifact::ArtifactSnapshot;
 use crate::build_provenance::{
-    BuildAttempt, BuildAttemptOutcome, BuildInputIdentity, BuildRecord, ProvenanceStatus,
+    BuildAttempt, BuildAttemptOutcome, BuildInputIdentity, PreparedBuild, ProvenanceStatus,
 };
 use crate::fixture_manifest::{FixtureManifest, VerifiedFixtureManifest};
 use crate::mcp::ToolResult;
@@ -15,7 +15,6 @@ use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -233,6 +232,30 @@ pub async fn compile(
             ));
         }
     };
+    let mut prepared = PreparedBuild::capture(
+        context.policy(),
+        Some(&snapshot),
+        fixture.as_ref(),
+        &project.dme,
+        &compiler,
+        vec![
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            "call".to_owned(),
+            script_argument.to_string_lossy().into_owned(),
+        ],
+        command_path(&project.root),
+    )?;
+    prepared.reason = Some("rift_compiler_closure_not_proved");
+    for path in [&project.rift_build, &project.human_build] {
+        prepared.inputs.push(BuildInputIdentity::capture_authorized(
+            context.policy(),
+            &project.root,
+            path,
+            "build_entrypoint",
+        )?);
+    }
     let outcome = match run_contained_process(ProcessSpec {
         program: command_processor,
         arguments: vec![
@@ -284,7 +307,7 @@ pub async fn compile(
     };
     classify_result(
         context,
-        &snapshot,
+        &prepared,
         fixture.as_ref(),
         &profile,
         &project,
@@ -492,7 +515,7 @@ fn command_path(path: &Path) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 fn classify_result(
     context: &ToolExecutionContext,
-    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
+    prepared: &PreparedBuild,
     fixture: Option<&VerifiedFixtureManifest>,
     profile: &ProjectProfile,
     project: &ValidatedProject,
@@ -554,7 +577,7 @@ fn classify_result(
     let recovery = failure_code.map(recovery_for).unwrap_or("");
     let provenance = record_rift_provenance(
         context,
-        snapshot,
+        prepared,
         fixture,
         project,
         &after,
@@ -618,7 +641,7 @@ fn classify_result(
 
 fn record_rift_provenance(
     context: &ToolExecutionContext,
-    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
+    prepared: &PreparedBuild,
     fixture: Option<&VerifiedFixtureManifest>,
     project: &ValidatedProject,
     after: &ArtifactPair,
@@ -633,23 +656,7 @@ fn record_rift_provenance(
             "retained_dmb_sha256": after.dmb.sha256,
         }));
     };
-    let mut roles = BTreeMap::new();
-    for path in snapshot.source_inputs() {
-        roles.insert(path.clone(), "source".to_owned());
-    }
-    if let Some(fixture) = fixture {
-        roles.insert(fixture.manifest_path.clone(), "fixture_manifest".to_owned());
-        for input in &fixture.inputs {
-            roles.insert(input.canonical_path.clone(), input.role.as_str().to_owned());
-        }
-    }
-    let mut inputs = roles
-        .into_iter()
-        .map(|(path, role)| BuildInputIdentity::capture(&project.root, &path, role))
-        .collect::<Result<Vec<_>>>()?;
-    inputs.sort_by(|left, right| {
-        (&left.role, &left.relative_path).cmp(&(&right.role, &right.relative_path))
-    });
+    let inputs = prepared.inputs.clone();
     let artifact_key = store.artifact_key(&project.dmb)?;
     let created_at_unix_ms = rift_unix_ms();
 
@@ -657,39 +664,25 @@ fn record_rift_provenance(
         evidence,
         BuildEvidence::FreshArtifacts | BuildEvidence::ValidCacheHit
     ) {
-        let record_id = rift_random_id()?;
-        let compiler = context
-            .policy()
-            .compiler_allowlist()
-            .first()
-            .ok_or_else(|| anyhow!("qualified Rift build has no compiler"))?;
-        let record = BuildRecord {
-            schema: 1,
-            record_id: record_id.clone(),
-            artifact_key: artifact_key.clone(),
-            mcp_build: crate::build_identity::current().clone(),
-            compiler: FileIdentity::capture(compiler)?,
-            project: store.project_identity(&project.dmb)?,
-            inputs: inputs.clone(),
-            dmb: FileIdentity::capture(&project.dmb)?,
-            rsc: Some(FileIdentity::capture(&project.rsc)?),
-            fixture_manifest_sha256: fixture.map(|fixture| fixture.identity_sha256.clone()),
-            created_at_unix_ms,
-        };
-        store.record_success(&record)?;
+        let code = prepared
+            .finish_reason()
+            .unwrap_or("rift_compiler_closure_not_proved");
         store.record_attempt(&BuildAttempt {
             schema: 1,
             attempt_id: rift_random_id()?,
             artifact_key,
-            outcome: BuildAttemptOutcome::Succeeded,
+            outcome: BuildAttemptOutcome::Unverified {
+                code: code.to_owned(),
+            },
             observed_inputs: inputs,
             retained_dmb_sha256: after.dmb.sha256.clone(),
             created_at_unix_ms,
         })?;
+        let decision = store.evaluate_launch(&project.dmb, false)?;
         return Ok(json!({
-            "status": "verified",
-            "record_id": record_id,
-            "reasons": [],
+            "status": decision.status,
+            "record_id": decision.record_id,
+            "reasons": [{"code": code}],
             "retained_dmb_sha256": after.dmb.sha256,
         }));
     }

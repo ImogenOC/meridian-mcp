@@ -4,6 +4,55 @@ use meridian_mcp::tracy_protocol::{
 use serde_json::json;
 use tokio::io::{duplex, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[tokio::test]
+async fn blocked_frame_write_obeys_total_deadline() {
+    let (reader, _peer_writer) = duplex(1);
+    let (_peer_reader, writer) = duplex(1);
+    let transport = meridian_mcp::tracy_collector::CollectorTransport::new(
+        reader,
+        writer,
+        std::time::Duration::from_secs(5),
+    );
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        transport.request_with_timeout(
+            "session_status",
+            json!({}),
+            std::time::Duration::from_millis(10),
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result.expect("write stage must obey deadline"),
+        Err(TracyProtocolError::Timeout { .. })
+    ));
+}
+
+#[tokio::test]
+async fn oversized_unterminated_response_fails_before_eof() {
+    let (reader, mut peer_writer) = duplex(8192);
+    let (_peer_reader, writer) = duplex(8192);
+    let transport = meridian_mcp::tracy_collector::CollectorTransport::new(
+        reader,
+        writer,
+        std::time::Duration::from_secs(5),
+    );
+    let request = tokio::spawn(async move { transport.request("session_status", json!({})).await });
+    peer_writer
+        .write_all(&vec![
+            b'x';
+            meridian_mcp::tracy_collector::MAX_TRACY_RESPONSE_BYTES
+                + 3
+        ])
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_millis(250), request).await;
+    assert!(matches!(
+        result.expect("oversize must fail before newline").unwrap(),
+        Err(TracyProtocolError::Transport(_))
+    ));
+}
+
 #[test]
 fn request_is_one_line_fixed_command_json() {
     let request = build_request(

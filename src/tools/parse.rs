@@ -15,7 +15,6 @@ use crate::mcp::ToolResult;
 use crate::result::{json_success, structured_error, ToolErrorCode, ToolMetadata};
 use crate::search::SearchDocuments;
 use crate::semantic::SEMANTIC_CHUNK_SCHEMA_VERSION;
-use crate::source::extract_source;
 use crate::source_fingerprint::SourceFingerprint;
 use crate::state::ServerState;
 use crate::{PathPolicy, ProjectProfile};
@@ -88,225 +87,164 @@ fn validated_parse_timeout(args: &Value) -> Result<Duration> {
 }
 
 /// Parse a DreamMaker environment
+#[cfg(test)]
 pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolResult> {
+    let path = args
+        .get("dme_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Missing dme_path argument"))?;
+    let root = std::path::Path::new(path)
+        .parent()
+        .ok_or_else(|| anyhow!("Environment has no parent"))?;
+    let policy = PathPolicy::new(vec![root.to_owned()], Vec::new())?;
+    parse_environment_with_policy(state, args, &policy).await
+}
+
+struct ParsedEnvironment {
+    snapshot: AnalysisSnapshot,
+    preprocess_parse: u64,
+    dreamchecker: u64,
+    search_documents_ms: u64,
+    build_timings: crate::analysis_snapshot::AnalysisBuildTimings,
+}
+
+enum ParseOutcome {
+    Reused(Arc<AnalysisSnapshot>),
+    Built(Box<ParsedEnvironment>),
+}
+
+pub(crate) async fn parse_environment_with_policy(
+    state: &ServerState,
+    args: Value,
+    policy: &PathPolicy,
+) -> Result<ToolResult> {
     let request_started = Instant::now();
     let dme_path = args
         .get("dme_path")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Missing dme_path argument"))?;
-
-    let prior_environment = state
-        .active_snapshot()
-        .await
-        .map(|snapshot| snapshot.environment_path.clone());
     let timeout = match validated_parse_timeout(&args) {
         Ok(timeout) => timeout,
         Err(error) => {
             return parse_failure(
                 state,
-                prior_environment.as_deref(),
                 ToolErrorCode::InvalidInput,
                 error.to_string(),
                 Some("Use timeout_ms between 1 and 1800000 milliseconds.".to_owned()),
             )
-            .await;
+            .await
         }
     };
-
+    let deadline = tokio::time::Instant::from_std(request_started + timeout);
     let path = PathBuf::from(dme_path);
-    if !path.is_file() {
-        let reason = if path.is_dir() {
-            format!("Not a file (expected a .dme environment): {dme_path}")
-        } else {
-            format!("File not found: {dme_path}")
-        };
-        return parse_failure(
-            state,
-            prior_environment.as_deref(),
-            ToolErrorCode::InvalidInput,
-            reason,
-            Some("Provide the path to an existing DreamMaker .dme file.".to_owned()),
-        )
-        .await;
-    }
     let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
 
-    // Serialize parses before touching the active snapshot, so a concurrent
-    // caller cannot observe a half-replaced state or double peak memory.
     let queue_started = Instant::now();
-    let permit = state.parse_permit().await;
+    let permit = match tokio::time::timeout_at(deadline, state.parse_permit()).await {
+        Ok(permit) => permit,
+        Err(_) => return parse_timeout(state, timeout).await,
+    };
     let queue_wait = queue_started.elapsed().as_millis() as u64;
-
+    let candidate = match tokio::time::timeout_at(deadline, state.active_snapshot()).await {
+        Ok(candidate) => candidate,
+        Err(_) => return parse_timeout(state, timeout).await,
+    };
+    let policy = policy.clone();
+    // Reuse validation includes blocking-pool scheduling; full build stage
+    // timings measure work inside the worker and exclude that scheduling delay.
     let reuse_started = Instant::now();
-    if !force {
-        if let Some(reused) = reusable_snapshot(state, &path).await {
-            let reuse_validation = reuse_started.elapsed().as_millis() as u64;
-            info!("Reusing analysis snapshot for {}", path.display());
-            let (errors, warnings) = reused.diagnostic_counts();
-            return Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
-                "success": true,
-                "reused": true,
-                "environment": display_path(&reused.environment_path),
-                "total_types": reused.total_types,
-                "indexed_symbols": reused.indexed_symbol_count(),
-                "error_count": errors,
-                "warning_count": warnings,
-                "state_generation": reused.generation,
-                "spacemandmm_revision": reused.spacemandmm_revision,
-                "retrieval": {
-                    "lexical": {
-                        "status": "ready",
-                        "algorithm": "bm25",
-                        "documents": reused.indexed_symbol_count(),
-                    },
-                    "dense": {"status": "not_configured"},
-                    "semantic_chunk_schema_version": SEMANTIC_CHUNK_SCHEMA_VERSION,
-                },
-                "timings_ms": {
-                    "queue_wait": queue_wait,
-                    "reuse_validation": reuse_validation,
-                    "total": request_started.elapsed().as_millis() as u64,
-                },
-            }))?));
-        }
-    }
-
-    info!("Parsing environment: {}", dme_path);
-
-    // Only the prior environment path is needed on the failure path. Holding the
-    // whole prior snapshot across the parse would pin the old object tree in
-    // memory while the new one is built.
-    let parse_started_at = SystemTime::now();
-    let parse_path = path.clone();
-    let mut handle = tokio::task::spawn_blocking(move || -> Result<_> {
-        let preprocess_started = Instant::now();
-        let mut context = Context::default();
-        context.autodetect_config(&parse_path);
-        let mut preprocessor = Preprocessor::new(&context, parse_path.clone())?;
-        let (fatal, objtree) = {
-            let mut parser = Parser::new(&context, &mut preprocessor);
-            parser.enable_procs();
-            parser.parse_object_tree_2()
-        };
-        let defines = preprocessor.finalize();
-        let blocking_errors = context
-            .errors()
-            .iter()
-            .filter(|diagnostic| {
-                diagnostic.severity() == Severity::Error
-                    && is_blocking_error(diagnostic.description())
-            })
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        if fatal || !blocking_errors.is_empty() {
-            let diagnostics = blocking_errors.join("\n");
-            return Err(anyhow!("DreamMaker parser reported errors:\n{diagnostics}"));
-        }
-        let preprocess_parse = preprocess_started.elapsed().as_millis() as u64;
-
-        // Always run. Measured on a ~10k-file, 65k-type environment, skipping
-        // dreamchecker saved under 1% of parse time (41.4s vs 41.7s, inside the
-        // noise) while dropping every semantic diagnostic — 139 errors and a
-        // warning on that environment. There is no useful trade here; the cost
-        // is dominated by preprocessing and index construction, not by this.
-        let dreamchecker_started = Instant::now();
-        dreamchecker::run(&context, &objtree);
-        let configured_rules = configured_diagnostic_rules(&parse_path);
-        let diagnostics = collect_diagnostics(&context, &configured_rules);
-        let dreamchecker = dreamchecker_started.elapsed().as_millis() as u64;
-        let search_documents_started = Instant::now();
-        let search_documents = SearchDocuments::from_object_tree(&objtree, &context, &parse_path);
-        let search_documents_ms = search_documents_started.elapsed().as_millis() as u64;
-        let profile = parse_path.parent().and_then(|root| {
-            PathPolicy::new(vec![root.to_owned()], Vec::new())
-                .ok()
-                .and_then(|policy| ProjectProfile::discover(&policy, &parse_path).ok())
-        });
-        let (build, build_timings) = AnalysisBuild::from_parse(
-            parse_path,
-            &context,
-            objtree,
-            defines,
-            search_documents,
-            diagnostics,
-            profile,
-            parse_started_at,
-        );
-        Ok((
-            build,
-            preprocess_parse,
-            dreamchecker,
-            search_documents_ms,
-            build_timings,
-        ))
+    #[cfg(test)]
+    let worker_test = state.parse_worker_test.clone();
+    // Capture admission before spawning. Dropping any caller future or join
+    // handle cannot release it while this non-abortable job is queued/running.
+    // Returning it with the result also covers the snapshot-installation await.
+    let handle = tokio::task::spawn_blocking(move || {
+        let outcome = (|| -> Result<ParseOutcome> {
+            #[cfg(test)]
+            let _worker_test = worker_test.enter();
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "parse deadline expired"
+            );
+            if !path.is_file() {
+                let reason = if path.is_dir() {
+                    format!(
+                        "Not a file (expected a .dme environment): {}",
+                        path.display()
+                    )
+                } else {
+                    format!("File not found: {}", path.display())
+                };
+                return Err(anyhow!(reason));
+            }
+            if !force {
+                if let Some(reused) = reusable_snapshot(candidate, &path) {
+                    return Ok(ParseOutcome::Reused(reused));
+                }
+            } else {
+                drop(candidate);
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "parse deadline expired"
+            );
+            info!("Parsing environment: {}", path.display());
+            build_environment(path, policy).map(|build| ParseOutcome::Built(Box::new(build)))
+        })();
+        (outcome, permit)
     });
-
-    // A blocking task cannot be aborted, so on timeout the worker keeps running.
-    // Move the parse permit into a detached waiter rather than dropping it here:
-    // that keeps the next parse queued behind the orphan instead of letting the
-    // two coexist, which is exactly the memory blowup this lock exists to stop.
-    let parsed = match tokio::time::timeout(timeout, &mut handle).await {
-        Ok(joined) => joined,
-        Err(_elapsed) => {
-            tokio::spawn(async move {
-                let _ = handle.await;
-                drop(permit);
-            });
+    let (outcome, _permit) = match tokio::time::timeout_at(deadline, handle).await {
+        Ok(Ok(result)) if tokio::time::Instant::now() < deadline => result,
+        Ok(Err(error)) => {
             return parse_failure(
                 state,
-                prior_environment.as_deref(),
-                ToolErrorCode::TimedOut,
-                format!(
-                    "parse exceeded {} ms and was abandoned; the worker is still running and the \
-                     next parse will queue behind it",
-                    timeout.as_millis()
-                ),
-                Some("Wait for the active parser worker to finish, then retry.".to_owned()),
+                ToolErrorCode::Internal,
+                format!("parser worker failed: {error}"),
+                Some("Retry the parse; report the worker failure if it recurs.".to_owned()),
             )
-            .await;
+            .await
         }
+        _ => return parse_timeout(state, timeout).await,
     };
-
-    let result = match parsed {
-        Ok(Ok((build, preprocess_parse, dreamchecker, search_documents_ms, build_timings))) => {
-            let snapshot = state.install_analysis(build).await;
-            let (errors, warnings) = snapshot.diagnostic_counts();
-            let total = request_started.elapsed().as_millis() as u64;
-            Ok(ToolResult::text(serde_json::to_string_pretty(&json!({
-                "success": true,
-                "reused": false,
-                "environment": display_path(&snapshot.environment_path),
-                "total_types": snapshot.total_types,
-                "indexed_symbols": snapshot.indexed_symbol_count(),
-                "error_count": errors,
-                "warning_count": warnings,
-                "duration_ms": total,
-                "state_generation": snapshot.generation,
-                "spacemandmm_revision": snapshot.spacemandmm_revision,
-                "retrieval": {
-                    "lexical": {
-                        "status": "ready",
-                        "algorithm": "bm25",
-                        "documents": snapshot.indexed_symbol_count(),
-                    },
-                    "dense": {"status": "not_configured"},
-                    "semantic_chunk_schema_version": SEMANTIC_CHUNK_SCHEMA_VERSION,
-                },
-                "timings_ms": {
+    let (snapshot, reused, mut timings) = match outcome {
+        Ok(ParseOutcome::Reused(snapshot)) => (
+            snapshot,
+            true,
+            json!({
+                "queue_wait": queue_wait,
+                "reuse_validation": reuse_started.elapsed().as_millis() as u64,
+            }),
+        ),
+        Ok(ParseOutcome::Built(parsed)) => {
+            let ParsedEnvironment {
+                snapshot,
+                preprocess_parse,
+                dreamchecker,
+                search_documents_ms,
+                build_timings,
+            } = *parsed;
+            let Some(snapshot) = state
+                .install_analysis_before_deadline(snapshot, deadline)
+                .await
+            else {
+                return parse_timeout(state, timeout).await;
+            };
+            (
+                snapshot,
+                false,
+                json!({
                     "queue_wait": queue_wait,
                     "preprocess_parse": preprocess_parse,
                     "dreamchecker": dreamchecker,
                     "search_documents": search_documents_ms,
                     "analysis_indexes": build_timings.analysis_indexes,
                     "fingerprint": build_timings.fingerprint,
-                    "total": total,
-                },
-            }))?))
+                }),
+            )
         }
-        Ok(Err(error)) => {
-            parse_failure(
+        Err(error) => {
+            return parse_failure(
                 state,
-                prior_environment.as_deref(),
                 ToolErrorCode::InvalidInput,
                 error.to_string(),
                 Some(
@@ -316,34 +254,129 @@ pub async fn parse_environment(state: &ServerState, args: Value) -> Result<ToolR
             )
             .await
         }
-        Err(error) => {
-            parse_failure(
-                state,
-                prior_environment.as_deref(),
-                ToolErrorCode::Internal,
-                format!("parser worker failed: {error}"),
-                Some("Retry the parse; report the worker failure if it recurs.".to_owned()),
-            )
-            .await
-        }
     };
-    drop(permit);
-    result
+    let total = request_started.elapsed().as_millis() as u64;
+    timings["total"] = json!(total);
+    let (errors, warnings) = snapshot.diagnostic_counts();
+    let mut result = json!({
+        "success": true,
+        "reused": reused,
+        "environment": display_path(&snapshot.environment_path),
+        "total_types": snapshot.total_types,
+        "indexed_symbols": snapshot.indexed_symbol_count(),
+        "error_count": errors,
+        "warning_count": warnings,
+        "state_generation": snapshot.generation,
+        "spacemandmm_revision": snapshot.spacemandmm_revision,
+        "spacemandmm_local_patch": crate::capabilities::SPACEMANDMM_LOCAL_PATCH,
+        "spacemandmm_local_patch_sha256": crate::capabilities::SPACEMANDMM_LOCAL_PATCH_SHA256,
+        "retrieval": {
+            "lexical": {"status":"ready", "algorithm":"bm25", "documents":snapshot.indexed_symbol_count()},
+            "dense": {"status":"not_configured"},
+            "semantic_chunk_schema_version": SEMANTIC_CHUNK_SCHEMA_VERSION,
+        },
+        "timings_ms": timings,
+    });
+    if !reused {
+        result["duration_ms"] = json!(total);
+    }
+    Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
+}
+
+async fn parse_timeout(state: &ServerState, timeout: Duration) -> Result<ToolResult> {
+    parse_failure(state, ToolErrorCode::TimedOut,
+        format!("parse request exceeded its total {} ms budget; any unfinished worker retains admission until it exits", timeout.as_millis()),
+        Some("Wait for the active parser worker to finish, then retry.".to_owned())).await
+}
+
+fn build_environment(parse_path: PathBuf, policy: PathPolicy) -> Result<ParsedEnvironment> {
+    let parse_started_at = SystemTime::now();
+    let preprocess_started = Instant::now();
+    let mut context = Context::default();
+    context.set_read_policy(Arc::new(policy.clone()));
+    context.autodetect_config(&parse_path);
+    let mut preprocessor = Preprocessor::new(&context, parse_path.clone())?;
+    let (fatal, objtree) = {
+        let mut parser = Parser::new(&context, &mut preprocessor);
+        parser.enable_procs();
+        parser.parse_object_tree_2()
+    };
+    let defines = preprocessor.finalize();
+    let blocking_errors = context
+        .errors()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.severity() == Severity::Error && is_blocking_error(diagnostic.description())
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if context.read_denied() {
+        return Err(anyhow!(
+            "path_outside_workspace: derived read denied by startup policy"
+        ));
+    }
+    if fatal || !blocking_errors.is_empty() {
+        let diagnostics = blocking_errors.join("\n");
+        return Err(anyhow!("DreamMaker parser reported errors:\n{diagnostics}"));
+    }
+    let preprocess_parse = preprocess_started.elapsed().as_millis() as u64;
+
+    // Always run. Measured on a ~10k-file, 65k-type environment, skipping
+    // dreamchecker saved under 1% of parse time (41.4s vs 41.7s, inside the
+    // noise) while dropping every semantic diagnostic — 139 errors and a
+    // warning on that environment. There is no useful trade here; the cost
+    // is dominated by preprocessing and index construction, not by this.
+    let dreamchecker_started = Instant::now();
+    dreamchecker::run(&context, &objtree);
+    let configured_rules = configured_diagnostic_rules(&parse_path, &context);
+    let diagnostics = collect_diagnostics(&context, &configured_rules);
+    let dreamchecker = dreamchecker_started.elapsed().as_millis() as u64;
+    let search_documents_started = Instant::now();
+    let search_documents = SearchDocuments::from_object_tree(&objtree, &context, &parse_path);
+    let search_documents_ms = search_documents_started.elapsed().as_millis() as u64;
+    if context.read_denied() {
+        return Err(anyhow!(
+            "path_outside_workspace: derived read denied by startup policy"
+        ));
+    }
+    let profile = ProjectProfile::discover(&policy, &parse_path).ok();
+    let (build, build_timings) = AnalysisBuild::from_parse(
+        parse_path,
+        &context,
+        objtree,
+        defines,
+        search_documents,
+        diagnostics,
+        profile,
+        parse_started_at,
+        policy,
+    );
+    Ok(ParsedEnvironment {
+        snapshot: AnalysisSnapshot::from_build(build, 0),
+        preprocess_parse,
+        dreamchecker,
+        search_documents_ms,
+        build_timings,
+    })
 }
 
 /// The active snapshot, when it already describes exactly this environment.
 ///
 /// Returns `None` whenever reuse cannot be proven safe: a different environment,
 /// or source files whose on-disk state does not match the snapshot's fingerprint.
-async fn reusable_snapshot(
-    state: &ServerState,
+fn reusable_snapshot(
+    snapshot: Option<Arc<AnalysisSnapshot>>,
     path: &std::path::Path,
 ) -> Option<Arc<AnalysisSnapshot>> {
-    let snapshot = state.active_snapshot().await?;
+    let snapshot = snapshot?;
     if snapshot.environment_path.as_path() != path {
         return None;
     }
-    let current = SourceFingerprint::capture(snapshot.source_inputs(), SystemTime::now());
+    let current = SourceFingerprint::capture_with_discovery(
+        snapshot.source_inputs(),
+        snapshot.source_fingerprint.discovery_paths(),
+        SystemTime::now(),
+    );
     snapshot
         .source_fingerprint
         .matches(&current)
@@ -352,19 +385,19 @@ async fn reusable_snapshot(
 
 async fn parse_failure(
     state: &ServerState,
-    prior_environment: Option<&std::path::Path>,
     code: ToolErrorCode,
     error: String,
     recovery: Option<String>,
 ) -> Result<ToolResult> {
+    let metadata = state.analysis_metadata();
     Ok(structured_error(
         code,
         error,
         recovery,
         json!({
         "state_preserved": true,
-        "active_environment": prior_environment.map(display_path),
-        "state_generation": state.state_generation().await
+        "active_environment": metadata.active_environment.as_deref().map(display_path),
+        "state_generation": metadata.generation
         }),
     ))
 }
@@ -372,19 +405,6 @@ async fn parse_failure(
 /// Helper to get file path string from a location
 fn get_file_path(context: &AnalysisContext, file_id: dreammaker::FileId) -> String {
     context.file_path(file_id).display().to_string()
-}
-
-fn resolve_source_path(snapshot: &AnalysisSnapshot, file_path: &str) -> PathBuf {
-    let path = PathBuf::from(file_path);
-    if path.is_absolute() || path.exists() {
-        return path;
-    }
-
-    snapshot
-        .environment_path
-        .parent()
-        .map(|root| root.join(&path))
-        .unwrap_or(path)
 }
 
 /// Get type information
@@ -505,6 +525,15 @@ pub async fn get_proc(state: &ServerState, args: Value) -> Result<ToolResult> {
             })
             .collect::<Vec<_>>();
         let file_path = get_file_path(context, value.location.file);
+        let source = if value.location == dreammaker::Location::BUILTINS {
+            None
+        } else {
+            snapshot.search_index.proc_source(
+                &implementation.owner,
+                proc_name,
+                implementation.override_index,
+            )
+        };
         values.push(json!({
             "owner": implementation.owner,
             "override_index": implementation.override_index,
@@ -512,10 +541,9 @@ pub async fn get_proc(state: &ServerState, args: Value) -> Result<ToolResult> {
             "documentation": value.docs.text(),
             "location": format!("{}:{}:{}", file_path, value.location.line, value.location.column),
             "has_body": implementation.has_body,
-            "source": extract_source(
-                resolve_source_path(&snapshot, &file_path).to_string_lossy().as_ref(),
-                value.location.line,
-            ),
+            "source": source,
+            "source_origin": "analysis_snapshot",
+            "source_line_limit": snapshot.search_index.source_line_limit(),
         }));
     }
 
@@ -529,6 +557,7 @@ pub async fn get_proc(state: &ServerState, args: Value) -> Result<ToolResult> {
         "declared": resolution.implementation_owner == type_path,
         "overrides": values,
         "resolution_diagnostics": resolution.diagnostics(),
+        "state_generation": snapshot.generation,
     });
     Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
 }
@@ -763,6 +792,277 @@ mod tests {
 
     static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+    struct ReleaseWorker(Arc<crate::state::ParseWorkerTestControl>);
+
+    impl Drop for ReleaseWorker {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    async fn wait_for_worker_count(state: &ServerState, started: bool, count: usize) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let changed = state.parse_worker_test.changed.notified();
+                let observed = if started {
+                    &state.parse_worker_test.started
+                } else {
+                    &state.parse_worker_test.active
+                };
+                if observed.load(Ordering::SeqCst) == count {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("worker count should settle");
+    }
+
+    #[tokio::test]
+    async fn queued_parse_deadline_includes_admission() {
+        let (directory, dme_path) = write_environment_fixture();
+        let state = Arc::new(ServerState::new());
+        state.parse_worker_test.pause();
+        let release = ReleaseWorker(state.parse_worker_test.clone());
+        let first = tokio::spawn({
+            let state = state.clone();
+            let dme_path = dme_path.clone();
+            async move { parse_environment(&state, json!({"dme_path":dme_path})).await }
+        });
+        wait_for_worker_count(&state, true, 1).await;
+        let queued = tokio::time::timeout(
+            Duration::from_millis(250),
+            parse_environment(&state, json!({"dme_path":dme_path, "timeout_ms":1})),
+        )
+        .await;
+        let started = state.parse_worker_test.started.load(Ordering::SeqCst);
+        drop(release);
+        first.await.unwrap().unwrap();
+        assert_eq!(started, 1);
+        assert_eq!(
+            result_json(
+                &queued
+                    .expect("queue must obey the request deadline")
+                    .unwrap()
+            )["code"],
+            "timed_out"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_parse_caller_keeps_worker_admission_until_exit() {
+        let (directory, dme_path) = write_environment_fixture();
+        let state = Arc::new(ServerState::new());
+        state.parse_worker_test.pause();
+        let release = ReleaseWorker(state.parse_worker_test.clone());
+        let first = tokio::spawn({
+            let state = state.clone();
+            let dme_path = dme_path.clone();
+            async move { parse_environment(&state, json!({"dme_path":dme_path})).await }
+        });
+        wait_for_worker_count(&state, true, 1).await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let next = tokio::time::timeout(
+            Duration::from_millis(250),
+            parse_environment(&state, json!({"dme_path":dme_path, "timeout_ms":1})),
+        )
+        .await;
+        let maximum = state.parse_worker_test.maximum.load(Ordering::SeqCst);
+        let started = state.parse_worker_test.started.load(Ordering::SeqCst);
+        drop(release);
+        wait_for_worker_count(&state, false, 0).await;
+        assert_eq!(state.state_generation().await, 0);
+        assert_eq!(maximum, 1, "orphaned worker must retain admission");
+        assert_eq!(started, 1);
+        assert_eq!(
+            result_json(&next.expect("queued request must time out").unwrap())["code"],
+            "timed_out"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reuse_validation_worker_obeys_deadline_and_preserves_snapshot() {
+        let (directory, dme_path) = write_environment_fixture();
+        settle(&directory);
+        let state = Arc::new(ServerState::new());
+        parse_environment(&state, json!({"dme_path":dme_path}))
+            .await
+            .unwrap();
+        let original = state.snapshot().await.unwrap();
+        state.parse_worker_test.pause();
+        let release = ReleaseWorker(state.parse_worker_test.clone());
+        let request = tokio::spawn({
+            let state = state.clone();
+            let dme_path = dme_path.clone();
+            async move {
+                parse_environment(&state, json!({"dme_path":dme_path, "timeout_ms":100})).await
+            }
+        });
+        wait_for_worker_count(&state, true, 2).await;
+        let result = tokio::time::timeout(Duration::from_millis(250), request)
+            .await
+            .expect("blocking reuse validation must not stall the async timer")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result_json(&result)["code"], "timed_out");
+        assert!(Arc::ptr_eq(&original, &state.snapshot().await.unwrap()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), state.parse_permit())
+                .await
+                .is_err()
+        );
+        drop(release);
+        wait_for_worker_count(&state, false, 0).await;
+        let next = parse_environment(&state, json!({"dme_path":dme_path}))
+            .await
+            .unwrap();
+        assert_eq!(result_json(&next)["reused"], true);
+        assert_eq!(result_json(&next)["state_generation"], original.generation);
+        assert_eq!(state.parse_worker_test.maximum.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn analysis_writer_cannot_block_initial_read_or_timeout_metadata() {
+        let (directory, dme_path) = write_environment_fixture();
+        let state = ServerState::new();
+        parse_environment(&state, json!({"dme_path":dme_path}))
+            .await
+            .unwrap();
+        let writer = state.hold_analysis_write().await;
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            parse_environment(&state, json!({"dme_path":dme_path, "timeout_ms":1})),
+        )
+        .await;
+        drop(writer);
+        let body = result_json(
+            &result
+                .expect("held writer must not extend the deadline")
+                .unwrap(),
+        );
+        assert_eq!(body["code"], "timed_out");
+        assert_eq!(body["details"]["state_generation"], 1);
+        assert_eq!(
+            body["details"]["active_environment"],
+            display_path(&dme_path)
+        );
+        assert_eq!(state.parse_worker_test.started.load(Ordering::SeqCst), 1);
+        state.clear_analysis().await;
+        let writer = state.hold_analysis_write().await;
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            parse_environment(&state, json!({"dme_path":dme_path, "timeout_ms":1})),
+        )
+        .await;
+        drop(writer);
+        let body = result_json(
+            &result
+                .expect("cleared metadata must also remain available")
+                .unwrap(),
+        );
+        assert_eq!(body["code"], "timed_out");
+        assert_eq!(body["details"]["state_generation"], 1);
+        assert!(body["details"]["active_environment"].is_null());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_worker_result_has_a_one_ms_installation_deadline() {
+        let (directory, dme_path) = write_environment_fixture();
+        let state = ServerState::new();
+        parse_environment(&state, json!({"dme_path":dme_path}))
+            .await
+            .unwrap();
+        let policy = PathPolicy::new(vec![directory.clone()], vec![]).unwrap();
+        let parsed = tokio::task::spawn_blocking({
+            let dme_path = dme_path.clone();
+            move || build_environment(dme_path, policy)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let writer = state.hold_analysis_write().await;
+        let result = tokio::time::timeout(Duration::from_millis(250), async {
+            let timeout = Duration::from_millis(1);
+            let deadline = tokio::time::Instant::now() + timeout;
+            assert!(state
+                .install_analysis_before_deadline(parsed.snapshot, deadline)
+                .await
+                .is_none());
+            parse_timeout(&state, timeout).await
+        })
+        .await;
+        drop(writer);
+        let body = result_json(
+            &result
+                .expect("installation expiry must return while writer stays held")
+                .unwrap(),
+        );
+        assert_eq!(body["code"], "timed_out");
+        assert_eq!(body["details"]["state_generation"], 1);
+        assert_eq!(
+            body["details"]["active_environment"],
+            display_path(&dme_path)
+        );
+        assert_eq!(state.state_generation().await, 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn analysis_writer_cannot_block_installation_timeout_response() {
+        let (directory, dme_path) = write_environment_fixture();
+        let state = Arc::new(ServerState::new());
+        parse_environment(&state, json!({"dme_path":dme_path}))
+            .await
+            .unwrap();
+        state.parse_worker_test.pause();
+        let release = ReleaseWorker(state.parse_worker_test.clone());
+        let request = tokio::spawn({
+            let state = state.clone();
+            let dme_path = dme_path.clone();
+            async move {
+                parse_environment(
+                    &state,
+                    json!({"dme_path":dme_path, "force":true, "timeout_ms":100}),
+                )
+                .await
+            }
+        });
+        wait_for_worker_count(&state, true, 2).await;
+        let writer = state.hold_analysis_write().await;
+        drop(release);
+        wait_for_worker_count(&state, false, 0).await;
+        let mut request = request;
+        let result = tokio::time::timeout(Duration::from_millis(250), &mut request).await;
+        if result.is_err() {
+            request.abort();
+        }
+        drop(writer);
+        let body = result_json(
+            &result
+                .expect("held writer must not block timeout reporting")
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(body["code"], "timed_out");
+        assert_eq!(body["details"]["state_generation"], 1);
+        assert_eq!(
+            body["details"]["active_environment"],
+            display_path(&dme_path)
+        );
+        assert_eq!(state.state_generation().await, 1);
+        let permit = tokio::time::timeout(Duration::from_millis(250), state.parse_permit())
+            .await
+            .unwrap();
+        drop(permit);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     fn result_json(result: &ToolResult) -> Value {
         let ToolContent::Text { text } = &result.content[0];
         serde_json::from_str(text).expect("tool result should be JSON")
@@ -903,10 +1203,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proc_source_reports_snapshot_generation_and_excerpt_limit() {
+        let (directory, dme_path) = write_environment_fixture();
+        let source = directory.join("fixture.dm");
+        std::fs::write(
+            &source,
+            format!("/proc/long_excerpt()\n{}", "\treturn 1\n".repeat(100)),
+        )
+        .unwrap();
+        let state = ServerState::new();
+        parse_environment(&state, json!({"dme_path": dme_path}))
+            .await
+            .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let result = get_proc(&state, json!({"type_path":"", "proc_name":"long_excerpt"}))
+            .await
+            .unwrap();
+        let body = result_json(&result);
+        assert_eq!(body["state_generation"], 1);
+        let implementation = &body["overrides"][0];
+        assert_eq!(implementation["source_origin"], "analysis_snapshot");
+        assert_eq!(implementation["source_line_limit"], 80);
+        assert_eq!(
+            implementation["source"].as_str().unwrap().lines().count(),
+            80
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn parse_failure_preserves_the_requested_error_code() {
         let result = parse_failure(
             &ServerState::new(),
-            None,
             ToolErrorCode::TimedOut,
             "parse exceeded 1 ms".to_owned(),
             Some("Wait for the active parser worker to finish, then retry.".to_owned()),

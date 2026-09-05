@@ -86,6 +86,45 @@ async fn parse_project(context: &ToolExecutionContext, state: &mut ServerState, 
 
 #[cfg(windows)]
 #[tokio::test]
+async fn fresh_controller_artifacts_do_not_prove_a_compiler_input_closure() {
+    let (root, dme) = fixture("provenance", "tgstation.dme");
+    std::fs::write(root.join("offline.ready"), "ready").unwrap();
+    let private_path = root.with_extension("private");
+    std::fs::create_dir_all(&private_path).unwrap();
+    let policy =
+        PathPolicy::new(vec![root.clone()], vec![std::env::current_exe().unwrap()]).unwrap();
+    let private = std::sync::Arc::new(
+        meridian_mcp::PrivateStateStore::open(&private_path, policy.effective_roots()).unwrap(),
+    );
+    let context = ToolExecutionContext::with_features_and_state(
+        CapabilityMode::Development,
+        policy,
+        RiftBuildAccess::Offline,
+        None,
+        None,
+        None,
+        Some(private),
+    );
+    let mut state = ServerState::new();
+    parse_project(&context, &mut state, &dme).await;
+    let result = call_tool(&context, &state, "rift_compile", json!({}))
+        .await
+        .unwrap();
+    let result = payload(&result);
+    assert_eq!(result["success"], true, "{result}");
+    assert_eq!(result["evidence"], "fresh_artifacts");
+    assert_eq!(result["provenance_status"], "unverified");
+    assert!(result["provenance_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "rift_compiler_closure_not_proved"));
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(private_path).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn rift_compile_requires_a_parsed_qualified_project() {
     let (root, dme) = fixture("qualification", "other.dme");
     let compiler = std::env::current_exe().unwrap();

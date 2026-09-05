@@ -3,6 +3,7 @@
 //! Ignored by default: it needs a full DreamMaker checkout and takes far longer
 //! than a unit test. Point it at one with MERIDIAN_SCALE_DME and run with
 //! `cargo test --release --test parse_reuse_scale -- --ignored --nocapture`.
+//! Set MERIDIAN_SCALE_EXPECT_DOGMOS=1 only for a corpus that includes Dogmos.
 //!
 //! This test only reads the environment. Cache invalidation on edit is covered
 //! at fixture scale by `an_edited_source_file_forces_a_reparse`, which does not
@@ -124,7 +125,8 @@ async fn reusing_a_large_environment_is_orders_of_magnitude_faster() {
             body["retrieval"]["candidates_considered"],
             body["retrieval"]["documents_scored"],
         );
-        if query == "dogmos" {
+        if query == "dogmos" && std::env::var("MERIDIAN_SCALE_EXPECT_DOGMOS").as_deref() == Ok("1")
+        {
             assert!(top_symbol.to_ascii_lowercase().contains("dogmos"));
         }
         if query == "/datum/controller/subsystem/mapping" {

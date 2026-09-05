@@ -1,5 +1,3 @@
-pub(crate) const MAX_SOURCE_LINES: usize = 200;
-
 pub(crate) struct IndexedSource {
     text: String,
     line_starts: Vec<usize>,
@@ -85,13 +83,6 @@ impl IndexedSource {
     }
 }
 
-/// Read a bounded source excerpt beginning at a DreamMaker declaration line.
-pub(crate) fn extract_source(file_path: &str, start_line: u32) -> Option<String> {
-    IndexedSource::read(std::path::Path::new(file_path))
-        .ok()?
-        .declaration(start_line, MAX_SOURCE_LINES)
-}
-
 /// Extract a declaration from source text without reading the file again.
 #[cfg(test)]
 pub(crate) fn extract_source_from_text(
@@ -109,6 +100,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SOURCE_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    const MAX_SOURCE_LINES: usize = 200;
+
+    fn extract_source(file_path: &str, start_line: u32) -> Option<String> {
+        IndexedSource::read(std::path::Path::new(file_path))
+            .ok()?
+            .declaration(start_line, MAX_SOURCE_LINES)
+    }
 
     fn write_source_file(contents: &str) -> PathBuf {
         let unique_suffix = format!(

@@ -47,6 +47,10 @@ impl ProjectProfile {
     pub fn spaceman_config(&self) -> Option<&Path> {
         self.spaceman_config.as_deref()
     }
+    /// The parser probes this path even when no configuration exists yet.
+    pub fn spaceman_config_candidate(&self) -> PathBuf {
+        self.root.join("SpacemanDMM.toml")
+    }
     pub fn human_build_entrypoint(&self) -> Option<&Path> {
         self.human_build_entrypoint.as_deref()
     }

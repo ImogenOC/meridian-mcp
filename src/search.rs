@@ -138,6 +138,30 @@ impl SearchIndex {
     pub(crate) fn len(&self) -> usize {
         self.documents.len()
     }
+
+    pub(crate) fn proc_source(
+        &self,
+        owner: &str,
+        name: &str,
+        override_index: usize,
+    ) -> Option<&str> {
+        self.exact_symbols
+            .get(&member_symbol(owner, "proc", name).to_lowercase())?
+            .iter()
+            .map(|index| &self.documents[*index])
+            .find(|document| {
+                document.kind == SymbolKind::Proc
+                    && document.type_path == owner
+                    && document.name == name
+                    && document.override_index == Some(override_index)
+            })?
+            .source
+            .as_deref()
+    }
+
+    pub(crate) fn source_line_limit(&self) -> usize {
+        INDEX_SOURCE_LINES
+    }
 }
 
 impl SearchDocuments {
@@ -147,7 +171,7 @@ impl SearchDocuments {
         environment_path: &Path,
     ) -> Self {
         let root = environment_path.parent().unwrap_or_else(|| Path::new("."));
-        let mut source_cache = SourceCache::new();
+        let mut source_cache = SourceCache::new(context);
         let mut documents = Vec::new();
 
         for ty in objtree.iter_types() {
@@ -538,21 +562,28 @@ fn resolve_context_file(
     }
 }
 
-struct SourceCache {
+struct SourceCache<'a> {
+    context: &'a Context,
     files: HashMap<PathBuf, Option<IndexedSource>>,
 }
 
-impl SourceCache {
-    fn new() -> Self {
+impl<'a> SourceCache<'a> {
+    fn new(context: &'a Context) -> Self {
         Self {
+            context,
             files: HashMap::new(),
         }
     }
 
     fn source(&mut self, file: &Path) -> Option<&IndexedSource> {
         if !self.files.contains_key(file) {
-            self.files
-                .insert(file.to_path_buf(), IndexedSource::read(file).ok());
+            self.files.insert(
+                file.to_path_buf(),
+                self.context
+                    .resolve_read_path(file)
+                    .ok()
+                    .and_then(|path| IndexedSource::read(&path).ok()),
+            );
         }
         self.files.get(file).and_then(Option::as_ref)
     }

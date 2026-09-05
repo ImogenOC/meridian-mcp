@@ -25,6 +25,10 @@ pub struct RuntimeOutputBuffer {
     pub(crate) entries: VecDeque<RuntimeOutputEntry>,
     started_at: Instant,
     next_sequence: u64,
+    pub(crate) running: bool,
+    pub(crate) drained: bool,
+    pub(crate) last_exit_code: Option<i32>,
+    pub(crate) changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for RuntimeOutputBuffer {
@@ -33,15 +37,11 @@ impl Default for RuntimeOutputBuffer {
             entries: VecDeque::with_capacity(OUTPUT_LOG_CAPACITY),
             started_at: Instant::now(),
             next_sequence: 1,
+            running: false,
+            drained: true,
+            last_exit_code: None,
+            changes: tokio::sync::watch::channel(0).0,
         }
-    }
-}
-
-impl RuntimeOutputBuffer {
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.started_at = Instant::now();
-        self.next_sequence = 1;
     }
 }
 
@@ -81,6 +81,9 @@ pub fn push_output_line_at(log: &OutputLog, monotonic_offset_ms: u64, line: Stri
     while output_log_byte_len(&buffer.entries) > OUTPUT_LOG_MAX_BYTES {
         buffer.entries.pop_front();
     }
+    buffer
+        .changes
+        .send_modify(|version| *version = version.wrapping_add(1));
 }
 
 pub fn nearest_output_before(log: &OutputLog, offset_ms: u64) -> Option<RuntimeOutputEntry> {
@@ -119,6 +122,12 @@ struct AnalysisState {
     generation: u64,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct AnalysisMetadata {
+    pub(crate) active_environment: Option<std::path::PathBuf>,
+    pub(crate) generation: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error("No environment loaded. Call dm_parse_environment first.")]
@@ -127,9 +136,11 @@ pub enum StateError {
 
 pub struct RuntimeState {
     pub(crate) game_process: Option<Child>,
+    pub(crate) containment: Option<Arc<crate::process::ProcessContainment>>,
     pub(crate) game_port: Option<u16>,
     pub(crate) output_log: OutputLog,
     pub(crate) runtime_output_tasks: Vec<JoinHandle<()>>,
+    runtime_observer: Option<JoinHandle<()>>,
     pub(crate) last_exit_code: Option<i32>,
     pub(crate) kind: Option<RuntimeKind>,
     pub(crate) profiler_port: Option<u16>,
@@ -156,9 +167,11 @@ impl RuntimeState {
     fn new() -> Self {
         Self {
             game_process: None,
+            containment: None,
             game_port: None,
             output_log: OutputLog::default(),
             runtime_output_tasks: Vec::new(),
+            runtime_observer: None,
             last_exit_code: None,
             kind: None,
             profiler_port: None,
@@ -182,6 +195,7 @@ impl RuntimeState {
         self.kind = Some(RuntimeKind::Standard);
         self.profiler_port = None;
         self.launch_provenance = Some(launch_provenance);
+        self.publish_process_status(true);
     }
 
     pub(crate) fn set_profiled_game_process(
@@ -198,11 +212,10 @@ impl RuntimeState {
 
     pub(crate) fn clear_runtime_diagnostics(&mut self) {
         self.abort_runtime_output_tasks();
-        let mut lines = self
-            .output_log
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        lines.clear();
+        if let Some(observer) = self.runtime_observer.take() {
+            observer.abort();
+        }
+        self.output_log = OutputLog::default();
         self.last_exit_code = None;
     }
 
@@ -214,6 +227,14 @@ impl RuntimeState {
         for task in self.runtime_output_tasks.drain(..) {
             task.abort();
         }
+        let mut output = self
+            .output_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        output.drained = true;
+        output
+            .changes
+            .send_modify(|version| *version = version.wrapping_add(1));
     }
 
     pub(crate) fn recent_output(&self, limit: usize) -> Vec<String> {
@@ -243,6 +264,7 @@ impl RuntimeState {
         lines.entries.iter().skip(start).cloned().collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn matches_output(
         &self,
         pattern: &str,
@@ -262,23 +284,46 @@ impl RuntimeState {
                 Ok(Some(status)) => {
                     self.last_exit_code = status.code();
                     self.game_process = None;
+                    if let Some(containment) = &self.containment {
+                        let _ = containment.request_termination();
+                    }
                     self.game_port = None;
                     self.kind = None;
                     self.profiler_port = None;
+                    self.publish_process_status(false);
                     false
                 }
                 Ok(None) => true,
                 Err(_) => {
+                    if let Some(containment) = &self.containment {
+                        let _ = containment.request_termination();
+                    }
                     self.game_process = None;
                     self.game_port = None;
                     self.kind = None;
                     self.profiler_port = None;
+                    self.publish_process_status(false);
                     false
                 }
             }
         } else {
             false
         }
+    }
+
+    fn publish_process_status(&self, running: bool) {
+        let mut output = self
+            .output_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        output.running = running;
+        if running {
+            output.drained = false;
+        }
+        output.last_exit_code = self.last_exit_code;
+        output
+            .changes
+            .send_modify(|version| *version = version.wrapping_add(1));
     }
 
     pub(crate) fn status_summary(&mut self) -> RuntimeStatus {
@@ -301,17 +346,58 @@ impl RuntimeState {
     }
 
     pub(crate) async fn stop_game_process(&mut self) -> Result<()> {
+        if let Some(containment) = &self.containment {
+            containment.request_termination()?;
+        }
         if let Some(mut process) = self.game_process.take() {
             process.kill().await?;
             let status = process.wait().await?;
             self.last_exit_code = status.code();
         }
+        self.finish_runtime_cleanup().await?;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         self.abort_runtime_output_tasks();
         self.game_port = None;
         self.kind = None;
         self.profiler_port = None;
+        self.publish_process_status(false);
         Ok(())
+    }
+
+    pub(crate) async fn finish_runtime_cleanup(&mut self) -> Result<()> {
+        let Some(containment) = &self.containment else {
+            return Ok(());
+        };
+        containment.request_termination()?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !containment.is_terminated()? {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "runtime containment cleanup timed out"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        self.containment = None;
+        Ok(())
+    }
+}
+
+impl Drop for RuntimeState {
+    fn drop(&mut self) {
+        if let Some(containment) = self.containment.take() {
+            let _ = containment.terminate(1);
+        }
+        if let Some(process) = &mut self.game_process {
+            let _ = process.start_kill();
+        }
+        self.abort_runtime_output_tasks();
+        self.publish_process_status(false);
+        if let Some(observer) = self.runtime_observer.take() {
+            observer.abort();
+        }
+        if let Some(task) = self.integrity_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -399,26 +485,42 @@ impl Default for RuntimeState {
 
 pub struct ServerState {
     analysis: RwLock<AnalysisState>,
-    runtime: Mutex<RuntimeState>,
-    assets: Mutex<DmiCache>,
+    /// Published metadata has its own short, synchronous lock so deadline
+    /// reporting never queues behind analysis readers or writers.
+    analysis_metadata: StdMutex<AnalysisMetadata>,
+    runtime: Arc<Mutex<RuntimeState>>,
+    assets: Arc<Mutex<DmiCache>>,
+    asset_limits: crate::limits::ServerLimits,
+    asset_jobs: Arc<tokio::sync::Semaphore>,
     debugger: Mutex<Option<DebuggerSession>>,
     lifecycle: Mutex<()>,
     /// Serializes environment parses. Held for the whole build so two callers
     /// never hold two complete object trees at once, and kept separate from
     /// `lifecycle` so a long parse does not block runtime launches.
     parse: Arc<Mutex<()>>,
+    #[cfg(test)]
+    pub(crate) parse_worker_test: Arc<ParseWorkerTestControl>,
     tracy_capture: Mutex<TracyCaptureState>,
 }
 
 impl ServerState {
     pub fn new() -> Self {
+        Self::with_limits(crate::limits::ServerLimits::default())
+    }
+
+    pub fn with_limits(limits: crate::limits::ServerLimits) -> Self {
         Self {
             analysis: RwLock::new(AnalysisState::default()),
-            runtime: Mutex::new(RuntimeState::new()),
-            assets: Mutex::new(DmiCache::default()),
+            analysis_metadata: StdMutex::new(AnalysisMetadata::default()),
+            runtime: Arc::new(Mutex::new(RuntimeState::new())),
+            assets: Arc::new(Mutex::new(DmiCache::default())),
+            asset_jobs: Arc::new(tokio::sync::Semaphore::new(limits.max_blocking_jobs.max(1))),
+            asset_limits: limits,
             debugger: Mutex::new(None),
             lifecycle: Mutex::new(()),
             parse: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            parse_worker_test: Arc::default(),
             tracy_capture: Mutex::new(TracyCaptureState::default()),
         }
     }
@@ -436,12 +538,64 @@ impl ServerState {
         self.analysis.read().await.active.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn hold_analysis_write(&self) -> AnalysisWriteTestGuard<'_> {
+        AnalysisWriteTestGuard {
+            _guard: self.analysis.write().await,
+        }
+    }
+
     pub async fn install_analysis(&self, build: AnalysisBuild) -> Arc<AnalysisSnapshot> {
+        let snapshot = AnalysisSnapshot::from_build(build, 0);
         let mut state = self.analysis.write().await;
-        state.generation = state.generation.saturating_add(1);
-        let snapshot = Arc::new(AnalysisSnapshot::from_build(build, state.generation));
-        state.active = Some(Arc::clone(&snapshot));
+        let (snapshot, previous) = self.publish_analysis(&mut state, snapshot);
+        drop(state);
+        drop(previous);
         snapshot
+    }
+
+    pub(crate) async fn install_analysis_before_deadline(
+        &self,
+        snapshot: AnalysisSnapshot,
+        deadline: tokio::time::Instant,
+    ) -> Option<Arc<AnalysisSnapshot>> {
+        let mut state = tokio::time::timeout_at(deadline, self.analysis.write())
+            .await
+            .ok()?;
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        let (snapshot, previous) = self.publish_analysis(&mut state, snapshot);
+        drop(state);
+        drop(previous);
+        Some(snapshot)
+    }
+
+    fn publish_analysis(
+        &self,
+        state: &mut AnalysisState,
+        mut snapshot: AnalysisSnapshot,
+    ) -> (Arc<AnalysisSnapshot>, Option<Arc<AnalysisSnapshot>>) {
+        snapshot.generation = state.generation.saturating_add(1);
+        let snapshot = Arc::new(snapshot);
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = state.active.replace(Arc::clone(&snapshot));
+        state.generation = snapshot.generation;
+        *metadata = AnalysisMetadata {
+            active_environment: Some(snapshot.environment_path.clone()),
+            generation: snapshot.generation,
+        };
+        (snapshot, previous)
+    }
+
+    pub(crate) fn analysis_metadata(&self) -> AnalysisMetadata {
+        self.analysis_metadata
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     pub async fn state_generation(&self) -> u64 {
@@ -449,15 +603,78 @@ impl ServerState {
     }
 
     pub async fn clear_analysis(&self) {
-        self.analysis.write().await.active = None;
+        let mut state = self.analysis.write().await;
+        let previous = state.active.take();
+        self.analysis_metadata
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_environment = None;
+        drop(state);
+        drop(previous);
     }
 
     pub(crate) async fn runtime(&self) -> MutexGuard<'_, RuntimeState> {
         self.runtime.lock().await
     }
 
+    pub(crate) fn observe_runtime(&self, runtime: &mut RuntimeState) {
+        if runtime
+            .runtime_observer
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let owner = Arc::downgrade(&self.runtime);
+        let session = Arc::downgrade(&runtime.output_log);
+        runtime.runtime_observer = Some(tokio::spawn(async move {
+            let mut exited_at = None;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let Some(owner) = owner.upgrade() else {
+                    return;
+                };
+                let Ok(mut runtime) = owner.try_lock() else {
+                    continue;
+                };
+                if !std::sync::Weak::ptr_eq(&session, &Arc::downgrade(&runtime.output_log)) {
+                    return;
+                }
+                if !runtime.is_game_running() {
+                    // Give pipe readers and the log tail one bounded drain window.
+                    let exited_at = exited_at.get_or_insert_with(Instant::now);
+                    if exited_at.elapsed() < std::time::Duration::from_millis(100) {
+                        continue;
+                    }
+                    runtime.abort_runtime_output_tasks();
+                    return;
+                }
+            }
+        }));
+    }
+
     pub async fn assets(&self) -> MutexGuard<'_, DmiCache> {
         self.assets.lock().await
+    }
+
+    pub(crate) fn asset_cache(&self) -> Arc<Mutex<DmiCache>> {
+        self.assets.clone()
+    }
+
+    pub fn asset_limits(&self) -> &crate::limits::ServerLimits {
+        &self.asset_limits
+    }
+
+    pub(crate) async fn run_asset_job<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let permit = self.asset_jobs.clone().acquire_owned().await?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await?
     }
 
     pub async fn debugger(&self) -> MutexGuard<'_, Option<DebuggerSession>> {
@@ -488,8 +705,139 @@ impl Default for ServerState {
 }
 
 #[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ParseWorkerTestControl {
+    paused: StdMutex<bool>,
+    released: std::sync::Condvar,
+    pub(crate) started: std::sync::atomic::AtomicUsize,
+    pub(crate) active: std::sync::atomic::AtomicUsize,
+    pub(crate) maximum: std::sync::atomic::AtomicUsize,
+    pub(crate) changed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(crate) struct AnalysisWriteTestGuard<'a> {
+    _guard: tokio::sync::RwLockWriteGuard<'a, AnalysisState>,
+}
+
+#[cfg(test)]
+impl ParseWorkerTestControl {
+    pub(crate) fn pause(&self) {
+        *self.paused.lock().unwrap() = true;
+    }
+
+    pub(crate) fn release(&self) {
+        *self.paused.lock().unwrap() = false;
+        self.released.notify_all();
+    }
+
+    pub(crate) fn enter(self: &Arc<Self>) -> ParseWorkerTestGuard {
+        use std::sync::atomic::Ordering::SeqCst;
+        let active = self.active.fetch_add(1, SeqCst) + 1;
+        self.maximum.fetch_max(active, SeqCst);
+        self.started.fetch_add(1, SeqCst);
+        self.changed.notify_one();
+        let guard = ParseWorkerTestGuard(self.clone());
+        let mut paused = self.paused.lock().unwrap();
+        while *paused {
+            paused = self.released.wait(paused).unwrap();
+        }
+        guard
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ParseWorkerTestGuard(Arc<ParseWorkerTestControl>);
+
+#[cfg(test)]
+impl Drop for ParseWorkerTestGuard {
+    fn drop(&mut self) {
+        self.0
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.changed.notify_one();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn asset_admission_stays_with_cancelled_workers() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        struct Gate {
+            open: StdMutex<bool>,
+            changed: std::sync::Condvar,
+        }
+        struct Release(Arc<Gate>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                *self.0.open.lock().unwrap() = true;
+                self.0.changed.notify_all();
+            }
+        }
+        let limits = crate::limits::ServerLimits {
+            max_blocking_jobs: 4,
+            ..Default::default()
+        };
+        let state = Arc::new(ServerState::with_limits(limits));
+        let gate = Arc::new(Gate {
+            open: StdMutex::new(false),
+            changed: std::sync::Condvar::new(),
+        });
+        let release = Release(gate.clone());
+        let entered = Arc::new(AtomicUsize::new(0));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let launch = || {
+            let (state, gate, entered, changed) = (
+                state.clone(),
+                gate.clone(),
+                entered.clone(),
+                changed.clone(),
+            );
+            tokio::spawn(async move {
+                state
+                    .run_asset_job(move || {
+                        entered.fetch_add(1, SeqCst);
+                        changed.notify_one();
+                        let mut open = gate.open.lock().unwrap();
+                        while !*open {
+                            open = gate.changed.wait(open).unwrap();
+                        }
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        let first: Vec<_> = (0..4).map(|_| launch()).collect();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while entered.load(SeqCst) < 4 {
+                changed.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+        for task in first {
+            task.abort();
+            let _ = task.await;
+        }
+        let fifth = launch();
+        let admitted_early = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            while entered.load(SeqCst) < 5 {
+                changed.notified().await;
+            }
+        })
+        .await
+        .is_ok();
+        drop(release);
+        fifth.await.unwrap().unwrap();
+        assert!(
+            !admitted_early,
+            "cancelled callers released permits while workers were still alive"
+        );
+        assert_eq!(entered.load(SeqCst), 5);
+    }
 
     #[test]
     fn output_log_evicts_oldest_lines_at_capacity() {

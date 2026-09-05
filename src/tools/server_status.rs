@@ -22,6 +22,8 @@ pub async fn status(context: &ToolExecutionContext, state: &ServerState) -> Resu
             "environment_path": snapshot.environment_path,
             "project_root": project_root,
             "spacemandmm_revision": snapshot.spacemandmm_revision,
+            "spacemandmm_local_patch": crate::capabilities::SPACEMANDMM_LOCAL_PATCH,
+            "spacemandmm_local_patch_sha256": crate::capabilities::SPACEMANDMM_LOCAL_PATCH_SHA256,
         })
     });
     let analysis = analysis.unwrap_or_else(|| {

@@ -1,0 +1,236 @@
+--- a/dreammaker/Cargo.toml
++++ b/dreammaker/Cargo.toml
+@@ -2,12 +2,12 @@
+ name = "dreammaker"
+ version = "0.1.0"
+ authors = ["Tad Hardesty <tad@platymuus.com>"]
+-edition.workspace = true
+-rust-version.workspace = true
++edition = "2024"
++rust-version = "1.95"
+ 
+ [dependencies]
+-interval-tree = { path = "../interval-tree" }
+-builtins-proc-macro = { path = "../builtins-proc-macro" }
++interval-tree = { version = "=0.8.0", git = "https://github.com/SpaceManiac/SpacemanDMM", rev = "351ddc0ffb2439876d4565ce5130bb6b027ee605" }
++builtins-proc-macro = { version = "=0.0.0", git = "https://github.com/SpaceManiac/SpacemanDMM", rev = "351ddc0ffb2439876d4565ce5130bb6b027ee605" }
+ bitflags = "1.3.2"
+ termcolor = "1.4.1"
+ ordered-float = "5.3.0"
+--- a/dreammaker/src/error.rs
++++ b/dreammaker/src/error.rs
+@@ -36,6 +36,8 @@
+ /// A diagnostics context, tracking loaded files and any observed errors.
+ #[derive(Debug, Default, Clone)]
+ pub struct Context {
++    read_policy: Option<std::sync::Arc<dyn ReadPolicy>>,
++    read_denied: std::cell::Cell<bool>,
+     files: FileList,
+     /// A list of errors, warnings, and other diagnostics generated.
+     errors: RefCell<Vec<DMError>>,
+@@ -89,7 +91,29 @@
+     }
+ }
+ 
++/// Host-owned policy checked immediately before derived file reads.
++pub trait ReadPolicy: std::fmt::Debug + Send + Sync {
++    fn resolve(&self, path: &Path) -> io::Result<PathBuf>;
++}
++
+ impl Context {
++    pub fn set_read_policy(&mut self, policy: std::sync::Arc<dyn ReadPolicy>) {
++        self.read_policy = Some(policy);
++    }
++
++    pub fn resolve_read_path(&self, path: &Path) -> io::Result<PathBuf> {
++        match &self.read_policy {
++            Some(policy) => policy
++                .resolve(path)
++                .inspect_err(|_| self.read_denied.set(true)),
++            None => Ok(path.to_owned()),
++        }
++    }
++
++    pub fn read_denied(&self) -> bool {
++        self.read_denied.get()
++    }
++
+     // ------------------------------------------------------------------------
+     // Files
+ 
+@@ -121,7 +145,10 @@
+     // Configuration
+ 
+     pub fn force_config(&mut self, toml: &Path) {
+-        match Config::read_toml(toml) {
++        let Ok(checked) = self.resolve_read_path(toml) else {
++            return;
++        };
++        match Config::read_toml(&checked) {
+             Ok(config) => self.config = config,
+             Err(io_error) => {
+                 let file = self.register_file(toml);
+--- a/dreammaker/src/lexer.rs
++++ b/dreammaker/src/lexer.rs
+@@ -705,7 +705,18 @@
+         path: &std::path::Path,
+     ) -> Result<Self, DMError> {
+         let start_time = std::time::Instant::now();
+-        let input = buffer_file(file, path)?;
++        let checked = context.resolve_read_path(path).map_err(|error| {
++            DMError::new(
++                Location {
++                    file,
++                    line: 1,
++                    column: 1,
++                },
++                "i/o error opening file",
++            )
++            .with_cause(error)
++        })?;
++        let input = buffer_file(file, &checked)?;
+         context.add_io_time(start_time.elapsed());
+         Ok(Lexer::new(context, file, input))
+     }
+--- a/dreammaker/src/lib.rs
++++ b/dreammaker/src/lib.rs
+@@ -227,3 +227,5 @@
+ ) -> impl Iterator<Item = lexer::LocatedToken> {
+     indents::IndentProcessor::new(context, input)
+ }
++
++pub use error::ReadPolicy;
+--- a/dreammaker/src/preprocessor.rs
++++ b/dreammaker/src/preprocessor.rs
+@@ -678,13 +678,18 @@
+ 
+     fn prepare_include_file(&mut self, path: PathBuf) -> Result<Include<'ctx>, DMError> {
+         // Attempt to open the file.
+-        let read = io::BufReader::new(File::open(&path).map_err(|e| {
+-            DMError::new(
+-                self.last_input_loc,
+-                format!("failed to open file: #include {path:?}"),
+-            )
+-            .with_cause(e)
+-        })?);
++        let read = io::BufReader::new(
++            self.context
++                .resolve_read_path(&path)
++                .and_then(File::open)
++                .map_err(|e| {
++                    DMError::new(
++                        self.last_input_loc,
++                        format!("failed to open file: #include {path:?}"),
++                    )
++                    .with_cause(e)
++                })?,
++        );
+ 
+         // Get the path relative to the environment root, for easy lookup later.
+         let register = path
+--- a/dmm-tools/Cargo.toml
++++ b/dmm-tools/Cargo.toml
+@@ -2,15 +2,15 @@
+ name = "dmm-tools"
+ version = "0.1.0"
+ authors = ["Tad Hardesty <tad@platymuus.com>"]
+-edition.workspace = true
+-rust-version.workspace = true
++edition = "2024"
++rust-version = "1.95"
+ 
+ [dependencies]
+ inflate = "0.4.5"
+ ndarray = "0.17.2"
+ rand = "0.10.1"
+-dreammaker = { path = "../dreammaker" }
+-dmi = { path = "../dmi" }
++dreammaker = { version = "=0.1.0", git = "https://github.com/SpaceManiac/SpacemanDMM", rev = "351ddc0ffb2439876d4565ce5130bb6b027ee605" }
++dmi = { version = "=0.1.0", git = "https://github.com/SpaceManiac/SpacemanDMM", rev = "351ddc0ffb2439876d4565ce5130bb6b027ee605" }
+ lodepng = "3.10.7"
+ indexmap = "2.6.0"
+ foldhash = "0.2.0"
+--- a/dmm-tools/src/icon_cache.rs
++++ b/dmm-tools/src/icon_cache.rs
+@@ -9,9 +9,22 @@
+ pub struct IconCache {
+     lock: RwLock<HashMap<PathBuf, Option<Arc<IconFile>>, RandomState>>,
+     icons_root: Option<PathBuf>,
++    read_policy: Option<Arc<dyn dreammaker::ReadPolicy>>,
++    read_denied: std::sync::atomic::AtomicBool,
+ }
+ 
+ impl IconCache {
++    pub fn with_read_policy(policy: Arc<dyn dreammaker::ReadPolicy>) -> Self {
++        Self {
++            read_policy: Some(policy),
++            ..Self::default()
++        }
++    }
++
++    pub fn read_denied(&self) -> bool {
++        self.read_denied.load(std::sync::atomic::Ordering::Relaxed)
++    }
++
+     pub fn retrieve_uniq(&mut self, path: &Path) -> Option<&IconFile> {
+         let map = self.lock.get_mut().unwrap();
+         (match map.entry(path.to_owned()) {
+@@ -19,8 +32,12 @@
+             hash_map::Entry::Vacant(entry) => entry
+                 .insert(
+                     match &self.icons_root {
+-                        Some(root) => load(&root.join(path)),
+-                        _ => load(path),
++                        Some(root) => load(
++                            &root.join(path),
++                            self.read_policy.as_deref(),
++                            &self.read_denied,
++                        ),
++                        _ => load(path, self.read_policy.as_deref(), &self.read_denied),
+                     }
+                     .map(Arc::new),
+                 )
+@@ -36,8 +53,12 @@
+             Some(existing) => existing,
+             None => {
+                 let arc = match &self.icons_root {
+-                    Some(root) => load(&root.join(path)),
+-                    None => load(path),
++                    Some(root) => load(
++                        &root.join(path),
++                        self.read_policy.as_deref(),
++                        &self.read_denied,
++                    ),
++                    None => load(path, self.read_policy.as_deref(), &self.read_denied),
+                 }
+                 .map(Arc::new);
+                 self.lock
+@@ -54,7 +75,27 @@
+     }
+ }
+ 
+-fn load(path: &Path) -> Option<IconFile> {
++fn load(
++    path: &Path,
++    policy: Option<&dyn dreammaker::ReadPolicy>,
++    denied: &std::sync::atomic::AtomicBool,
++) -> Option<IconFile> {
++    let checked;
++    let path = if let Some(policy) = policy {
++        match policy.resolve(path) {
++            Ok(path) => {
++                checked = path;
++                &checked
++            },
++            Err(_) => {
++                denied.store(true, std::sync::atomic::Ordering::Relaxed);
++                return None;
++            },
++        }
++    } else {
++        path
++    };
++
+     match IconFile::from_file(path) {
+         Ok(loaded) => Some(loaded),
+         Err(err) => {

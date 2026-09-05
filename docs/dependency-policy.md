@@ -37,3 +37,5 @@ covered by these maintenance-only exceptions.
 SpacemanDMM's root license at the pinned revision is detected as GPL-3.0-or-later. The cargo-deny
 clarifications, including the `dmi` crate which omits a manifest license field, are hash-locked to that file so a source-license change fails closed. Binary distributors
 must evaluate obligations for the complete graph. This is not legal advice.
+
+The baseline also carries the locally vendored `meridian-read-policy-v2` actual-open hooks for dreammaker and dmm-tools. Review the [complete local delta and license](../vendor/spacemandmm/README.md) independently of the unchanged upstream revision. The capability audit verifies its declared delta hash. Helper builds and CI upstream checkout pins remain at the exact baseline; they are not claims that those separate helper executables enforce these in-process hooks.

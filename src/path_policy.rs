@@ -277,3 +277,10 @@ fn error(
         context: Box::new(context),
     }
 }
+
+impl dreammaker::ReadPolicy for PathPolicy {
+    fn resolve(&self, path: &Path) -> std::io::Result<PathBuf> {
+        self.read_path(path)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))
+    }
+}
