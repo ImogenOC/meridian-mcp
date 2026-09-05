@@ -227,7 +227,8 @@ cargo +1.95.0 deny check
 - [ ] Run a separately authorized real Meridian-Rift profiling session. This was not requested during local remediation.
 - [ ] Run the destructive full-build compatibility script only in a disposable checkout explicitly authorized for that gate. Report hosted Windows/Linux CI separately from local checks.
 - [x] Verify `git diff --check`, inspect the complete diff, scrub durable reports, and confirm only authorized changes remain. Leave everything uncommitted.
-- [ ] Prepare the exact install/configuration diff and binary identity for approval if deployment is requested. After authorized installation, state that Codex must be fully quit and reopened; then verify status, parse, repeated reuse, cached diagnostics, and search through the newly exposed app tools.
+- [x] Install the user-authorized pushed release, verify its binary identity and standalone startup, and update Codex registration with a configuration backup. See the [restart handoff](../../audits/2026-09-05-codex-restart-handoff.md).
+- [x] After Codex is fully quit and reopened, verify status, parse, repeated reuse, cached diagnostics, and search through the newly exposed app tools. Passed on 2026-09-05; see the restart handoff.
 
 **Final acceptance matrix:** every finding has a passing regression, every affected capability has a named integration result, and every unrun or blocked gate is explicit. Do not declare deployed, live-qualified, or performance-improved based only on a local Rust green.
 
@@ -235,7 +236,9 @@ cargo +1.95.0 deny check
 
 Tasks 1–9 and the added Task 5b are implemented and independently reviewed. Authorized local Task 10 qualification is complete: Windows 388 / Linux 381 Rust tests passed, strict lint/format/dependency gates passed, both release stdio modes passed, and Windows owned runtime, provenance, debugger and full-duration Tracy fixtures passed. Five sequential real-corpus measurements and their limits are recorded in the [qualification report](../../audits/2026-09-05-remediation-verification.md). All final Windows runtime checks were repeated after the scale gate relinked the executable; the report identifies the exact final bytes.
 
-Linux live x86 execution is unavailable on the current WSL1 host. Hosted CI, destructive full-build compatibility, real-game profiling, installation and post-restart app-tool acceptance remain separate unrun gates. Changes remain uncommitted.
+The user committed and pushed remediation as `da29e984b7d7cf1c31cac9f64b1d1d93c13c0ff9`; all six hosted CI jobs passed. The clean release is installed and selected in Codex. Installed standalone status, parse/reuse, cached diagnostics, canonical search and documentation generation passed; exact identities and preserved settings are recorded in the [restart handoff](../../audits/2026-09-05-codex-restart-handoff.md). Deployment documentation updates remain uncommitted.
+
+Post-restart app-tool acceptance passed for the installed build: status identity, fresh parse, repeated reuse, cached diagnostics and exact search. Linux live x86 execution is unavailable on the current WSL1 host. Destructive full-build compatibility and real-game profiling remain separate unrun gates.
 
 ## Follow-up identified during qualification: debugger stop latency
 

@@ -1,5 +1,7 @@
 # MCP audit remediation verification — 2026-09-05
 
+This report records pre-deployment qualification. Subsequent commit, hosted CI, installation and Codex registration results are recorded in the [restart handoff](2026-09-05-codex-restart-handoff.md); the historical identities and measurements below are retained.
+
 Tasks 1–9, including the added Unix ownership Task 5b, are implemented and independently reviewed. Authorized local qualification passed. The debugger stop latency observed below remains a follow-up; hosted, installation and real-game gates remain separate.
 
 ## Scope and identity
